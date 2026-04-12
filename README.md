@@ -4,7 +4,7 @@ Counter-Spy.ai is a specialized security operations platform designed to provide
 
 ## 📚 Documentation
 - [Technical Architecture & Specifications](./docs/ARCHITECTURE.md) - Deep dive into the Shield-and-Sword pattern and heuristics.
-- [Analyst & Administrator Operations Guide](./docs/ANALYST_GUIDE.md) - Standard Operating Procedures for SOC personnel.
+- [Analyst & Administrator Operations Guide](https://github.com/natecarroll-hue/CounterAgent/blob/main/OPERATIONS_GUIDE.MD) - Standard Operating Procedures for SOC personnel.
 
 > [!IMPORTANT]
 > **Sanitized Pass-through Guarantee**: Only the redacted version of a prompt is ever sent to the inference engine. Raw PII and secrets are neutralized at the local sanitization layer before any external API call is initiated.

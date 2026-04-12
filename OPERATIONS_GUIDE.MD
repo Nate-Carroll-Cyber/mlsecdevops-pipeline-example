@@ -1,6 +1,6 @@
 ---
 
-# 🛡️ Analyst & Administrator Operations Guide: Counter-Spy.ai
+# 🛡️ Analyst & Administrator Operations Guide: Counter-Spy.ai 
 
 | Version | Date | Description |
 | :--- | :--- | :--- |

@@ -1,248 +1,148 @@
-# 🔐 Secure GenAI CounterAgent Assistant (AWS + Adversarial AI Defense)
+# Counter-Spy.ai: Adversary-Aware Security Governance Assistant
+
+Counter-Spy.ai is a specialized security operations platform designed to provide citation-backed advisory guidance while maintaining strict governance over AI interactions. It features a multi-layered sanitization pipeline that detects and intercepts adversarial attempts before they reach the LLM.
+
+## 📚 Documentation
+- [Technical Architecture & Specifications](./docs/ARCHITECTURE.md) - Deep dive into the Shield-and-Sword pattern and heuristics.
+- [Analyst & Administrator Operations Guide](./docs/ANALYST_GUIDE.md) - Standard Operating Procedures for SOC personnel.
+
+> [!IMPORTANT]
+> **Sanitized Pass-through Guarantee**: Only the redacted version of a prompt is ever sent to the inference engine. Raw PII and secrets are neutralized at the local sanitization layer before any external API call is initiated.
+
+## 🛡️ Core Security Architecture
+
+The application implements a **Defense-in-Depth** strategy for AI interactions:
+
+### 1. Local Sanitization Pipeline (The Filter)
+Before any prompt is sent to the AI model, it passes through a local TypeScript-based sanitization layer:
+- **PII & Secret Redaction**: Automatically detects and masks emails, AWS keys, IP addresses, credit card patterns, phone numbers, and SSNs. It also redacts the actual values of secret keys and passwords.
+- **Regex Detection**: Evaluates input against configurable regular expressions to catch sophisticated prompt injection and instruction bypass attempts. Supports `break-all` formatting for complex, lengthy patterns.
+- **Normalization**: Flattens input (e.g., leetspeak conversion) to prevent keyword bypasses.
+- **Entropy Analysis (Sliding Window)**: Calculates Shannon entropy using a sliding window approach (35-character windows, 5-character steps) to detect localized high-entropy payloads (Base64, Hex, etc.) and prevent **Token Dilution** attacks. 
+  - **Math**: $$H(X) = -\sum_{i=1}^{n} P(x_i) \log_2 P(x_i)$$
+  - **Global Entropy**: The average randomness across the entire prompt.
+  - **Max Window Entropy**: The highest randomness found in any specific 35-character chunk. This defeats token dilution, where an attacker attempts to hide a high-entropy payload within paragraphs of normal, low-entropy text.
+  - **Thresholds**: Normal < 4.5, Suspicious 4.5-5.5, Adversarial > 5.5.
+- **Syntactic Complexity Analyzer**: Real-time detection of instruction stacking, probing, and model reverse engineering. 
+  - **Logic**: Analyzes constraint density and special character ratios using an inverse match regex `/[a-zA-Z0-9\s]/g`. This captures code-like syntax and URL-encoded strings that attempt to bypass semantic filters.
+  - Features analysis of sentence verbosity to flag highly complex, obfuscated prompts. Accessible via the Analyst Playground and integrated into the core firewall.
+- **Keyword & Topic Filtering**: Matches input against configurable lists of blocked phrases and forbidden topics. Includes a curated default blocklist for detecting roleplay-based injections, reviewed against known jailbreak corpora.
+- **Anti-ReDoS Circuit Breaker**: Local sanitization execution time (`latencyMs`) is strictly monitored via high-resolution timing. Payloads exhibiting Catastrophic Backtracking or intentional CPU lock-up attempts are instantly blocked and logged as `Adversarial` if execution exceeds 100ms, preventing Denial of Service attacks on the client environment.
+- **Persistent Preview**: Live sanitization results remain visible after execution as "Last Execution Results" until a new prompt is initiated.
+
+### 2. Output Sanitization Layer (The Guard)
+A secondary sanitization layer is applied to all LLM responses:
+- **Keyword Redaction**: Scans the model's output and masks any blocked keywords or forbidden topics with `[REDACTED_KEYWORD]`.
+- **PII Leak Prevention**: Re-applies PII redaction to the model's response to prevent accidental data leakage.
+
+### 3. Governance Engine
+The system evaluates the sanitization results against active guardrails and provides real-time administrative controls:
+- **Adversarial Interception**: If high entropy (>5.5) or high syntactic complexity (>90) is detected, the request is blocked locally as Adversarial.
+- **Suspicious Interception**: If blocked keywords, forbidden topics, or suspicious entropy (>4.5) are detected, the request is blocked locally as Suspicious.
+- **Human-in-the-Loop (HITL) Mode**: When activated, automatically intercepts borderline traffic (e.g., Entropy > 4.5 or Syntactic Complexity > 50) and routes it to a manual review queue (`PENDING_REVIEW`), allowing human analysts to intervene before the payload reaches the inference engine.
+- **Forbidden Topics Enforcement**: A semantic governance layer that instructs the model to refuse and flag (via `[VIOLATION]` tags) any discussion of forbidden topics (e.g., Finances, Politics).
+
+### 4. Operator Controls
+- **Governance Status**:
+  - **ACTIVE (Green)**: All core guardrails are enabled.
+  - **REDUCED (Orange)**: One or more critical guardrails (PII Redaction, Logging, Blocked Keywords, or Blocked Topics) are disabled.
+  - **DISABLED (Red)**: All guardrails are disabled.
+- **Hide Simulated Traffic**: A toggleable filter in the Analyst Sidebar that instantly removes synthetic/simulated traffic from the Audit Logs and Metrics Dashboard, allowing analysts to focus on real-world adversarial activity.
+- **Global System Pause (DEFCON 1)**: A real-time "kill switch" that halts 100% of automated inference. Incoming prompts are instantly routed to the manual review queue to ensure zero data leakage during coordinated attacks. The SOC dashboard transitions to a high-visibility crimson alert state.
+
+### 5. AI Inference (Gemini 3 Flash)
+- **System Instructions**: The model is governed by a strict system prompt that defines its persona as a security analyst and forbids revealing internal configurations.
+- **Semantic Filtering**: The model acts as a semantic guardrail, identifying and refusing requests that relate to forbidden topics even if they don't use exact keywords.
+- **Low Temperature**: Set to `0.2` to minimize stochastic variation and improve response determinism.
+
+## 📦 Security Mitigations & Dependency Management
+
+To ensure the integrity of the security operations platform, Counter-Spy.ai implements strict dependency governance:
+- **React Server Components (RCE) Mitigation**: `react` and `react-dom` are pinned to `19.0.4` to mitigate CVE-2025-55182 and related DoS vulnerabilities.
+- **Vite Dev Server Security**: Vite is upgraded to `^8.0.5` to mitigate arbitrary file read and path traversal vulnerabilities (CVE-2025-31125, CVE-2025-32395, CVE-2026-39363, GHSA-v2wj-q39q-566r, GHSA-4w7w-66w2-5vf9).
+- **Stored XSS Prevention**: `react-markdown` is configured to explicitly disallow `rehype-raw`, preventing malicious HTML/JS injection from LLM outputs or compromised Firestore policy documents.
+- **Supply Chain Security**: Regular expression detection patterns have been internalized rather than sourced dynamically, and CLI tools like `shadcn` are strictly isolated to `devDependencies`.
+
+## 📊 Key Features
+
+- **Advanced Audit Trail**: Every interaction is logged with its entropy score, detection flags, and a unique Session ID. The audit table features **multi-column sorting**, optimized column spacing, and **Full Prompt Inspection**—allowing analysts to click any truncated prompt to view the complete text in a scrollable, text-only pop-up dialog.
+- **Anomaly Detection & Metrics Dashboard**: A dedicated dashboard for real-time threat velocity analysis. It compares current hourly threat rates against a 24-hour baseline to identify significant spikes in adversarial activity. Utilizes real-time Z-Score calculations ($Z = \frac{x - \mu}{\sigma}$) to distinguish between random noise and coordinated automated attacks. Features a critical alert banner for immediate incident response and a time-series chart for trend analysis.
+- **Analyst Review Workflow**: Administrators can review **all** interactions (including those marked as Clean) to catch false negatives. The workflow supports **Multi-Tier Review**, allowing analysts to re-edit and update the **Resultant Severity** at any time as new threat intelligence becomes available.
+  - **False Negative Highlighting**: Logs pre-labeled as "Adversarial" (via the Bulk Ingestor) that are classified as "Clean" by the system are automatically highlighted with a red border and an **FN (False Negative)** badge, allowing for rapid identification of firewall bypasses.
+  - *The platform automatically calculates both the strict False Positive Rate (FPR) and the Analyst Reclassification Rate, ensuring the firewall's regex and entropy thresholds can be tuned to balance robust security with a frictionless user experience.*
+- **Automated Golden Set Refinement**: Administrators can "Promote" specific audit logs to a **Golden Set** for future DPO (Direct Preference Optimization) fine-tuning. This captures the prompt, the AI's response, and a user-provided "Rejected" reason in a structured JSON format. Supports **one-click JSON export** of the entire set for training pipelines.
+- **Dynamic Guardrails**: Administrators can toggle security features (PII Redaction, Entropy Filtering, Blocked Keywords, Blocked Topics, Logging, etc.) on the fly.
+- **Knowledge Base**: Integrated security policies, MITRE ATLAS mapping, Markdown-rendered System Configuration, and full lifecycle management (upload/delete) of custom `.md` documents. Includes a dedicated **Fine-Tuning Training Data** section for managing the Golden Set.
+- **Analyst Mode**: A toggleable administrative view for managing system configurations and reviewing logs.
+- **Analyst Playground**: A dedicated sandbox environment featuring the Syntactic Complexity Analyzer, allowing security teams to test and tune firewall thresholds against complex prompt injection attempts in real-time.
+- **Bulk Ingest Simulator**: A high-velocity ingestion utility for processing `.txt` files of prompts (one per line). Features **Base Delay + Random Jitter** (3-10s) to simulate realistic traffic patterns while respecting API rate limits. Integrated with the **Screen Wake Lock API** to maintain session persistence during long-running batch operations.
+  - **DPO Pre-labeling**: Supports optional `Batch ID` and `Expected Verdict` assignment during ingest, facilitating the collection of high-quality training data for model fine-tuning.
+
+## 📋 Audit Log Schema
+
+Every interaction is captured in Firestore with the following schema:
+
+| Field | Type | Description |
+| :--- | :--- | :--- |
+| `userId` | `string` | Unique Firebase UID of the user. |
+| `sessionId` | `string` | Unique identifier for the chat session. |
+| `timestamp` | `timestamp` | Server-side creation time. |
+| `sanitizedPrompt` | `string` | The prompt after PII/Secret redaction. |
+| `detectionFlags` | `string[]` | Types of security triggers detected (e.g., `EMAIL`, `AWS_KEY`). |
+| `entropy` | `number` | Shannon entropy score of the input. |
+| `detectionLevel` | `integer` | 0: Clean, 1: Info, 2: Suspicious, 3: Adversarial. |
+| `escalationRecommended` | `boolean` | True if high-risk patterns were detected. |
+| `reviewed` | `boolean` | Whether an analyst has reviewed the log. |
+| `status` | `string` | The current status of the log (e.g., `PENDING_REVIEW`, `REVIEWED`). |
+| `resultantSeverity` | `string` | Final severity assigned by an analyst (Clean to Adversarial). |
+| `response` | `string` | The AI's generated response to the prompt. |
+| `promoted` | `boolean` | Whether the log has been added to the Golden Set. |
+| `isSimulation` | `boolean` | True if the log originated from the Bulk Ingest Simulator. |
+| `batchId` | `string` | Unique identifier for a specific bulk ingest run. |
+| `expectedVerdict` | `string` | The pre-labeled expected outcome (e.g., `Adversarial`) for DPO analysis. |
 
-**This project demonstrates a secure, adversary-aware GenAI architecture aligned with MITRE ATLAS, CSA MAESTRO, and NIST AI RMF.**
+## 🏗️ Deployment Architecture
 
-## Overview
+- **Cloud Infrastructure**: AWS (ECS Fargate, Bedrock) · Google Cloud (Firestore via Firebase).
+- **Containerization**: Docker (Multi-stage builds, non-root execution).
+- **Inference Gateway**: Hybrid support for `@google/genai` and AWS Bedrock SDK.
 
-A production-minded reference implementation for a secure GenAI assistant for security operations.  
-Combines **local inference for sensitive content**, **RAG for sanitized knowledge**, and **multi-layer adversarial defenses** to enable safe LLM usage while minimizing prompt injection, data leakage, and model abuse.
+## 🛠️ Tech Stack
 
----
+- **Frontend**: React 19, Vite, Tailwind CSS 4, Shadcn UI.
+- **Charting**: Recharts (Composable React charting library).
+- **UI/UX**: Modernized dark-themed interface with Geist typography, fluid animations, and an **auto-resizing chat input** with smart scrolling for lengthy prompts.
+- **Backend/Database**: Firebase (Firestore, Authentication).
+- **AI Engine**: Gemini 3 Flash via `@google/genai` (`^1.48.0`).
+- **Animations**: Motion (Framer Motion).
+- **Responsive Layout**: Optimized flexbox architecture ensuring sidebars and chat windows maintain visibility and scrollability during high-volume interactions.
 
-## Objectives
+## 🚀 Getting Started
 
-- Build a **secure AI assistant** for SOC analysts and security engineers.  
-- Prevent **prompt injection, model extraction, and data exfiltration**.  
-- Enforce **governance-aligned AI controls** and auditability.  
-- Provide **traceable, citation-based responses** with section-level provenance.  
-- Deliver a production-ready architecture with clear operational runbooks.
+### Environment Variables
 
----
+> [!WARNING]
+> Never commit `.env` to version control. For production deployments, 
+> use AWS Secrets Manager as documented in the SBOM.
 
-## Architecture Overview
+Create a `.env` file with the following:
+```env
+GEMINI_API_KEY=your_gemini_api_key
+```
 
-**Flow**: User → API (FastAPI) → Lambda sanitization → RAG (OpenSearch) → Model routing (Ollama local / Bedrock) → Guardrails → Response → CloudWatch logs
+### Installation
+1. Clone the repository.
+2. Install dependencies: `npm install`
+3. Start the development server: `npm run dev`
 
-**Key Components**
-- **FastAPI** — Chat UI and API layer  
-- **Lambda** — Input normalization, sanitization, adversarial detection  
-- **OpenSearch Serverless** — Vector store and retrieval  
-- **Ollama (local)** — Inference for sensitive internal queries  
-- **AWS Bedrock** — Inference for general knowledge queries (optional)  
-- **Terraform** — Infrastructure as Code  
-- **ECR + EC2** — Containerized deployment for Ollama and services
+### Customization
+To update the application logo, modify the `APP_LOGO_URL` constant in `src/App.tsx`. This constant should point to a public URL of your desired PNG image.
 
----
+## 🔒 Data Disclosure Detection
 
-## Security Architecture
+To detect and prevent unauthorized data disclosure, a unique **Canary Token** is embedded within the system's documentation. This token is strictly monitored and must not be disclosed within training data, audit logs, prompts, or AI responses.
 
-### Multi-Layer Defense
-| Layer | Controls |
-|---|---|
-| **Input** | Sanitization, entropy detection, regex-based secret removal |
-| **Retrieval** | Metadata filtering, trust-tier enforcement, sanitized excerpts only |
-| **Model** | Prompt guardrails, instruction constraints, local inference for sensitive data |
-| **Output** | Redaction, verbatim leakage detection, citation enforcement |
-| **Infrastructure** | VPC endpoints, IAM least privilege, Secrets Manager |
-| **Operations** | Immutable logging, monitoring, escalation playbooks |
+The sanitization pipeline is configured to automatically redact this token if it appears in any system interaction.
 
----
-
-## Threat Model
-
-Aligned to MITRE ATLAS and CSA MAESTRO in an AWS context. Primary threats:
-- **Prompt Injection**  
-- **Model Extraction**  
-- **Data Leakage**  
-- **RAG Poisoning**  
-- **Privilege Escalation**
-
-See `THREAT_MODEL.md` for detailed mappings and mitigations.
-
----
-
-## Detection and Adversarial Signals
-
-**Signals monitored**
-- High-entropy payloads and encoded inputs  
-- Repeated boundary probing and session anomalies  
-- Large verbatim outputs and unusual token patterns  
-- Obfuscated or concatenated prompts
-
-**Detection layers**
-1. **Input Layer** — Lambda normalization and pattern detection  
-2. **Behavioral Layer** — Session risk scoring and repeated-query heuristics (phase 2+)  
-3. **Output Layer** — Post-model filtering and leakage detection
-
----
-
-## RAG and Data Governance
-
-**Data Policy**
-- **Never** send credentials, secrets, raw logs with PII, or detailed architecture diagrams to any external model.  
-- **Conditional** documents require metadata tagging and sanitization before embedding.  
-- **Allowed** content: sanitized runbooks, MITRE ATLAS mappings, security SOPs.
-
-**Indexing Rules**
-- Source-level metadata: `sensitivity`, `owner`, `last_updated`, `trust_tier`.  
-- Embeddings: **sanitized excerpts only** for conditional content; **never** embed `never-embed` documents.
-
-**Citation Model**
-- Responses include **document name**, **section header**, **snippet excerpt**, and **metadata** (timestamp, source id).
-
----
-
-## Model Strategy
-
-| Query Type | Model |
-|---|---|
-| Sensitive internal queries | **Ollama** (local inference inside VPC) |
-| General knowledge queries | **AWS Bedrock** (private endpoints where available) |
-
-Routing rules enforce that sensitive-tagged content never leaves the local inference path.
-
----
-
-## Project Plan Summary
-
-**Duration**: 8–12 weeks  
-**Phases**:
-- **Phase 0 Planning and Prep** (week 0–1) — intake, RACI, infra skeleton  
-- **Phase 1 Secure MVP Build** (week 2–4) — chat API, sanitization, local model, RAG index  
-- **Phase 2 Detection and Guardrails** (week 4–6) — adversarial detectors, multi-layer guardrails, logging  
-- **Phase 3 Pilot and Validation** (week 6–8) — 2–3 week pilot with 5–10 analysts, red-team testing  
-- **Phase 4 Iterate and Harden** (week 8–12) — remediation, production IaC, runbooks
-
-### Definition of Done per Phase
-**Phase 0**
-- Intake form completed; S3 paths validated; RACI confirmed.  
-**Phase 1**
-- Secure chat API deployed and accessible.  
-- Input sanitization pipeline active and tested.  
-- Ollama P95 latency ≤ 2.5s.  
-- RAG citations meet ≥ 75% precision@k on validation set.  
-- No sensitive data leaves local inference path.  
-**Phase 2**
-- Multi-layer guardrails active.  
-- Adversarial detector passes internal suite ≥ 80% detection.  
-- Logging and immutable audit trail validated.  
-**Phase 3**
-- Pilot KPIs meet fallback or target thresholds.  
-- Red-team findings remediated or accepted with mitigation plan.  
-**Phase 4**
-- Production IaC and runbooks completed; operational handoff signed off.
-
----
-
-## Security Gates
-
-Progression between phases requires explicit checks and signoffs.
-
-- **Phase 1 → Phase 2**
-  - Secrets migrated to AWS Secrets Manager  
-  - No public exposure of model ports  
-  - IAM least privilege validated
-- **Phase 2 → Phase 3**
-  - Adversarial test suite ≥ 80% detection  
-  - No critical data leakage observed  
-  - Logging and audit trail validated
-- **Phase 3 → Phase 4**
-  - Pilot KPIs meet thresholds  
-  - No unresolved high-risk findings  
-  - Threat model reviewed and updated
-
-Gate owners: **Infra Lead** for infra gates, **Security SME** for adversarial gates, **Architect** for final signoff.
-
----
-
-## Adversarial Detection Architecture
-
-**Input Layer (Lambda)**
-- Normalization, HTML/script stripping, regex secret removal, entropy scoring.
-
-**Behavioral Layer (Session)**
-- Repeated-query detection, boundary probing heuristics, session risk scoring.
-
-**Output Layer**
-- Response filtering, verbatim leakage detection, citation cross-checks, redaction.
-
-Detection outputs feed the audit trail and trigger escalation flags for human review.
-
----
-
-## Failure Classification
-
-| Failure Type | Severity | Example |
-|---|---|---|
-| False Negative | **Critical** | Successful injection or data leakage |
-| False Positive | Medium | Legitimate query blocked |
-| Model Failure | Medium | Model unavailable or high latency |
-| RAG Failure | Low | Reduced retrieval relevance |
-
-**Priority principle**: Prevent False Negatives > Manage False Positives.
-
----
-
-## Testing and Red Teaming
-
-**Adversarial tests**
-- Prompt injection corpus, extraction attempts, jailbreak scenarios, RAG manipulation.
-
-**Validation metrics**
-- Prompt injection detection rate (target ≥ 85% for MVP)  
-- False negative rate (target ≤ 5% for known patterns)  
-- RAG precision@k (target ≥ 75%)  
-- Response latency P95 ≤ 2.5s
-
-Cadence: pre-MVP, pre-pilot, quarterly thereafter.
-
----
-
-## Monitoring and Observability
-
-**Metrics**
-- Query volume, latency (P95), adversarial detection rate, RAG precision, error rates, escalation events.
-
-**Logging**
-- Fields: user id, role, sanitized prompt, retrieved doc ids, model id, response hash, detection flags.  
-- Storage: AWS CloudWatch (60-day retention, immutable for MVP).
-
-**Alerts**
-- Injection detection spikes, model unavailability, RAG degradation, suspicious query patterns.
-
----
-
-## Deployment
-
-**Infrastructure**
-- Terraform modules for VPC, IAM, EC2, ECR, Security Groups, OpenSearch.
-
-**Deployment flow**
-- Build Docker images → Push to ECR → Deploy to EC2/ECS → Start Ollama and API services.
-
-**Secrets**
-- Migrate from .env to AWS Secrets Manager; rotation every 60–90 days.
-
----
-
-## Future Enhancements
-
-- Knowledge Graph integration for ATLAS correlation and richer provenance.  
-- Session-based adversarial risk scoring and automated playbook execution.  
-- SIEM / SOAR integration for automated escalation and ticketing.  
-- Private Bedrock endpoints for full VPC isolation.  
-- Automated model evaluation and continuous RAG re-indexing.
-
----
-
-## Author and Contacts
-
-**Author**: Senior AWS Architect (project lead)  
-**Initial Owners**: Architect / Infra Lead / Security SME (see `PROJECT_PLAN.md` for RACI)  
-For intake and content submission use: `s3://secure-llm-rag/` and complete the prioritized intake form.
-
----
-
-## Key Takeaway
-
-Secure AI systems require **adversarial thinking**, **layered controls**, **strict data governance**, and **continuous validation**. This project provides a pragmatic, governance-aligned blueprint to safely operationalize GenAI for security operations.
+## 📜 Governance Policy
+This application is designed for security professionals. All bypass attempts are automatically detected, blocked, and permanently logged in the immutable Audit Trail. Attempting to bypass the sanitization layer is a violation of the system's governance policy.

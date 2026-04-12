@@ -6,8 +6,6 @@
 | :--- | :--- | :--- |
 | **v1.9.3-Alpha** | 2026-04-12 | Initial Release: HITL/HOTL Orchestration & Bulk Ingest Utilities. |
 
----
-
 ## 1. Executive Summary
 Counter-Spy.ai is an **Adversary-Aware Security Gateway**. Unlike traditional firewalls, it does not just look for "bad words"; it analyzes the **intent, complexity, and randomness** of incoming traffic to identify zero-day prompt injections and model reverse-engineering attempts. 
 

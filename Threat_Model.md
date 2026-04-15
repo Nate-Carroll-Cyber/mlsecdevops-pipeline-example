@@ -92,10 +92,25 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 
 ---
 
+#### 9. Repudiation (The "Forensic Gap")**
+* **Threat:** **Evading Audit via TTL Mismatches**
+* **MITRE ATLAS Mapping:** **AML.TA0005 (Defense Evasion)**
+* **Description:** The spec explicitly notes a "Forensic Gap Awareness." Google Gemini retains API abuse logs for 55 days. If the organization configures their Firestore TTL (Time-to-Live) to purge logs after 30 days to save costs, an attacker could launch a subtle attack, wait 31 days, and their local Audit Log will be permanently deleted while Google still holds the downstream inference record. 
+* **Mitigation:** The organization must mandate that the Firestore TTL strictly equals or exceeds the foundational model provider's retention policy (e.g., minimum 60 days).
+
+---
+
+#### 10. Denial of Service (The "Fail-Secure" Weaponization)**
+* **Threat:** **Self-Inflicted DoS via Database Severance**
+* **MITRE ATLAS Mapping:** **AML.T0029 (Denial of ML Service)**
+* **Description:** Because the system prioritizes security over availability (Fail-Secure), an attacker doesn't need to bypass the sanitization engine to take the AI offline. If they can execute a network-level DoS attack specifically against the connection between the Shield Engine and the Firestore config database, the system will instantly default to `isGlobalPause: true`, cutting off all legitimate business access to the LLM. 
+* **Mitigation:** Ensure highly redundant, internal-only VPC peering between the application containers and the database to prevent external network disruption of the governance sync.
+
+---
+
 ### Appendix — Key Operational Thresholds and Controls
 - **Entropy bands:** `Normal < 4.5`, `Suspicious 4.5–5.5`, `Adversarial > 5.5`  
 - **Sanitization order:** `Normalize (NFKC)` → `Strip non‑printables` → `Entropy scan` → `Regex detection` → `Output filter`  
 - **Audit logging:** Dual records (escaped raw + normalized ASCII) with immutable metadata and RBAC for access
 
 ---
-- Generate a **checklist** of prioritized engineering tasks derived from the mitigations.

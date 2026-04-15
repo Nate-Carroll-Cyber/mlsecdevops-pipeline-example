@@ -36,7 +36,47 @@ This section outlines data processing measures, safety testing, and guardrails i
 
 ---
 
-## 4. References
+### 4. EU AI Act Article 53(1)(d) Requirements Mapping
+
+This section maps the available documentation to the disclosure requirements in Article 53(1)(d) of the EU AI Act. Each item indicates whether the requirement is **Answered**, **Partially Answered**, or **Not Answered** in the source material, with supporting citations where available.
+
+- **Provider and Model Identification:** **Answered.**  
+  The document identifies the provider as OpenAI [4] and the models as `gpt-oss-120b` and `gpt-oss-20b` [18]. It provides a release date of August 5, 2025 [5] and notes that the models build upon GPT-2 and GPT-3 architectures [34].
+
+- **Training Data Characteristics:** **Answered.**  
+  The document specifies the data modality as text-only [19, 141] and gives a broad estimate of training size as "trillions of tokens" [141]. It states a focus on STEM, coding, and general knowledge [141] and reports multilingual evaluation across 14 languages [371].
+
+- **Publicly Available Datasets:** **Not Answered.**  
+  The documentation references a large pre-training corpus [141] but does not name specific public datasets or provide links to datasets that constitute a material fraction (e.g., >3%) of the training data.
+
+- **Commercially Licensed and Private Datasets:** **Not Answered.**  
+  The documentation does not disclose whether commercially licensed or private datasets were used for base pre-training.
+
+- **Crawled and Scraped Data:** **Not Answered.**  
+  There is no disclosure of web crawlers, collection periods, or lists of the most relevant internet domains used in pre-training. The model does include a browsing tool for agentic workflows [273, 274], but that does not substitute for pre-training provenance.
+
+- **User Data:** **Not Answered.**  
+  The document does not state whether user interaction data was incorporated into training. It does note post-training techniques (CoT RL) similar to other conversational products [208, 209].
+
+- **Synthetic Data:** **Not Answered.**  
+  The text does not disclose whether AI-generated synthetic data was used in pre-training nor does it name models used to generate such data.
+
+- **Copyright Compliance (TDM Exception):** **Not Answered.**  
+  The document does not describe measures to identify or respect reservations of rights (opt-outs) under the EU text and data mining (TDM) exception.
+
+- **Removal of Illegal Content:** **Partially Answered.**  
+  The document states that pre-training data was filtered for harmful content and that CBRN pre-training filters from GPT-4o were reused to remove hazardous biosecurity knowledge [142]. However, it does not explicitly describe measures for removing illegal content categories such as child sexual abuse material (CSAM) or specific procedures for handling IP-infringing content.
+
+**Notes:** bracketed numeric citations above refer to the source document's internal reference indices. Where the source is silent, the mapping marks the requirement as **Not Answered** to reflect lack of disclosure rather than absence of controls in practice.
+
+
+---
+
+## 5. References
 - OpenAI. (2025). *gpt-oss-120b & gpt-oss-20b Model Card*. arXiv. https://arxiv.org/abs/2508.10925
 
 *(Bracketed numeric citations above refer to the source document's internal reference indices.)*
+
+---
+
+

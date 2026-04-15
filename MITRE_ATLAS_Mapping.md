@@ -51,4 +51,11 @@ While ATLAS primarily maps *threats*, Counter-Spy includes features specifically
 | **Human-in-the-Loop (HITL) Mode** | Automatically intercepts borderline traffic (Suspicious Entropy) for manual review before execution. | 
 | **Automated Golden Set Refinement (DPO)** | Allows analysts to export successfully blocked adversarial interactions to fine-tune future security models. | 
 
-***
+#### **6. Additional Elements Per Technical Specifications
+| Counter‑Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
+| :--- | :--- | :--- |
+| **JWT Authorization & Endpoint Validation** | Prevents attackers from spoofing identities and flooding the API by enforcing strict per‑request validation of Bearer tokens (sub, aud, exp) and rejecting reused or malformed tokens. | **AML.TA0003**; **AML.T0012** |
+| **Fail‑Secure State Persistence** | Mitigates fail‑open vulnerabilities during container scaling or restarts by defaulting to a paused state and refusing to route traffic if critical handshakes fail, preventing un‑sanitized payloads from bypassing the firewall. | **AML.TA0004**; **AML.T0051** |
+| **Telemetry Anomaly Escalation** | Reduces operational DoS (alert fatigue) by mapping high Z‑Score telemetry thresholds (e.g., Z > 5.0) to automated incident escalation (PagerDuty/Slack) so the SOC is alerted to coordinated attacks exploiting borderline entropy scores. | **AML.TA0008**; **AML.T0029** |
+
+---

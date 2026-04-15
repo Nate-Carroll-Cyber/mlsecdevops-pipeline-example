@@ -1,57 +1,57 @@
-***
-
-### **MITRE ATLAS Mapping: Counter-Spy.ai Defensive Capabilities**
+### MITRE ATLAS Mapping: Counter‑Spy.ai Defensive Capabilities
 
 This mapping demonstrates how the platform's features align with mitigating specific adversarial tactics and techniques defined in the MITRE ATLAS matrix.
 
-#### **1. Initial Access & Execution (Mitigating the Payload)**
+#### 1. Initial Access & Execution (Mitigating the Payload)
 These features are designed to stop an attacker from successfully delivering a malicious payload to the underlying Gemini 3 Flash model.
 
-| Counter-Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
+| Counter‑Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
 | :--- | :--- | :--- |
-| **Local Sanitization Pipeline (Regex & Normalization)** | Detects and blocks **Prompt Injection** attempts, including obfuscated (leetspeak) or break-all formatting, before execution. | **AML.T0051** (Prompt Injection) |
-| **Syntactic Complexity Analyzer** | Detects instruction stacking, URL-encoded strings, and heavy verbosity used to bypass semantic filters. | **AML.T0043** (Craft Adversarial Data) |
-| **Curated Default Blocklist** | Intercepts known roleplay-based injection templates and jailbreak corpora. | **AML.T0042** (Jailbreak) |
-| **Anti-ReDoS Circuit Breaker** | Prevents an attacker from intentionally locking up the CPU using Catastrophic Backtracking payloads via the chat interface. | **AML.T0029** (Denial of ML Service) |
-| **Global System Pause (DEFCON 1)** | A "kill switch" to instantly halt inference during a coordinated, automated attack, routing traffic to manual review. | **AML.TA0008** (Impact) |
+| **Local Sanitization Pipeline (Regex & Normalization)** | Detects and blocks **Prompt Injection** attempts, including obfuscated (leetspeak) or break‑all formatting, before execution. | **AML.T0051** |
+| **Syntactic Complexity Analyzer** | Detects instruction stacking, URL‑encoded strings, and heavy verbosity used to bypass semantic filters. | **AML.T0043** |
+| **Curated Default Blocklist** | Intercepts known roleplay‑based injection templates and jailbreak corpora. | **AML.T0042** |
+| **Anti‑ReDoS Circuit Breaker** | Prevents CPU lockup from catastrophic backtracking payloads via the chat interface. | **AML.T0029** |
+| **Global System Pause (DEFCON 1)** | A "kill switch" to instantly halt inference during a coordinated, automated attack, routing traffic to manual review. | **AML.TA0008** |
 
-#### **2. Defense Evasion (Mitigating Obfuscation)**
-Attackers frequently try to hide their payloads from security filters. Counter-Spy.ai has specific countermeasures for these evasion tactics.
+#### 2. Defense Evasion (Mitigating Obfuscation)
+Attackers frequently try to hide their payloads from security filters. Counter‑Spy.ai has specific countermeasures for these evasion tactics.
 
-| Counter-Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
+| Counter‑Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
 | :--- | :--- | :--- |
-| **Entropy Analysis (Sliding Window)** | Detects localized high-entropy payloads (Base64, Hex) hidden within normal text, defeating **Token Dilution** attacks. | **AML.T0043** (Craft Adversarial Data - Obfuscation) |
-| **Normalization (Leetspeak Conversion)** | Prevents keyword bypasses by flattening obfuscated text back to standard English before regex evaluation. | **AML.T0043** (Craft Adversarial Data - Evade Defenses) |
+| **Entropy Analysis (Sliding Window)** | Detects localized high‑entropy payloads (Base64, Hex) hidden within normal text, defeating token‑dilution attacks. | **AML.T0043** (Obfuscation) |
+| **Normalization (Leetspeak Conversion)** | Prevents keyword bypasses by flattening obfuscated text back to standard English before regex evaluation. | **AML.T0043** (Evade Defenses) |
 
-#### **3. Exfiltration & Impact (Mitigating Data Loss)**
+#### 3. Exfiltration & Impact (Mitigating Data Loss)
 If an attacker successfully manipulates the model, these features prevent the model from leaking sensitive data back to the user.
 
-| Counter-Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
+| Counter‑Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
 | :--- | :--- | :--- |
-| **PII & Secret Redaction (Input)** | Strips API keys, passwords, and PII from the user's prompt before it reaches the LLM, preventing accidental exposure in the model's context window. | **AML.T0024** (Exfiltration via Cyber Means) |
-| **Output Sanitization Layer (PII & Keyword Redaction)** | Scans the LLM's response and masks sensitive data or blocked keywords (e.g., `[REDACTED_KEYWORD]`), preventing the model from returning stolen data. | **AML.T0024** (Exfiltration via Cyber Means) |
-| **Forbidden Topics Enforcement (Semantic Guardrail)** | Instructs the model to refuse and flag (`[VIOLATION]`) discussions on restricted topics, preventing the LLM from being manipulated into generating unauthorized content. | **AML.T0053** (Command and Control - LLM Manipulation) |
-| **System Prompt Persona Constraints** | A strict system prompt forbids the model from revealing its internal configurations or system instructions. | **AML.T0054** (LLM Meta Prompt Extraction) |
+| **PII & Secret Redaction (Input)** | Strips API keys, passwords, and PII from the user's prompt before it reaches the LLM, preventing accidental exposure in the model's context window. | **AML.T0024** |
+| **Output Sanitization Layer (PII & Keyword Redaction)** | Scans the LLM's response and masks sensitive data or blocked keywords (e.g., `[REDACTED_KEYWORD]`), preventing the model from returning stolen data. | **AML.T0024** |
+| **Forbidden Topics Enforcement (Semantic Guardrail)** | Instructs the model to refuse and flag (`[VIOLATION]`) discussions on restricted topics, preventing the LLM from being manipulated into generating unauthorized content. | **AML.T0053** |
+| **System Prompt Persona Constraints** | A strict system prompt forbids the model from revealing its internal configurations or system instructions. | **AML.T0054** |
 
-#### **4. Reconnaissance & Discovery (Mitigating System Probing)**
+#### 4. Reconnaissance & Discovery (Mitigating System Probing)
 How the system limits an attacker's ability to learn about the defenses.
 
-| Counter-Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
+| Counter‑Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
 | :--- | :--- | :--- |
-| **Sanitized Pass-through Guarantee** | Because only redacted prompts reach the model, an attacker cannot probe the LLM to test its reaction to raw secrets or specific PII. | **AML.T0012** (Discover ML Model Ontology) |
-| **Syntactic Complexity Analyzer (Probing Detection)** | Actively detects and flags inputs that look like model reverse-engineering or boundary probing. | **AML.T0016** (Active Scanning) |
+| **Sanitized Pass‑through Guarantee** | Because only redacted prompts reach the model, an attacker cannot probe the LLM to test its reaction to raw secrets or specific PII. | **AML.T0012** (Discover ML Model Ontology) |
+| **Syntactic Complexity Analyzer (Probing Detection)** | Actively detects and flags inputs that look like model reverse‑engineering or boundary probing. | **AML.T0016** (Active Scanning) |
 
-#### **5. Operations & Incident Response (The "Counter-Spy" Element)**
-While ATLAS primarily maps *threats*, Counter-Spy includes features specifically designed for SOC analysts to investigate and respond to those threats.
+#### 5. Operations & Incident Response (The "Counter‑Spy" Element)
+While ATLAS primarily maps *threats*, Counter‑Spy includes features specifically designed for SOC analysts to investigate and respond to those threats.
 
-| Counter-Spy Feature | SOC / Incident Response Function | 
-| :--- | :--- | 
-| **Advanced Audit Trail (with Session IDs)** | Allows analysts to track an attacker's session history and understand their methodology over time. | 
-| **Anomaly Detection & Metrics Dashboard** | Uses real-time Z-Score calculations to detect velocity spikes indicative of automated attacks. | 
-| **Human-in-the-Loop (HITL) Mode** | Automatically intercepts borderline traffic (Suspicious Entropy) for manual review before execution. | 
-| **Automated Golden Set Refinement (DPO)** | Allows analysts to export successfully blocked adversarial interactions to fine-tune future security models. | 
+| Counter‑Spy Feature | SOC / Incident Response Function |
+| :--- | :--- |
+| **Advanced Audit Trail (with Session IDs)** | Allows analysts to track an attacker's session history and understand their methodology over time. |
+| **Anomaly Detection & Metrics Dashboard** | Uses real‑time Z‑Score calculations to detect velocity spikes indicative of automated attacks. |
+| **Human‑in‑the‑Loop (HITL) Mode** | Automatically intercepts borderline traffic (Suspicious Entropy) for manual review before execution. |
+| **Automated Golden Set Refinement (DPO)** | Allows analysts to export successfully blocked adversarial interactions to fine‑tune future security models. |
 
-#### **6. Additional Elements Per Technical Specifications
+#### 6. Additional Defensive Controls (Per Technical Specifications)
+Supplementary controls that further harden the platform.
+
 | Counter‑Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
 | :--- | :--- | :--- |
 | **JWT Authorization & Endpoint Validation** | Prevents attackers from spoofing identities and flooding the API by enforcing strict per‑request validation of Bearer tokens (sub, aud, exp) and rejecting reused or malformed tokens. | **AML.TA0003**; **AML.T0012** |
@@ -59,3 +59,8 @@ While ATLAS primarily maps *threats*, Counter-Spy includes features specifically
 | **Telemetry Anomaly Escalation** | Reduces operational DoS (alert fatigue) by mapping high Z‑Score telemetry thresholds (e.g., Z > 5.0) to automated incident escalation (PagerDuty/Slack) so the SOC is alerted to coordinated attacks exploiting borderline entropy scores. | **AML.TA0008**; **AML.T0029** |
 
 ---
+
+## Appendix — Key Operational Thresholds and Controls
+- **Entropy bands:** `Normal < 4.5`, `Suspicious 4.5–5.5`, `Adversarial > 5.5`  
+- **Sanitization order:** `Normalize (NFKC)` → `Strip non‑printables` → `Entropy scan` → `Regex detection` → `Output filter`  
+- **Audit logging:** Dual records (escaped raw + normalized ASCII) with immutable metadata and RBAC for access

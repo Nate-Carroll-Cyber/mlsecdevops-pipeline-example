@@ -1,0 +1,59 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+
+    {
+      "Sid": "BedrockInvokeEmbeddingModel",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:InvokeModel"
+      ],
+      "Resource": [
+        "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0"
+      ]
+    },
+
+    {
+      "Sid": "S3DataSourceRead",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:ListBucket"
+      ],
+      "Resource": [
+        "arn:aws:s3:::your-datasource-bucket",
+        "arn:aws:s3:::your-datasource-bucket/*"
+      ]
+    },
+
+    {
+      "Sid": "S3VectorsReadWrite",
+      "Effect": "Allow",
+      "Action": [
+        "s3vectors:PutVectors",
+        "s3vectors:GetVectors",
+        "s3vectors:QueryVectors",
+        "s3vectors:DeleteVectors",
+        "s3vectors:GetIndex",
+        "s3vectors:ListIndexes"
+      ],
+      "Resource": [
+        "arn:aws:s3vectors:us-east-1:123456789012:bucket/your-vector-bucket",
+        "arn:aws:s3vectors:us-east-1:123456789012:bucket/your-vector-bucket/index/your-index-name"
+      ]
+    },
+
+    {
+      "Sid": "KMSDecryptForEncryptedBuckets",
+      "Effect": "Allow",
+      "Action": [
+        "kms:Decrypt",
+        "kms:GenerateDataKey"
+      ],
+      "Resource": [
+        "arn:aws:kms:us-east-1:123456789012:key/your-kms-key-id"
+      ]
+    }
+
+  ]
+}

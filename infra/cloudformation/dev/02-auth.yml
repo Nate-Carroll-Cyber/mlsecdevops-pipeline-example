@@ -1,0 +1,127 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Counter-Spy.ai dev Cognito User Pool with Google federation placeholders.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev]
+  GoogleClientId:
+    Type: String
+    Default: ""
+    NoEcho: true
+  GoogleClientSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+
+Conditions:
+  HasGoogleOAuth: !And
+    - !Not [!Equals [!Ref GoogleClientId, ""]]
+    - !Not [!Equals [!Ref GoogleClientSecret, ""]]
+  HasNoGoogleOAuth: !Not [!Condition HasGoogleOAuth]
+
+Resources:
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub "counter-spy-${Environment}"
+      AutoVerifiedAttributes: [email]
+      UsernameAttributes: [email]
+      AdminCreateUserConfig:
+        AllowAdminCreateUserOnly: true
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 14
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: true
+          RequireUppercase: true
+
+  GoogleIdentityProvider:
+    Type: AWS::Cognito::UserPoolIdentityProvider
+    Condition: HasGoogleOAuth
+    Properties:
+      ProviderName: Google
+      ProviderType: Google
+      UserPoolId: !Ref UserPool
+      ProviderDetails:
+        client_id: !Ref GoogleClientId
+        client_secret: !Ref GoogleClientSecret
+        authorize_scopes: "openid email profile"
+      AttributeMapping:
+        email: email
+        name: name
+
+  GoogleUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Condition: HasGoogleOAuth
+    DependsOn:
+      - GoogleIdentityProvider
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub "counter-spy-${Environment}-web"
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      CallbackURLs:
+        - http://localhost:3000/
+        - https://app.cyber-spy.ai/
+      LogoutURLs:
+        - http://localhost:3000/
+        - https://app.cyber-spy.ai/
+      SupportedIdentityProviders: !If
+        - HasGoogleOAuth
+        - [Google]
+        - [COGNITO]
+
+  CognitoOnlyUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Condition: HasNoGoogleOAuth
+    Properties:
+      UserPoolId: !Ref UserPool
+      ClientName: !Sub "counter-spy-${Environment}-web"
+      GenerateSecret: false
+      AllowedOAuthFlowsUserPoolClient: true
+      AllowedOAuthFlows: [code]
+      AllowedOAuthScopes: [openid, email, profile]
+      CallbackURLs:
+        - http://localhost:3000/
+        - https://app.cyber-spy.ai/
+      LogoutURLs:
+        - http://localhost:3000/
+        - https://app.cyber-spy.ai/
+      SupportedIdentityProviders: [COGNITO]
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: admin
+      UserPoolId: !Ref UserPool
+
+  AnalystGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: analyst
+      UserPoolId: !Ref UserPool
+
+  MachineGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: machine
+      UserPoolId: !Ref UserPool
+
+Outputs:
+  UserPoolId:
+    Value: !Ref UserPool
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolId"
+  UserPoolClientId:
+    Value: !If [HasGoogleOAuth, !Ref GoogleUserPoolClient, !Ref CognitoOnlyUserPoolClient]
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolClientId"
+  UserPoolIssuer:
+    Value: !Sub "https://cognito-idp.${AWS::Region}.amazonaws.com/${UserPool}"
+    Export:
+      Name: !Sub "${AWS::StackName}-UserPoolIssuer"

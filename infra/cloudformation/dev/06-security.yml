@@ -1,0 +1,52 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Counter-Spy.ai dev CloudFront WAF baseline.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev]
+
+Resources:
+  CloudFrontWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "counter-spy-cloudfront-${Environment}"
+      Scope: CLOUDFRONT
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "counter-spy-cloudfront-${Environment}"
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: AWSManagedCommonRules
+          Priority: 0
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedCommonRules
+            SampledRequestsEnabled: true
+        - Name: GlobalRateLimit
+          Priority: 1
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 2000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: GlobalRateLimit
+            SampledRequestsEnabled: true
+
+Outputs:
+  CloudFrontWebAclArn:
+    Value: !GetAtt CloudFrontWebAcl.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-CloudFrontWebAclArn"

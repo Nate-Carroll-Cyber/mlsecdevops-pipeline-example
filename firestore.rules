@@ -1,0 +1,115 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required, email format)
+    //   - role: string (required, ['developer', 'analyst', 'engineer', 'admin'])
+    //   - displayName: string (optional)
+    //   - photoURL: string (optional)
+    //   - lastLogin: timestamp (optional)
+    //
+    // Collection: audit_logs
+    // Document ID: {logId}
+    // Fields:
+    //   - userId: string (required)
+    //   - userRole: string (required)
+    //   - sessionId: string (optional)
+    //   - timestamp: timestamp (required)
+    //   - sanitizedPrompt: string (required)
+    //   - detectionFlags: list (optional)
+    //   - modelId: string (optional)
+    //   - escalationRecommended: bool (optional)
+    //   - entropy: number (optional)
+    //   - reviewed: bool (optional)
+    //
+    // Collection: policies
+    // Document ID: {policyId}
+    // Fields:
+    //   - title: string (required)
+    //   - content: string (required)
+    //   - category: string (optional)
+    //   - lastUpdated: timestamp (optional)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (request.auth.token.email == "nate.carroll@natecarrollfilms.com" ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'));
+    }
+
+    function isSecurityStaff() {
+      return isAuthenticated() && 
+        (isAdmin() || 
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['developer', 'analyst', 'engineer', 'admin']));
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'role']) &&
+        data.uid is string &&
+        data.email is string &&
+        data.role in ['developer', 'analyst', 'engineer', 'admin'];
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll(['userId', 'timestamp', 'sanitizedPrompt']) &&
+        data.userId == request.auth.uid &&
+        data.timestamp is timestamp &&
+        data.sanitizedPrompt is string &&
+        data.sanitizedPrompt.size() < 5000;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated();
+      allow update: if isOwner(userId) || isAdmin();
+    }
+
+    match /audit_logs/{logId} {
+      allow read: if isSecurityStaff();
+      allow create: if isAuthenticated() && isValidAuditLog(request.resource.data);
+      allow delete: if isAdmin();
+      allow update: if isAdmin();
+    }
+
+    match /policies/{policyId} {
+      allow read: if isSecurityStaff();
+      allow write: if isAdmin();
+    }
+    match /config/{document=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+    match /knowledge_base/{docId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin();
+      allow update, delete: if isAdmin();
+    }
+  }
+}

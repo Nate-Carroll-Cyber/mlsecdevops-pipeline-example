@@ -1,0 +1,372 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Counter-Spy.ai dev API Gateway, internal ALB, and ECS Fargate backend.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev]
+  NetworkStackName:
+    Type: String
+    Default: counter-spy-network-dev
+  AuthStackName:
+    Type: String
+    Default: counter-spy-auth-dev
+  DomainName:
+    Type: String
+    Default: cyber-spy.ai
+  ApiSubdomain:
+    Type: String
+    Default: api
+  ContainerPort:
+    Type: Number
+    Default: 8080
+  DesiredCount:
+    Type: Number
+    Default: 0
+  ContainerImageTag:
+    Type: String
+    Default: latest
+  SafeguardsModelId:
+    Type: String
+    Default: gpt-oss-safeguards20B
+  ResponderModelId:
+    Type: String
+    Default: amazon.nova-micro-v1:0
+
+Resources:
+  Repository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "counter-spy-backend-${Environment}"
+      ImageTagMutability: IMMUTABLE
+      ImageScanningConfiguration:
+        ScanOnPush: true
+
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "counter-spy-backend-${Environment}"
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/counter-spy-backend-${Environment}"
+      RetentionInDays: 30
+
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: BedrockRuntimeAccess
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${SafeguardsModelId}"
+                  - !Sub "arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/${ResponderModelId}"
+
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Internal ALB security group
+      VpcId:
+        Fn::ImportValue: !Sub "${NetworkStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 10.42.0.0/16
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ECS task security group
+      VpcId:
+        Fn::ImportValue: !Sub "${NetworkStackName}-VpcId"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internal
+      Type: application
+      SecurityGroups:
+        - !Ref AlbSecurityGroup
+      Subnets: !Split
+        - ","
+        - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnetIds"
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId:
+        Fn::ImportValue: !Sub "${NetworkStackName}-VpcId"
+      Port: !Ref ContainerPort
+      Protocol: HTTP
+      TargetType: ip
+      HealthCheckPath: /healthz
+      Matcher:
+        HttpCode: "200-399"
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "counter-spy-backend-${Environment}"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Sub "${Repository.RepositoryUri}:${ContainerImageTag}"
+          Essential: true
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          Environment:
+            - Name: APP_ENV
+              Value: !Ref Environment
+            - Name: APP_PORT
+              Value: !Sub "${ContainerPort}"
+            - Name: AWS_REGION
+              Value: !Ref AWS::Region
+            - Name: SAFEGUARDS_MODEL_ID
+              Value: !Ref SafeguardsModelId
+            - Name: RESPONDER_MODEL_ID
+              Value: !Ref ResponderModelId
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+          HealthCheck:
+            Command:
+              - CMD-SHELL
+              - !Sub "wget -q -O - http://127.0.0.1:${ContainerPort}/healthz || exit 1"
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: Listener
+    Properties:
+      Cluster: !Ref Cluster
+      DesiredCount: !Ref DesiredCount
+      LaunchType: FARGATE
+      TaskDefinition: !Ref TaskDefinition
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          SecurityGroups:
+            - !Ref TaskSecurityGroup
+          Subnets: !Split
+            - ","
+            - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnetIds"
+      LoadBalancers:
+        - ContainerName: backend
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+
+  VpcLinkSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: API Gateway VPC Link security group
+      VpcId:
+        Fn::ImportValue: !Sub "${NetworkStackName}-VpcId"
+
+  VpcLink:
+    Type: AWS::ApiGatewayV2::VpcLink
+    Properties:
+      Name: !Sub "counter-spy-${Environment}"
+      SecurityGroupIds:
+        - !Ref VpcLinkSecurityGroup
+      SubnetIds: !Split
+        - ","
+        - Fn::ImportValue: !Sub "${NetworkStackName}-PrivateSubnetIds"
+
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "counter-spy-api-${Environment}"
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowHeaders: [authorization, content-type]
+        AllowMethods: [GET, POST, OPTIONS]
+        AllowOrigins:
+          - https://app.cyber-spy.ai
+
+  CognitoAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref HttpApi
+      AuthorizerType: JWT
+      IdentitySource:
+        - "$request.header.Authorization"
+      Name: !Sub "counter-spy-cognito-${Environment}"
+      JwtConfiguration:
+        Audience:
+          - Fn::ImportValue: !Sub "${AuthStackName}-UserPoolClientId"
+        Issuer:
+          Fn::ImportValue: !Sub "${AuthStackName}-UserPoolIssuer"
+
+  AlbIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      ConnectionId: !Ref VpcLink
+      ConnectionType: VPC_LINK
+      IntegrationMethod: ANY
+      IntegrationType: HTTP_PROXY
+      IntegrationUri: !Ref Listener
+      PayloadFormatVersion: "1.0"
+
+  HealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "GET /healthz"
+      Target: !Sub "integrations/${AlbIntegration}"
+
+  InterceptRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: "POST /v1/intercept"
+      AuthorizationType: JWT
+      AuthorizerId: !Ref CognitoAuthorizer
+      Target: !Sub "integrations/${AlbIntegration}"
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      StageName: "$default"
+      AutoDeploy: true
+
+  ApiWebAcl:
+    Type: AWS::WAFv2::WebACL
+    Properties:
+      Name: !Sub "counter-spy-api-${Environment}"
+      Scope: REGIONAL
+      DefaultAction:
+        Allow: {}
+      VisibilityConfig:
+        CloudWatchMetricsEnabled: true
+        MetricName: !Sub "counter-spy-api-${Environment}"
+        SampledRequestsEnabled: true
+      Rules:
+        - Name: AWSManagedCommonRules
+          Priority: 0
+          OverrideAction:
+            None: {}
+          Statement:
+            ManagedRuleGroupStatement:
+              VendorName: AWS
+              Name: AWSManagedRulesCommonRuleSet
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: AWSManagedCommonRules
+            SampledRequestsEnabled: true
+        - Name: ApiRateLimit
+          Priority: 1
+          Action:
+            Block: {}
+          Statement:
+            RateBasedStatement:
+              Limit: 1000
+              AggregateKeyType: IP
+          VisibilityConfig:
+            CloudWatchMetricsEnabled: true
+            MetricName: ApiRateLimit
+            SampledRequestsEnabled: true
+
+  ApiWebAclAssociation:
+    Type: AWS::WAFv2::WebACLAssociation
+    Properties:
+      ResourceArn: !Sub "arn:${AWS::Partition}:apigateway:${AWS::Region}::/apis/${HttpApi}/stages/$default"
+      WebACLArn: !GetAtt ApiWebAcl.Arn
+
+  ApiDomainName:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Sub "${ApiSubdomain}.${DomainName}"
+      DomainNameConfigurations:
+        - CertificateArn:
+            Fn::ImportValue: !Sub "${NetworkStackName}-ApiCertificateArn"
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  ApiMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    Properties:
+      ApiId: !Ref HttpApi
+      DomainName: !Ref ApiDomainName
+      Stage: !Ref ApiStage
+
+  ApiDnsRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Fn::ImportValue: !Sub "${NetworkStackName}-HostedZoneId"
+      Name: !Sub "${ApiSubdomain}.${DomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApiDomainName.RegionalDomainName
+        HostedZoneId: !GetAtt ApiDomainName.RegionalHostedZoneId
+
+Outputs:
+  BackendRepositoryUri:
+    Value: !GetAtt Repository.RepositoryUri
+    Export:
+      Name: !Sub "${AWS::StackName}-BackendRepositoryUri"
+  BackendClusterName:
+    Value: !Ref Cluster
+    Export:
+      Name: !Sub "${AWS::StackName}-BackendClusterName"
+  BackendServiceName:
+    Value: !GetAtt Service.Name
+    Export:
+      Name: !Sub "${AWS::StackName}-BackendServiceName"
+  BackendApiUrl:
+    Value: !Sub "https://${ApiSubdomain}.${DomainName}"
+    Export:
+      Name: !Sub "${AWS::StackName}-BackendApiUrl"

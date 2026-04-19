@@ -1,0 +1,18 @@
+services:
+  sam-spade-service:
+    image: node:22-alpine
+    container_name: counter-spy-sam-spade-service
+    profiles: ["sam-spade"]
+    working_dir: /app
+    command: >
+      sh -lc "echo 'Sam Spade service stub. Replace this command with the standalone service entrypoint when the split happens.' && sleep infinity"
+    environment:
+      SAM_SPADE_ENABLED: "true"
+      SAM_SPADE_DEFAULT_CASE_ID: "case-067"
+      SAM_SPADE_STORE_PATH: "backend/data/sam-spade-sessions.json"
+      SAM_SPADE_SERVICE_PORT: "18120"
+    ports:
+      - "18120:18120"
+    volumes:
+      - ./:/app
+    restart: unless-stopped

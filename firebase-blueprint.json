@@ -1,0 +1,82 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Authenticated security analyst or administrator",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["developer", "analyst", "engineer", "admin"] },
+        "displayName": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "lastLogin": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "AuditLog": {
+      "title": "Audit Log",
+      "description": "Record of security queries and system actions. Immutable once created, but can be reviewed by administrators.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string" },
+        "userRole": { "type": "string" },
+        "sessionId": { "type": "string" },
+        "timestamp": { "type": "string", "format": "date-time" },
+        "sanitizedPrompt": { "type": "string" },
+        "detectionFlags": { "type": "array", "items": { "type": "string" } },
+        "modelId": { "type": "string" },
+        "escalationRecommended": { "type": "boolean" },
+        "entropy": { "type": "number" },
+        "detectionLevel": { "type": "number", "description": "0: Clean, 1: Informational, 2: Suspicious, 3: Adversarial" },
+        "reviewed": { "type": "boolean" },
+        "resultantSeverity": { "type": "string", "enum": ["Clean", "Informational", "Suspicious", "Adversarial"] },
+        "response": { "type": "string", "description": "The AI's generated response to the prompt" },
+        "promoted": { "type": "boolean", "description": "Whether this log has been promoted to the Golden Set" }
+      },
+      "required": ["userId", "timestamp", "sanitizedPrompt"]
+    },
+    "SecurityPolicy": {
+      "title": "Security Policy",
+      "description": "Approved security documentation for RAG",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "content": { "type": "string" },
+        "category": { "type": "string" },
+        "lastUpdated": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "content"]
+    },
+    "SystemConfig": {
+      "title": "System Configuration",
+      "description": "Global settings for the security assistant",
+      "type": "object",
+      "properties": {
+        "systemPrompt": { "type": "string" },
+        "guardrailsPolicy": { "type": "string" },
+        "blockedKeywords": { "type": "string" },
+        "forbiddenTopics": { "type": "string" },
+        "regexRules": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "/config/system": {
+      "schema": "SystemConfig",
+      "description": "Global system configuration"
+    },
+    "/users/{userId}": {
+      "schema": "User",
+      "description": "User profile and role information"
+    },
+    "/audit_logs/{logId}": {
+      "schema": "AuditLog",
+      "description": "System audit trail"
+    },
+    "/policies/{policyId}": {
+      "schema": "SecurityPolicy",
+      "description": "Knowledge base for RAG"
+    }
+  }
+}

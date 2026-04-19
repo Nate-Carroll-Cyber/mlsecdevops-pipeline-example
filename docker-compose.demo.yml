@@ -1,0 +1,48 @@
+# Minimal local demo stack for Counter-Spy.ai.
+# This is meant for laptop demos and smoke testing, not a production deployment.
+services:
+  counter-spy-backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: counter-spy-backend
+    user: "0:0"
+    environment:
+      # Core backend runtime settings.
+      APP_PORT: 8080
+      APP_ENV: dev
+      LOG_LEVEL: info
+      # Sam Spade stays enabled in the demo so the CTF surface works out of the box.
+      SAM_SPADE_ENABLED: "true"
+      SAM_SPADE_DEFAULT_CASE_ID: "case-067"
+      SAM_SPADE_STORE_PATH: "/app/backend/data/sam-spade.db"
+      SAM_SPADE_SERVICE_PORT: "18120"
+      # Optional provider secrets for demo use:
+      # DEEPL_API_KEY: "${DEEPL_API_KEY:-}"
+      # GOOGLE_TRANSLATE_API_KEY: "${GOOGLE_TRANSLATE_API_KEY:-}"
+      # AZURE_TRANSLATOR_API_KEY: "${AZURE_TRANSLATOR_API_KEY:-}"
+    ports:
+      - "18080:8080"
+    volumes:
+      # Keep Sam Spade session data outside the container lifecycle.
+      - sam_spade_data:/app/backend/data
+    restart: unless-stopped
+
+  counter-spy-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend-demo
+    container_name: counter-spy-frontend
+    environment:
+      # Frontend uses the backend container by service name through Vite's proxy.
+      BACKEND_PROXY_TARGET: "http://counter-spy-backend:8080"
+      DISABLE_HMR: "true"
+    ports:
+      - "3000:3000"
+    depends_on:
+      - counter-spy-backend
+    restart: unless-stopped
+
+volumes:
+  # Named volume used by the backend SQLite session store.
+  sam_spade_data:

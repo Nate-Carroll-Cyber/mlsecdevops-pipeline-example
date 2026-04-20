@@ -25,19 +25,11 @@ db.exec(`
   )
 `);
 
-// Pre-compile the statements used on every session read/write.
-const getSessionStatement = db.prepare('SELECT payload FROM sam_spade_sessions WHERE session_id = ?');
-const upsertSessionStatement = db.prepare(`
-  INSERT INTO sam_spade_sessions (session_id, updated_at, payload)
-  VALUES (?, ?, ?)
-  ON CONFLICT(session_id) DO UPDATE SET
-    updated_at = excluded.updated_at,
-    payload = excluded.payload
-`);
-
 // Load one session payload and deserialize it back into the runtime shape.
 export function getStoredSession(sessionId: string): SamSpadeSessionRecord | null {
-  const row = getSessionStatement.get(sessionId) as { payload?: string } | undefined;
+  const row = db
+    .prepare('SELECT payload FROM sam_spade_sessions WHERE session_id = ?')
+    .get(sessionId) as { payload?: string } | undefined;
   if (!row?.payload) {
     return null;
   }
@@ -47,7 +39,13 @@ export function getStoredSession(sessionId: string): SamSpadeSessionRecord | nul
 
 // Persist the latest session state after every message or solve action.
 export function saveStoredSession(session: SamSpadeSessionRecord) {
-  upsertSessionStatement.run(
+  db.prepare(`
+    INSERT INTO sam_spade_sessions (session_id, updated_at, payload)
+    VALUES (?, ?, ?)
+    ON CONFLICT(session_id) DO UPDATE SET
+      updated_at = excluded.updated_at,
+      payload = excluded.payload
+  `).run(
     session.sessionId,
     session.updatedAt,
     JSON.stringify(session),

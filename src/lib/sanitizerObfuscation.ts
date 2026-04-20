@@ -10,18 +10,23 @@
  *    when they do not directly decode into plain text.
  * 5. `analyzeObfuscationInput(...)` is the main entry point used by `sanitizeInput(...)`.
  */
-import { hasLeetspeakObfuscation, normalizeForPolicy, normalizeWithoutLeet } from './sanitizerNormalization';
+import { hasCompatibilityGlyphObfuscation, hasLeetspeakObfuscation, normalizeForPolicy, normalizeWithoutLeet } from './sanitizerNormalization';
 
 export type DecodeTelemetry = 'plain_text' | 'single_hop_decode' | 'recursive_decode';
 
 export type ObfuscationSignal =
   | 'URL_ENCODING'
   | 'HTML_ENTITIES'
+  | 'UNICODE_ESCAPES'
+  | 'COMPATIBILITY_GLYPHS'
+  | 'SYMBOL_SUBSTITUTION'
   | 'LEETSPEAK'
   | 'ROT13'
   | 'REVERSE_TEXT'
   | 'NATO_PHONETIC'
   | 'MORSE_CODE'
+  | 'BRAILLE'
+  | 'REGIONAL_INDICATORS'
   | 'RECURSIVE_DECODE'
   | 'END_SEQUENCE'
   | 'CHUNKING'
@@ -33,14 +38,20 @@ const BASE64_SEGMENT_REGEX = /(?:^|[^A-Za-z0-9+/=])([A-Za-z0-9+/]{20,}={0,2})(?=
 const HEX_SEGMENT_REGEX = /\b(?:0x)?(?:[A-Fa-f0-9]{2}){12,}\b/g;
 const URL_SEGMENT_REGEX = /(?:%[0-9A-Fa-f]{2}){6,}/g;
 const HTML_ENTITY_SEGMENT_REGEX = /(?:&#(?:x[0-9A-Fa-f]+|\d+);){4,}/g;
+const UNICODE_ESCAPE_SEGMENT_REGEX = /(?:(?:\\u[0-9A-Fa-f]{4})|(?:\\x[0-9A-Fa-f]{2})){2,}/g;
 const NATO_SEGMENT_REGEX = /\b(?:alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliet|kilo|lima|mike|november|oscar|papa|quebec|romeo|sierra|tango|uniform|victor|whiskey|x-ray|xray|yankee|zulu)(?:\s+(?:alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliet|kilo|lima|mike|november|oscar|papa|quebec|romeo|sierra|tango|uniform|victor|whiskey|x-ray|xray|yankee|zulu)){3,}\b/gi;
 const MORSE_SEGMENT_REGEX = /(?:[.\-]+(?:\s+[.\-/]+){3,})/g;
+const BRAILLE_SEGMENT_REGEX = /(?:[\u2800-\u28FF]+\s*){2,}/gu;
+const REGIONAL_INDICATOR_SEGMENT_REGEX = /(?:[\u{1F1E6}-\u{1F1FF}]\s*){2,}/gu;
 const MAX_DECODE_DEPTH = 3;
 const MAX_DECODE_SEGMENTS = 24;
 const END_SEQUENCE_REGEX = /<\/s>|<\|im_end\|>/i;
 const CHUNKING_REGEX = /(?:^|\n)Part\s+\d+:\s+/i;
 const VARIABLE_EXPANSION_REGEX = /\blet\s+v\d+\s*=|console\.log\(/i;
 const VERTICAL_TEXT_REGEX = /^(?:.{1,2}\n){5,}.{1,2}$/m;
+const NON_ASCII_REGEX = /[^\x00-\x7F]/;
+const COMBINING_MARK_REGEX = /\p{M}/u;
+const SYMBOL_LIKE_REGEX = /[\p{S}\p{M}]/u;
 
 const NATO_WORD_TO_CHAR: Record<string, string> = {
   alpha: 'a', bravo: 'b', charlie: 'c', delta: 'd', echo: 'e', foxtrot: 'f',
@@ -56,6 +67,14 @@ const MORSE_TO_CHAR: Record<string, string> = {
   '--': 'm', '-.': 'n', '---': 'o', '.--.': 'p', '--.-': 'q', '.-.': 'r',
   '...': 's', '-': 't', '..-': 'u', '...-': 'v', '.--': 'w', '-..-': 'x',
   '-.--': 'y', '--..': 'z', '/': ' ',
+};
+
+const BRAILLE_TO_CHAR: Record<string, string> = {
+  '⠁': 'a', '⠃': 'b', '⠉': 'c', '⠙': 'd', '⠑': 'e', '⠋': 'f',
+  '⠛': 'g', '⠓': 'h', '⠊': 'i', '⠚': 'j', '⠅': 'k', '⠇': 'l',
+  '⠍': 'm', '⠝': 'n', '⠕': 'o', '⠏': 'p', '⠟': 'q', '⠗': 'r',
+  '⠎': 's', '⠞': 't', '⠥': 'u', '⠧': 'v', '⠺': 'w', '⠭': 'x',
+  '⠽': 'y', '⠵': 'z',
 };
 
 // Decode one likely-Base64 segment when it looks long enough and mostly printable.
@@ -119,6 +138,18 @@ function decodeHtmlEntitySegment(segment: string): string | null {
   }
 }
 
+// Decode escaped byte sequences such as \u0072\u0065 or \x72\x65 back into text.
+function decodeUnicodeEscapeSegment(segment: string): string | null {
+  try {
+    const decoded = segment
+      .replace(/\\u([0-9A-Fa-f]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/\\x([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    return decoded !== segment ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
 // Convert a NATO phonetic sequence back into letters.
 function decodeNatoSegment(segment: string): string | null {
   const words = segment.toLowerCase().trim().split(/\s+/);
@@ -133,6 +164,69 @@ function decodeMorseSegment(segment: string): string | null {
   if (tokens.length < 4) return null;
   const decoded = tokens.map((token) => MORSE_TO_CHAR[token]).join('');
   return decoded && !decoded.includes('undefined') ? decoded : null;
+}
+
+// Decode unicode braille cells back into Latin letters for common grade-1 style prompts.
+function decodeBrailleSegment(segment: string): string | null {
+  const cells = [...segment];
+  if (cells.length < 2) return null;
+  let makeNextUppercase = false;
+  let decoded = '';
+  for (const cell of cells) {
+    if (cell === ' ') {
+      decoded += ' ';
+      continue;
+    }
+    if (cell === '⠠') {
+      makeNextUppercase = true;
+      continue;
+    }
+    const nextChar = BRAILLE_TO_CHAR[cell];
+    if (!nextChar) return null;
+    decoded += makeNextUppercase ? nextChar.toUpperCase() : nextChar;
+    makeNextUppercase = false;
+  }
+  return decoded.trim().replace(/\s+/g, ' ') || null;
+}
+
+// Decode regional indicator symbols such as 🇸 🇭 🇴 🇼 into SHOW.
+function decodeRegionalIndicatorSegment(segment: string): string | null {
+  const codepoints = [...segment].filter((char) => /[\u{1F1E6}-\u{1F1FF}]/u.test(char));
+  if (codepoints.length < 2) return null;
+  const decoded = codepoints.map((char) => {
+    const value = char.codePointAt(0);
+    if (value === undefined) return '';
+    return String.fromCharCode(65 + (value - 0x1F1E6));
+  }).join('');
+  return decoded || null;
+}
+
+// Flag symbol-heavy or non-ASCII-heavy prompts that look more like encoded
+// symbol alphabets than natural text. This complements Shannon entropy, which
+// can underrate two-symbol or compatibility-glyph payloads.
+function hasSymbolSubstitutionObfuscation(input: string): boolean {
+  const meaningfulChars = [...input].filter((char) => !/\s/.test(char));
+  if (meaningfulChars.length < 6) return false;
+
+  const interestingChars = meaningfulChars.filter((char) =>
+    NON_ASCII_REGEX.test(char) || SYMBOL_LIKE_REGEX.test(char) || COMBINING_MARK_REGEX.test(char)
+  );
+  if (interestingChars.length < 6) return false;
+
+  const nonAsciiCount = interestingChars.filter((char) => NON_ASCII_REGEX.test(char)).length;
+  const symbolLikeCount = interestingChars.filter((char) => SYMBOL_LIKE_REGEX.test(char)).length;
+  const combiningCount = interestingChars.filter((char) => COMBINING_MARK_REGEX.test(char)).length;
+  const uniqueChars = new Set(interestingChars);
+
+  const interestingRatio = interestingChars.length / meaningfulChars.length;
+  const nonAsciiRatio = nonAsciiCount / interestingChars.length;
+  const symbolLikeRatio = symbolLikeCount / interestingChars.length;
+  const binarySymbolPattern = uniqueChars.size <= 3 && symbolLikeRatio >= 0.6 && interestingChars.length >= 6;
+
+  return binarySymbolPattern ||
+    combiningCount >= 2 ||
+    (interestingRatio >= 0.25 && nonAsciiRatio >= 0.35 && symbolLikeRatio >= 0.2) ||
+    (interestingRatio >= 0.25 && nonAsciiRatio >= 0.7 && uniqueChars.size >= 4);
 }
 
 // Main recursive decode walker.
@@ -212,6 +306,20 @@ export function extractDecodedSegments(input: string): {
       usedObfuscation = true;
     }
 
+    const unicodeEscapeMatches = current.value.match(UNICODE_ESCAPE_SEGMENT_REGEX) || [];
+    for (const match of unicodeEscapeMatches) {
+      if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
+      const decoded = decodeUnicodeEscapeSegment(match);
+      if (!decoded || seenSegments.has(decoded)) continue;
+      seenSegments.add(decoded);
+      decodedSegments.push(decoded);
+      signals.add('UNICODE_ESCAPES');
+      const nextDepth = current.depth + 1;
+      queue.push({ value: decoded, depth: nextDepth });
+      maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
+      usedObfuscation = true;
+    }
+
     const natoMatches = current.value.match(NATO_SEGMENT_REGEX) || [];
     for (const match of natoMatches) {
       if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
@@ -239,6 +347,34 @@ export function extractDecodedSegments(input: string): {
       maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
       usedObfuscation = true;
     }
+
+    const brailleMatches = current.value.match(BRAILLE_SEGMENT_REGEX) || [];
+    for (const match of brailleMatches) {
+      if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
+      const decoded = decodeBrailleSegment(match);
+      if (!decoded || seenSegments.has(decoded)) continue;
+      seenSegments.add(decoded);
+      decodedSegments.push(decoded);
+      signals.add('BRAILLE');
+      const nextDepth = current.depth + 1;
+      queue.push({ value: decoded, depth: nextDepth });
+      maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
+      usedObfuscation = true;
+    }
+
+    const regionalMatches = current.value.match(REGIONAL_INDICATOR_SEGMENT_REGEX) || [];
+    for (const match of regionalMatches) {
+      if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
+      const decoded = decodeRegionalIndicatorSegment(match);
+      if (!decoded || seenSegments.has(decoded)) continue;
+      seenSegments.add(decoded);
+      decodedSegments.push(decoded);
+      signals.add('REGIONAL_INDICATORS');
+      const nextDepth = current.depth + 1;
+      queue.push({ value: decoded, depth: nextDepth });
+      maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
+      usedObfuscation = true;
+    }
   }
 
   return {
@@ -258,7 +394,12 @@ export function extractTransformedSegments(input: string): { segments: string[];
   const baselineNormalized = normalizeWithoutLeet(input);
   const policyNormalized = normalizeForPolicy(input);
 
-  if (/[0134578@]/.test(input) && policyNormalized !== baselineNormalized) {
+  if (hasCompatibilityGlyphObfuscation(input)) {
+    segments.push(baselineNormalized);
+    signals.push('COMPATIBILITY_GLYPHS');
+  }
+
+  if (hasLeetspeakObfuscation(input) && policyNormalized !== baselineNormalized) {
     segments.push(policyNormalized);
     signals.push('LEETSPEAK');
   }
@@ -288,6 +429,7 @@ export function detectStructuralObfuscation(input: string): ObfuscationSignal[] 
   if (CHUNKING_REGEX.test(input)) signals.push('CHUNKING');
   if (VARIABLE_EXPANSION_REGEX.test(input)) signals.push('VARIABLE_EXPANSION');
   if (VERTICAL_TEXT_REGEX.test(input)) signals.push('VERTICAL_TEXT');
+  if (hasSymbolSubstitutionObfuscation(input)) signals.push('SYMBOL_SUBSTITUTION');
   return signals;
 }
 

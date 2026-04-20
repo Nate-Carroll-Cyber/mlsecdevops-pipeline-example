@@ -167,6 +167,8 @@ interface AuditLog extends AtlasTaxonomyFields {
   expectedVerdict?: string;
 }
 
+const PII_OR_SECRET_REDACTIONS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'AWS_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'SECRET_KEY'];
+
 interface WakeLockSentinelLike {
   release(): Promise<void>;
 }
@@ -275,11 +277,17 @@ type GoldenSetEntry = z.infer<typeof GoldenSetEntrySchema>;
 const OBFUSCATION_FLAG_LABELS: Record<string, string> = {
   URL_ENCODING: 'URL Encoding',
   HTML_ENTITIES: 'HTML Entities',
+  UNICODE_ESCAPES: 'Unicode Escapes',
+  COMPATIBILITY_GLYPHS: 'Compatibility Glyphs',
+  SYMBOL_SUBSTITUTION: 'Symbol Substitution',
   LEETSPEAK: 'Leetspeak',
   ROT13: 'ROT13',
   REVERSE_TEXT: 'Reverse Text',
   NATO_PHONETIC: 'NATO Phonetic',
   MORSE_CODE: 'Morse Code',
+  BRAILLE: 'Braille',
+  REGIONAL_INDICATORS: 'Regional Indicators',
+  EXTERNAL_CALL_ATTEMPT: 'External Call Attempt',
   RECURSIVE_DECODE: 'Recursive Decode',
   END_SEQUENCE: 'End Sequence',
   CHUNKING: 'Chunking',
@@ -291,11 +299,17 @@ const OBFUSCATION_FLAG_LABELS: Record<string, string> = {
 const STORED_OBFUSCATION_FLAGS = [
   'URL_ENCODING',
   'HTML_ENTITIES',
+  'UNICODE_ESCAPES',
+  'COMPATIBILITY_GLYPHS',
+  'SYMBOL_SUBSTITUTION',
   'LEETSPEAK',
   'ROT13',
   'REVERSE_TEXT',
   'NATO_PHONETIC',
   'MORSE_CODE',
+  'BRAILLE',
+  'REGIONAL_INDICATORS',
+  'EXTERNAL_CALL_ATTEMPT',
   'RECURSIVE_DECODE',
   'END_SEQUENCE',
   'CHUNKING',
@@ -306,9 +320,9 @@ const STORED_OBFUSCATION_FLAGS = [
 
 const OBFUSCATION_PRESET_FAMILIES = {
   all: [] as string[],
-  encodings: ['URL_ENCODING', 'HTML_ENTITIES', 'RECURSIVE_DECODE'],
+  encodings: ['URL_ENCODING', 'HTML_ENTITIES', 'UNICODE_ESCAPES', 'RECURSIVE_DECODE'],
   ciphers: ['ROT13', 'REVERSE_TEXT', 'LEETSPEAK'],
-  language: ['NATO_PHONETIC', 'MORSE_CODE'],
+  language: ['NATO_PHONETIC', 'MORSE_CODE', 'BRAILLE', 'REGIONAL_INDICATORS', 'COMPATIBILITY_GLYPHS', 'SYMBOL_SUBSTITUTION'],
   structural: ['END_SEQUENCE', 'CHUNKING', 'VARIABLE_EXPANSION', 'VERTICAL_TEXT'],
 } as const;
 
@@ -324,6 +338,23 @@ const OBFUSCATION_PRESET_LABELS: Record<keyof typeof OBFUSCATION_PRESET_FAMILIES
 // want to persist and visualize as a compact reporting summary.
 function getObfuscationFlags(flags: string[] = []): string[] {
   return flags.filter((flag) => flag in OBFUSCATION_FLAG_LABELS);
+}
+
+function getLogTimestampValue(timestamp: unknown): number {
+  if (timestamp instanceof Date) return timestamp.getTime();
+  if (typeof (timestamp as { toMillis?: () => number })?.toMillis === 'function') {
+    return (timestamp as { toMillis: () => number }).toMillis();
+  }
+  if (typeof (timestamp as { toDate?: () => Date })?.toDate === 'function') {
+    return (timestamp as { toDate: () => Date }).toDate().getTime();
+  }
+  const parsed = new Date(timestamp as string).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function formatLogTimestamp(timestamp: unknown): string {
+  const millis = getLogTimestampValue(timestamp);
+  return millis > 0 ? new Date(millis).toLocaleString() : 'Pending...';
 }
 
 function buildObfuscationSummary(
@@ -540,8 +571,11 @@ export default function App() {
   const [samSpadeTheory, setSamSpadeTheory] = useState('');
   const [samSpadeSession, setSamSpadeSession] = useState<SamSpadeSession | null>(null);
   const [samSpadeStatus, setSamSpadeStatus] = useState<'idle' | 'connecting' | 'ready' | 'sending' | 'error'>('idle');
+  const [samSpadeInputAlert, setSamSpadeInputAlert] = useState(false);
+  const [samSpadeUnapprovedNotice, setSamSpadeUnapprovedNotice] = useState<{ prompt: string; message: string } | null>(null);
   // State to store the list of audit logs
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
+  const [ephemeralAuditLogs, setEphemeralAuditLogs] = useState<AuditLog[]>([]);
   // State to indicate if a message is currently being processed
   const [isProcessing, setIsProcessing] = useState(false);
   // State to track the currently active tab in the UI
@@ -615,6 +649,7 @@ export default function App() {
 
   // Ref for the chat scroll area to auto-scroll to the bottom
   const scrollRef = useRef<HTMLDivElement>(null);
+  const samSpadeSessionPromiseRef = useRef<Promise<SamSpadeSession> | null>(null);
 
   // State to manage the confirmation step for clearing audit logs
   const [isConfirmingClear, setIsConfirmingClear] = useState(false);
@@ -1015,6 +1050,7 @@ export default function App() {
     processingRef.current = false;
     setMessages([]);
     setAuditLogs([]);
+    setEphemeralAuditLogs([]);
     setInput('');
     setSamSpadeInput('');
     setSamSpadeTheory('');
@@ -1036,6 +1072,12 @@ export default function App() {
     review: SamSpadeReviewArtifact,
     session: SamSpadeSession,
   ) => {
+    const shouldMirrorToReviewSurfaces =
+      review.status === 'PENDING_REVIEW' ||
+      review.escalationRecommended ||
+      review.detectionLevel === 'Suspicious' ||
+      review.detectionLevel === 'Adversarial';
+
     const auditEntry: AuditLog = {
       id: review.requestId,
       userId: profile?.uid ?? 'sam-spade-ctf',
@@ -1058,9 +1100,13 @@ export default function App() {
       source: 'ctf_chat',
     };
 
+    setEphemeralAuditLogs((prev) => [auditEntry, ...prev.filter((log) => log.id !== auditEntry.id)].slice(0, 50));
+
     if (localReviewMode) {
       setAuditLogs((prev) => [auditEntry, ...prev.filter((log) => log.id !== auditEntry.id)].slice(0, 50));
-    } else {
+    }
+
+    if (!localReviewMode) {
       try {
         const existingIndex = auditLogs.findIndex((log) => log.id === auditEntry.id);
         if (existingIndex === -1) {
@@ -1085,16 +1131,24 @@ export default function App() {
             source: auditEntry.source,
           });
         }
+        setEphemeralAuditLogs((prev) => prev.filter((log) => log.id !== auditEntry.id));
       } catch (error) {
-        handleFirestoreError(error, OperationType.CREATE, `audit_logs/${auditEntry.id}`);
+        console.error('Failed to mirror Sam Spade audit entry to Firestore', error);
       }
+    }
+
+    if (!shouldMirrorToReviewSurfaces) {
+      return;
     }
 
     const latestPlayerPrompt = session.messages.filter((message) => message.role === 'player').at(-1)?.text ?? review.sanitizedPrompt;
     const actionLabel = review.action === 'solve' ? 'Solve Attempt' : 'Question';
+    const reviewPrefix = review.status === 'PENDING_REVIEW' || review.escalationRecommended
+      ? '[CTF Review]'
+      : '[Sam Spade]';
     const analystMessages: ChatMessage[] = [
       { role: 'user', text: `[Sam Spade / ${session.caseId} / ${actionLabel}] ${latestPlayerPrompt}` },
-      { role: 'model', text: `[CTF Review] ${review.response}` },
+      { role: 'model', text: `${reviewPrefix} ${review.response}` },
     ];
     setMessages((prev) => [...prev, ...analystMessages]);
   };
@@ -1105,11 +1159,27 @@ export default function App() {
       return samSpadeSession;
     }
 
+    if (samSpadeSessionPromiseRef.current) {
+      return samSpadeSessionPromiseRef.current;
+    }
+
     setSamSpadeStatus('connecting');
-    const session = await createSamSpadeSession({ caseId: 'case-067' });
-    setSamSpadeSession(session);
-    setSamSpadeStatus('ready');
-    return session;
+    const sessionPromise = createSamSpadeSession({ caseId: 'case-067' })
+      .then((session) => {
+        setSamSpadeSession(session);
+        setSamSpadeStatus('ready');
+        return session;
+      })
+      .catch((error) => {
+        setSamSpadeStatus('error');
+        throw error;
+      })
+      .finally(() => {
+        samSpadeSessionPromiseRef.current = null;
+      });
+
+    samSpadeSessionPromiseRef.current = sessionPromise;
+    return sessionPromise;
   };
 
   const deleteAllAuditLogs = async (): Promise<number> => {
@@ -1339,7 +1409,11 @@ export default function App() {
 
   // Memoized sorted audit logs based on the current sort configuration
   const sortedAuditLogs = useMemo(() => {
-    let sortableLogs = [...auditLogs];
+    const mergedLogs = [
+      ...ephemeralAuditLogs,
+      ...auditLogs.filter((log) => !ephemeralAuditLogs.some((ephemeral) => ephemeral.id === log.id)),
+    ];
+    let sortableLogs = [...mergedLogs];
     if (sortConfig !== null) {
       sortableLogs.sort((a, b) => {
         let aValue: any = a[sortConfig.key as keyof AuditLog];
@@ -1347,8 +1421,8 @@ export default function App() {
 
         // Handle specific sorting logic for different columns
         if (sortConfig.key === 'timestamp') {
-          aValue = a.timestamp?.toMillis?.() || 0;
-          bValue = b.timestamp?.toMillis?.() || 0;
+          aValue = getLogTimestampValue(a.timestamp);
+          bValue = getLogTimestampValue(b.timestamp);
         } else if (sortConfig.key === 'status') {
           // Sort by severity level first, then by review status
           const aLevel = a.detectionLevel === DetectionLevel.ADVERSARIAL || (a.detectionLevel === undefined && a.escalationRecommended) ? 3 : a.detectionLevel === DetectionLevel.SUSPICIOUS ? 2 : a.detectionLevel === DetectionLevel.INFORMATIONAL ? 1 : 0;
@@ -1380,7 +1454,7 @@ export default function App() {
       });
     }
     return sortableLogs;
-  }, [auditLogs, sortConfig]);
+  }, [auditLogs, ephemeralAuditLogs, sortConfig]);
 
   const visibleAuditLogs = useMemo(() => {
     return sortedAuditLogs.filter((log) => {
@@ -1440,7 +1514,7 @@ export default function App() {
   useEffect(() => {
     if (!profile) return;
     if (activeTab !== 'sam_spade') return;
-    if (samSpadeSession || samSpadeStatus === 'connecting') return;
+    if (samSpadeSession || samSpadeStatus !== 'idle') return;
 
     let cancelled = false;
 
@@ -1761,7 +1835,7 @@ export default function App() {
           } catch (e) { console.error(e); }
         }
       // Check for Human-in-the-Loop (HITL) trigger conditions
-      } else if (governanceConfig.isHitlActive && (sanitization.entropy > 4.0 || sanitization.syntacticScore > 50 || sanitization.isPotentiallyAdversarial)) {
+      } else if (governanceConfig.isHitlActive && (sanitization.detectionLevel >= DetectionLevel.SUSPICIOUS || sanitization.syntacticScore > 50 || sanitization.isPotentiallyAdversarial)) {
         responseText = "PENDING REVIEW: Your request has been flagged for manual review by a security analyst. Please wait.";
         setLatency(null);
         if (auditLogId) {
@@ -1882,27 +1956,77 @@ export default function App() {
   // feeds reviewed artifacts into the same downstream audit/review surfaces.
   const handleSamSpadeSubmit = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!samSpadeInput.trim() || isProcessing) return;
+    if (!samSpadeInput.trim() || samSpadeStatus === 'sending') return;
 
     const submittedPrompt = samSpadeInput;
+    let optimisticPlayerMessageId: string | null = null;
     setSamSpadeStatus('sending');
-    setSamSpadeInput('');
 
     try {
       const session = await ensureSamSpadeSession();
+      optimisticPlayerMessageId = crypto.randomUUID();
+      setSamSpadeSession((prev) => {
+        const activeSession = prev ?? session;
+        return {
+          ...activeSession,
+          updatedAt: new Date().toISOString(),
+          messages: [
+            ...activeSession.messages,
+            {
+              id: optimisticPlayerMessageId!,
+              role: 'player',
+              text: submittedPrompt,
+              createdAt: new Date().toISOString(),
+              reviewDisposition: 'queued',
+            },
+          ],
+        };
+      });
+
       const result = await sendSamSpadeMessage({
         sessionId: session.sessionId,
         prompt: submittedPrompt,
       });
       setSamSpadeSession(result.session);
-      setSamSpadeStatus('ready');
-      await appendSamSpadeReviewSurfaces(result.review, result.session);
-      toast.success(result.review.status === 'PENDING_REVIEW' ? 'Question queued for review' : 'Sam Spade answered');
+      if (result.review.status === 'PENDING_REVIEW' || result.review.escalationRecommended) {
+        setSamSpadeInput(submittedPrompt);
+        setSamSpadeInputAlert(true);
+        setSamSpadeUnapprovedNotice({
+          prompt: submittedPrompt,
+          message: result.review.response,
+        });
+        toast.error('Unapproved content detected');
+      } else {
+        setSamSpadeInput('');
+        setSamSpadeInputAlert(false);
+        setSamSpadeUnapprovedNotice(null);
+        toast.success('Sam Spade answered');
+      }
+      void appendSamSpadeReviewSurfaces(result.review, result.session);
     } catch (error) {
       console.error(error);
       setSamSpadeStatus('error');
       setSamSpadeInput(submittedPrompt);
+      setSamSpadeSession((prev) => {
+        if (!prev) return prev;
+        return {
+          ...prev,
+          updatedAt: new Date().toISOString(),
+          messages: [
+            ...prev.messages.filter((message) => message.id !== optimisticPlayerMessageId),
+            {
+              id: crypto.randomUUID(),
+              role: 'system',
+              text: error instanceof Error ? error.message : 'Sam Spade intake failed.',
+              createdAt: new Date().toISOString(),
+              reviewDisposition: 'queued',
+            },
+          ],
+        };
+      });
       toast.error(error instanceof Error ? error.message : 'Sam Spade intake failed.');
+    } finally {
+      setSamSpadeStatus('ready');
     }
   };
 
@@ -1910,7 +2034,7 @@ export default function App() {
   // so theory submissions show up in the same governed trail as question turns.
   const handleSamSpadeSolve = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!samSpadeTheory.trim()) return;
+    if (!samSpadeTheory.trim() || samSpadeStatus === 'sending') return;
 
     try {
       const session = await ensureSamSpadeSession();
@@ -1921,13 +2045,14 @@ export default function App() {
       });
       setSamSpadeSession(result.session);
       setSamSpadeTheory('');
-      setSamSpadeStatus('ready');
-      await appendSamSpadeReviewSurfaces(result.review, result.session);
+      void appendSamSpadeReviewSurfaces(result.review, result.session);
       toast.success(result.solved ? 'Case solved' : 'Theory submitted');
     } catch (error) {
       console.error(error);
       setSamSpadeStatus('error');
       toast.error(error instanceof Error ? error.message : 'Case solve request failed.');
+    } finally {
+      setSamSpadeStatus('ready');
     }
   };
 
@@ -2230,7 +2355,7 @@ export default function App() {
                           className="w-full rounded-none border-0 border-b border-slate-700 bg-transparent px-2 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus-visible:ring-0"
                           disabled={samSpadeStatus === 'sending'}
                         />
-                        <Button disabled={!samSpadeTheory.trim() || samSpadeStatus === 'sending'} className="w-full rounded-none border border-slate-700 bg-transparent font-mono text-xs uppercase tracking-[0.2em] text-slate-400 hover:bg-transparent">
+                        <Button type="submit" disabled={!samSpadeTheory.trim() || samSpadeStatus === 'sending'} className="w-full rounded-none border border-slate-700 bg-transparent font-mono text-xs uppercase tracking-[0.2em] text-slate-400 hover:bg-transparent">
                           Solve the Case
                         </Button>
                       </form>
@@ -2289,18 +2414,30 @@ export default function App() {
                         <div className="flex items-end gap-3">
                           <Input
                             value={samSpadeInput}
-                            onChange={(e) => setSamSpadeInput(e.target.value)}
+                            onChange={(e) => {
+                              setSamSpadeInput(e.target.value);
+                              if (samSpadeInputAlert) setSamSpadeInputAlert(false);
+                            }}
                             placeholder="Try your angle, sweetheart..."
-                            className="h-12 rounded-xl border-slate-800 bg-slate-900/40 text-sm placeholder:text-slate-600"
+                            className={`h-12 rounded-xl text-sm placeholder:text-slate-600 ${samSpadeInputAlert ? 'border-red-500 bg-red-950/20 text-red-100 focus-visible:ring-red-500/40' : 'border-slate-800 bg-slate-900/40'}`}
                             disabled={samSpadeStatus === 'sending'}
                           />
-                          <Button disabled={samSpadeStatus === 'sending' || !samSpadeInput.trim()} className="h-12 rounded-xl px-8 font-medium">
+                          <Button type="submit" disabled={samSpadeStatus === 'sending' || !samSpadeInput.trim()} className="h-12 rounded-xl px-8 font-medium">
                             Ask a Question
                           </Button>
                         </div>
                         <p className="text-xs text-slate-500">
                           Prompts from this case file are sent to the dedicated Sam Spade API first, then mirrored into Analyst Chat and Audit Logs under a dedicated CTF source.
                         </p>
+                        {samSpadeInputAlert && (
+                          <Alert className="border-red-500/40 bg-red-950/30 text-red-100">
+                            <ShieldAlert className="h-4 w-4 text-red-300" />
+                            <AlertTitle className="text-red-200">Unapproved Content Detected</AlertTitle>
+                            <AlertDescription className="text-red-100/90">
+                              This question was intercepted before it could be approved for gameplay. Revise the prompt and try again.
+                            </AlertDescription>
+                          </Alert>
+                        )}
                       </form>
                     </div>
                   </section>
@@ -2308,6 +2445,43 @@ export default function App() {
               </div>
             </div>
           )}
+
+          <Dialog
+            open={Boolean(samSpadeUnapprovedNotice)}
+            onOpenChange={(open) => {
+              if (!open) setSamSpadeUnapprovedNotice(null);
+            }}
+          >
+            <DialogContent className="border-red-500/30 bg-[#120909] text-slate-100 sm:max-w-md">
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-2 text-red-300">
+                  <ShieldAlert className="h-5 w-5" />
+                  Unapproved Content Detected
+                </DialogTitle>
+                <DialogDescription className="text-slate-400">
+                  Counter-Spy intercepted this Sam Spade question before it could be approved for gameplay.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="rounded-lg border border-red-500/20 bg-black/30 p-3">
+                  <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-red-300">Submitted Prompt</p>
+                  <p className="text-sm text-slate-200">{samSpadeUnapprovedNotice?.prompt}</p>
+                </div>
+                <div className="rounded-lg border border-slate-800 bg-black/30 p-3">
+                  <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-slate-400">Review Result</p>
+                  <p className="text-sm text-slate-300">{samSpadeUnapprovedNotice?.message}</p>
+                </div>
+              </div>
+              <DialogFooter>
+                <Button
+                  onClick={() => setSamSpadeUnapprovedNotice(null)}
+                  className="bg-red-600 text-white hover:bg-red-500"
+                >
+                  Revise Prompt
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
 
           {/* Chat Tab */}
           {activeTab === 'chat' && (
@@ -2417,6 +2591,7 @@ export default function App() {
                       {(sanitizationPreview || lastExecutedSanitization) ? (
                         (() => {
                           const displaySanitization = sanitizationPreview || lastExecutedSanitization;
+                          const hasSensitiveDataExposure = displaySanitization!.redactions.some((redaction) => PII_OR_SECRET_REDACTIONS.includes(redaction));
                           return (
                             <>
                               {/* Entropy Filter Display */}
@@ -2431,8 +2606,8 @@ export default function App() {
                                     <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
                                       <div 
                                         className={`h-full rounded-full transition-all ${
-                                          displaySanitization!.entropy > 4.0 ? 'bg-destructive' : 
-                                          displaySanitization!.entropy >= 3.0 ? 'bg-orange-500' : 
+                                          displaySanitization!.entropy > 4.8 ? 'bg-destructive' : 
+                                          displaySanitization!.entropy >= 3.8 ? 'bg-orange-500' : 
                                           'bg-green-500'
                                         }`} 
                                         style={{ width: `${Math.min(displaySanitization!.entropy * 10, 100)}%` }}
@@ -2443,12 +2618,12 @@ export default function App() {
                                   <div className="flex justify-between items-center">
                                     {/* Entropy Risk Level Text */}
                                     <p className="text-[10px] text-muted-foreground">
-                                      {displaySanitization!.entropy > 4.0 ? (
-                                        <span className="text-destructive font-semibold">High-Risk (&gt; 4.0)</span>
-                                      ) : displaySanitization!.entropy >= 3.0 ? (
-                                        <span className="text-orange-500 font-semibold">Suspicious (3.0 - 4.0)</span>
+                                      {displaySanitization!.entropy > 4.8 ? (
+                                        <span className="text-destructive font-semibold">High-Risk (&gt; 4.8)</span>
+                                      ) : displaySanitization!.entropy >= 3.8 ? (
+                                        <span className="text-orange-500 font-semibold">Suspicious (3.8 - 4.8)</span>
                                       ) : (
-                                        <span className="text-green-500 font-semibold">Normal (&lt; 3.0)</span>
+                                        <span className="text-green-500 font-semibold">Normal (&lt; 3.8)</span>
                                       )}
                                     </p>
                                     {/* Global Entropy Display */}
@@ -2501,6 +2676,16 @@ export default function App() {
                                   )}
                                 </div>
                               </div>
+
+                              {hasSensitiveDataExposure && (
+                                <Alert className="rounded-xl p-3 border-blue-500/30 bg-blue-500/10 text-blue-700">
+                                  <ShieldAlert className="w-4 h-4" />
+                                  <AlertTitle className="text-xs font-bold uppercase ml-2">Sensitive Data Alert</AlertTitle>
+                                  <AlertDescription className="text-[9px]">
+                                    Input contains PII or secret material. Treat this as a data-exposure event even when it is not otherwise classified as suspicious.
+                                  </AlertDescription>
+                                </Alert>
+                              )}
                               
                               {/* Adversarial/Suspicious Alert Display */}
                               {displaySanitization!.isPotentiallyAdversarial && (
@@ -2708,7 +2893,7 @@ export default function App() {
           {/* Metrics Tab */}
           {activeTab === 'metrics' && (
             <div className="flex flex-col h-full min-h-0 gap-6 overflow-y-auto pr-2">
-              <ThreatDashboard localReviewMode={localReviewMode} />
+              <ThreatDashboard localReviewMode={localReviewMode} localAuditLogs={auditLogs} />
             </div>
           )}
 
@@ -2849,7 +3034,7 @@ export default function App() {
                     <div key={log.id} className={`grid grid-cols-[120px_100px_100px_110px_1fr_100px_80px_80px] p-4 border-b border-border hover:bg-muted/30 transition-colors items-center ${isFalseNegative ? 'bg-red-500/10 border-red-500/30' : ''}`}>
                       {/* Timestamp */}
                       <span className="font-mono text-[10px] text-muted-foreground">
-                        {log.timestamp?.toDate().toLocaleString() || 'Pending...'}
+                        {formatLogTimestamp(log.timestamp)}
                       </span>
                       {/* User ID */}
                       <span className="font-mono text-[10px] text-muted-foreground pl-4">{log.userId.slice(0, 8)}...</span>

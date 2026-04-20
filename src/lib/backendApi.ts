@@ -181,6 +181,27 @@ function resolveBackendUrl(path: string) {
   return apiBaseUrl ? `${apiBaseUrl}${path}` : path;
 }
 
+async function fetchJsonWithTimeout(path: string, init?: RequestInit, timeoutMs: number = 10000) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(resolveBackendUrl(path), {
+      ...init,
+      signal: controller.signal,
+    });
+    const payload: unknown = await response.json();
+    return { response, payload };
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new Error('Request timed out while contacting the Counter-Spy backend.');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // Submit one prompt to the backend firewall intercept path.
 export async function interceptPrompt(input: {
   prompt: string;
@@ -249,15 +270,13 @@ export async function checkBackendHealth(): Promise<BackendHealthResponse> {
 export async function createSamSpadeSession(input?: {
   caseId?: string;
 }): Promise<SamSpadeSession> {
-  const response = await fetch(resolveBackendUrl('/v1/ctf/sam-spade/session'), {
+  const { response, payload } = await fetchJsonWithTimeout('/v1/ctf/sam-spade/session', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
     },
     body: JSON.stringify(input ?? {}),
   });
-
-  const payload: unknown = await response.json();
   if (!response.ok) {
     const errorPayload = z.object({ error: z.string() }).safeParse(payload);
     throw new Error(errorPayload.success ? errorPayload.data.error : 'Failed to create Sam Spade session.');
@@ -267,8 +286,7 @@ export async function createSamSpadeSession(input?: {
 }
 
 export async function getSamSpadeSession(sessionId: string): Promise<SamSpadeSession> {
-  const response = await fetch(resolveBackendUrl(`/v1/ctf/sam-spade/session/${sessionId}`));
-  const payload: unknown = await response.json();
+  const { response, payload } = await fetchJsonWithTimeout(`/v1/ctf/sam-spade/session/${sessionId}`);
 
   if (!response.ok) {
     const errorPayload = z.object({ error: z.string() }).safeParse(payload);
@@ -282,15 +300,13 @@ export async function sendSamSpadeMessage(input: {
   sessionId: string;
   prompt: string;
 }): Promise<{ session: SamSpadeSession; review: SamSpadeReviewArtifact }> {
-  const response = await fetch(resolveBackendUrl('/v1/ctf/sam-spade/message'), {
+  const { response, payload } = await fetchJsonWithTimeout('/v1/ctf/sam-spade/message', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
     },
     body: JSON.stringify(input),
   });
-
-  const payload: unknown = await response.json();
   if (!response.ok) {
     const errorPayload = z.object({ error: z.string() }).safeParse(payload);
     throw new Error(errorPayload.success ? errorPayload.data.error : 'Failed to submit Sam Spade message.');
@@ -303,15 +319,13 @@ export async function solveSamSpadeCase(input: {
   sessionId: string;
   theory: string;
 }): Promise<{ session: SamSpadeSession; solved: boolean; evaluation: string; review: SamSpadeReviewArtifact }> {
-  const response = await fetch(resolveBackendUrl('/v1/ctf/sam-spade/solve'), {
+  const { response, payload } = await fetchJsonWithTimeout('/v1/ctf/sam-spade/solve', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
     },
     body: JSON.stringify(input),
   });
-
-  const payload: unknown = await response.json();
   if (!response.ok) {
     const errorPayload = z.object({ error: z.string() }).safeParse(payload);
     throw new Error(errorPayload.success ? errorPayload.data.error : 'Failed to solve Sam Spade case.');

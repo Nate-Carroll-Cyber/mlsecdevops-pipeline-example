@@ -24,6 +24,7 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 
 interface ThreatDashboardProps {
   localReviewMode?: boolean;
+  localAuditLogs?: any[];
 }
 
 const emptyHourlyData = Array(24).fill(0).map((_, hour) => ({ hour, threats: 0 }));
@@ -37,8 +38,14 @@ const emptyObfuscationHourlyData = Array(24).fill(0).map((_, hour) => ({
 }));
 const PII_DETECTION_FLAGS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN'];
 const SECRET_DETECTION_FLAGS = ['AWS_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'SECRET_KEY'];
-const DIRECT_OBFUSCATION_FLAGS = ['URL_ENCODING', 'HTML_ENTITIES', 'LEETSPEAK', 'ROT13', 'REVERSE_TEXT', 'NATO_PHONETIC', 'MORSE_CODE', 'RECURSIVE_DECODE'];
+const DIRECT_OBFUSCATION_FLAGS = ['URL_ENCODING', 'HTML_ENTITIES', 'UNICODE_ESCAPES', 'COMPATIBILITY_GLYPHS', 'SYMBOL_SUBSTITUTION', 'LEETSPEAK', 'ROT13', 'REVERSE_TEXT', 'NATO_PHONETIC', 'MORSE_CODE', 'BRAILLE', 'REGIONAL_INDICATORS', 'RECURSIVE_DECODE'];
 const STRUCTURAL_OBFUSCATION_FLAGS = ['END_SEQUENCE', 'CHUNKING', 'VARIABLE_EXPANSION', 'VERTICAL_TEXT'];
+
+function hasAnySignal(log: any, signalSet: string[]): boolean {
+  const detectionFlags = Array.isArray(log.detectionFlags) ? log.detectionFlags : [];
+  const obfuscationTechniques = getObfuscationTechniques(log);
+  return detectionFlags.some((flag: string) => signalSet.includes(flag)) || obfuscationTechniques.some((flag: string) => signalSet.includes(flag));
+}
 
 // Prefer the persisted summary when it exists; fall back to raw detection flags for
 // older records so historical audit data still renders correctly.
@@ -63,7 +70,7 @@ function getHeatColor(count: number, maxCount: number): string {
 }
 
 // Export the ThreatDashboard functional component
-export function ThreatDashboard({ localReviewMode = false }: ThreatDashboardProps) {
+export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }: ThreatDashboardProps) {
   // State to hold the results of the anomaly detection analysis
   const [metrics, setMetrics] = useState<any>(null);
   // State to hold the calculated False Positive Rate metrics
@@ -137,74 +144,186 @@ export function ThreatDashboard({ localReviewMode = false }: ThreatDashboardProp
   // Effect hook to load and calculate metrics data
   useEffect(() => {
     async function loadMetrics() {
-      if (localReviewMode) {
-        setMetrics({
-          isAnomaly: false,
-          currentHourlyRate: 0,
-          baselineHourlyRate: 0,
-          spikeRatio: 0,
-          topAttackerId: null
+      const buildMetricsFromLogs = (logs: any[]) => {
+        const filteredLogs = sourceFilter === 'all'
+          ? logs
+          : logs.filter((log) => log.source === sourceFilter);
+
+        const threatLogs: ThreatLog[] = filteredLogs
+          .filter(log => log.detectionLevel >= 2)
+          .map(log => ({
+            userId: log.userId,
+            detectionLevel: log.detectionLevel,
+            timestamp: log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp),
+          }));
+
+        const analysis = detectThreatSpikes(threatLogs);
+        setMetrics(analysis);
+
+        const fprAnalysis = calculateFalsePositiveMetrics(filteredLogs);
+        setFprMetrics(fprAnalysis);
+
+        const hourlyData = Array(24).fill(0).map((_, i) => ({ hour: i, threats: 0 }));
+        threatLogs.forEach(log => {
+          const hour = log.timestamp.getHours();
+          const bucket = hourlyData[hour];
+          if (bucket) bucket.threats += 1;
         });
-        setFprMetrics({
-          strictFPR: 0,
-          falseNegativeRate: 0
+
+        const currentHour = new Date().getHours();
+        const reorderedData = [];
+        for (let i = 1; i <= 24; i++) {
+          const h = (currentHour + i) % 24;
+          reorderedData.push(hourlyData[h]);
+        }
+        setChartData(reorderedData);
+
+        const obfuscationHourlyData = Array(24).fill(0).map((_, i) => ({
+          hour: i,
+          urlEncodingHits: 0,
+          rot13Hits: 0,
+          leetspeakHits: 0,
+          natoHits: 0,
+          morseHits: 0,
+        }));
+        filteredLogs.forEach((log) => {
+          const techniques = getObfuscationTechniques(log);
+          if (techniques.length === 0) return;
+          const stamp = log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp);
+          const hour = stamp.getHours();
+          const bucket = obfuscationHourlyData[hour];
+          if (!bucket) return;
+          if (techniques.includes('URL_ENCODING')) bucket.urlEncodingHits += 1;
+          if (techniques.includes('ROT13')) bucket.rot13Hits += 1;
+          if (techniques.includes('LEETSPEAK')) bucket.leetspeakHits += 1;
+          if (techniques.includes('NATO_PHONETIC')) bucket.natoHits += 1;
+          if (techniques.includes('MORSE_CODE')) bucket.morseHits += 1;
         });
-        setChartData(emptyHourlyData);
-        setObfuscationChartData(emptyObfuscationHourlyData);
+        const reorderedObfuscationData = [];
+        for (let i = 1; i <= 24; i++) {
+          const h = (currentHour + i) % 24;
+          reorderedObfuscationData.push(obfuscationHourlyData[h]);
+        }
+        setObfuscationChartData(reorderedObfuscationData);
+
+        const pendingLogs = filteredLogs.filter((log) => log.status === 'PENDING_REVIEW');
+        const reviewedLogs = filteredLogs.filter((log) => log.reviewed === true);
+        const averagePendingHours = pendingLogs.length > 0
+          ? pendingLogs.reduce((sum, log) => {
+              const stamp = log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp);
+              return sum + ((Date.now() - stamp.getTime()) / (1000 * 60 * 60));
+            }, 0) / pendingLogs.length
+          : 0;
+
+        const totalLogs = filteredLogs.length || 1;
+        const latencyValues = filteredLogs
+          .map((log) => Number(log.latencyMs || 0))
+          .filter((latency) => Number.isFinite(latency) && latency > 0)
+          .sort((a, b) => a - b);
+        const averageLatencyMs = latencyValues.length > 0
+          ? latencyValues.reduce((sum, latency) => sum + latency, 0) / latencyValues.length
+          : 0;
+        const p95Index = latencyValues.length > 0 ? Math.max(0, Math.ceil(latencyValues.length * 0.95) - 1) : 0;
+        const p95LatencyMs = latencyValues.length > 0 ? latencyValues[p95Index] : 0;
+        const maxLatencyMs = latencyValues.length > 0 ? latencyValues[latencyValues.length - 1] : 0;
+        const redosTrips = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('ReDoS_ATTEMPT_DETECTED')).length;
+        const highLatencyCount = filteredLogs.filter((log) => Number(log.latencyMs || 0) > 100).length;
+        const piiHits = filteredLogs.filter((log) => hasAnySignal(log, PII_DETECTION_FLAGS)).length;
+        const secretHits = filteredLogs.filter((log) => hasAnySignal(log, SECRET_DETECTION_FLAGS)).length;
+        const regexHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('REGEX_MATCH')).length;
+        const keywordHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.some((flag: string) => flag === 'BLOCKED_KEYWORD' || flag.startsWith('BLOCKED_KEYWORD:'))).length;
+        const topicHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('FORBIDDEN_TOPIC')).length;
+        const obfuscatedHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('OBFUSCATED_INSTRUCTION')).length;
+        const urlEncodingHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('URL_ENCODING')).length;
+        const htmlEntityHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('HTML_ENTITIES')).length;
+        const leetspeakHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('LEETSPEAK')).length;
+        const rot13Hits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('ROT13')).length;
+        const reverseTextHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('REVERSE_TEXT')).length;
+        const natoHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('NATO_PHONETIC')).length;
+        const morseHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('MORSE_CODE')).length;
+        const recursiveDecodeHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('RECURSIVE_DECODE')).length;
+        const structuralHits = filteredLogs.filter((log) =>
+          Array.isArray(log.detectionFlags) && log.detectionFlags.some((flag: string) => STRUCTURAL_OBFUSCATION_FLAGS.includes(flag))
+        ).length;
+        const atlasColumns = ATLAS_TACTICS.map((tactic) => {
+          const techniques = ATLAS_TECHNIQUE_DEFINITIONS
+            .filter((definition) => definition.tactic === tactic)
+            .map((definition) => ({
+              ...definition,
+              count: filteredLogs.filter((log) => log.atlasTechniqueId === definition.id).length,
+            }));
+          return { tactic, techniques };
+        });
+        const maxAtlasCount = atlasColumns.reduce((maxCount, column) => {
+          const columnMax = column.techniques.reduce((innerMax, technique) => Math.max(innerMax, technique.count), 0);
+          return Math.max(maxCount, columnMax);
+        }, 0);
+
+        const averagePromptLength = filteredLogs.length > 0
+          ? filteredLogs.reduce((sum, log) => sum + (log.sanitizedPrompt?.length || 0), 0) / filteredLogs.length
+          : 0;
+        const averageLineCount = filteredLogs.length > 0
+          ? filteredLogs.reduce((sum, log) => sum + (log.sanitizedPrompt ? log.sanitizedPrompt.split(/\r?\n/).length : 0), 0) / filteredLogs.length
+          : 0;
+        const averageEntropy = filteredLogs.length > 0
+          ? filteredLogs.reduce((sum, log) => sum + (log.entropy || 0), 0) / filteredLogs.length
+          : 0;
+        const averageSuspiciousChunks = filteredLogs.length > 0
+          ? filteredLogs.reduce((sum, log) => sum + ((log.suspiciousChunks || []).length), 0) / filteredLogs.length
+          : 0;
+
         setOperationalMetrics({
           hitl: {
-            pendingCount: 0,
-            reviewedCount: 0,
-            averagePendingHours: 0,
+            pendingCount: pendingLogs.length,
+            reviewedCount: reviewedLogs.length,
+            averagePendingHours: parseFloat(averagePendingHours.toFixed(1)),
           },
           latency: {
-            averageLatencyMs: 0,
-            p95LatencyMs: 0,
-            maxLatencyMs: 0,
+            averageLatencyMs: parseFloat(averageLatencyMs.toFixed(1)),
+            p95LatencyMs: parseFloat((p95LatencyMs ?? 0).toFixed(1)),
+            maxLatencyMs: parseFloat((maxLatencyMs ?? 0).toFixed(1)),
           },
           resilience: {
-            redosTrips: 0,
-            highLatencyCount: 0,
-            highLatencyRate: 0,
+            redosTrips,
+            highLatencyCount,
+            highLatencyRate: parseFloat(((highLatencyCount / totalLogs) * 100).toFixed(1)),
           },
           promptShape: {
-            averagePromptLength: 0,
-            averageLineCount: 0,
-            averageEntropy: 0,
-            averageSuspiciousChunks: 0,
+            averagePromptLength: Math.round(averagePromptLength),
+            averageLineCount: parseFloat(averageLineCount.toFixed(1)),
+            averageEntropy: parseFloat(averageEntropy.toFixed(2)),
+            averageSuspiciousChunks: parseFloat(averageSuspiciousChunks.toFixed(1)),
           },
           detectionSignals: {
-            piiHits: 0,
-            secretHits: 0,
-            regexHits: 0,
-            keywordHits: 0,
-            topicHits: 0,
-            obfuscatedHits: 0,
-            foreignLanguageHits: 0,
-            spellingObfuscationHits: 0,
+            piiHits,
+            secretHits,
+            regexHits,
+            keywordHits,
+            topicHits,
+            obfuscatedHits,
+            foreignLanguageHits: filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('FOREIGN_LANGUAGE')).length,
+            spellingObfuscationHits: filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('SPELLING_OBFUSCATION')).length,
           },
           obfuscationSignals: {
-            urlEncodingHits: 0,
-            htmlEntityHits: 0,
-            leetspeakHits: 0,
-            rot13Hits: 0,
-            reverseTextHits: 0,
-            natoHits: 0,
-            morseHits: 0,
-            recursiveDecodeHits: 0,
-            structuralHits: 0,
+            urlEncodingHits,
+            htmlEntityHits,
+            leetspeakHits,
+            rot13Hits,
+            reverseTextHits,
+            natoHits,
+            morseHits,
+            recursiveDecodeHits,
+            structuralHits,
           },
           atlasHeatmap: {
-            maxCount: 0,
-            columns: ATLAS_TACTICS.map((tactic) => ({
-              tactic,
-              techniques: ATLAS_TECHNIQUE_DEFINITIONS.filter((definition) => definition.tactic === tactic).map((definition) => ({
-                ...definition,
-                count: 0,
-              })),
-            })),
+            maxCount: maxAtlasCount,
+            columns: atlasColumns,
           },
         });
+      };
+
+      if (localReviewMode) {
+        buildMetricsFromLogs(localAuditLogs);
         return;
       }
 
@@ -336,8 +455,8 @@ export function ThreatDashboard({ localReviewMode = false }: ThreatDashboardProp
         const maxLatencyMs = latencyValues.length > 0 ? latencyValues[latencyValues.length - 1] : 0;
         const redosTrips = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('ReDoS_ATTEMPT_DETECTED')).length;
         const highLatencyCount = filteredLogs.filter((log) => Number(log.latencyMs || 0) > 100).length;
-        const piiHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.some((flag: string) => PII_DETECTION_FLAGS.includes(flag))).length;
-        const secretHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.some((flag: string) => SECRET_DETECTION_FLAGS.includes(flag))).length;
+        const piiHits = filteredLogs.filter((log) => hasAnySignal(log, PII_DETECTION_FLAGS)).length;
+        const secretHits = filteredLogs.filter((log) => hasAnySignal(log, SECRET_DETECTION_FLAGS)).length;
         const regexHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('REGEX_MATCH')).length;
         const keywordHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.some((flag: string) => flag === 'BLOCKED_KEYWORD' || flag.startsWith('BLOCKED_KEYWORD:'))).length;
         const topicHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('FORBIDDEN_TOPIC')).length;
@@ -435,7 +554,7 @@ export function ThreatDashboard({ localReviewMode = false }: ThreatDashboardProp
     
     // Execute the metrics loading function
     loadMetrics();
-  }, [localReviewMode, sourceFilter]);
+  }, [localReviewMode, sourceFilter, localAuditLogs]);
 
   // Render a loading state if metrics haven't loaded yet
   if (!metrics) {

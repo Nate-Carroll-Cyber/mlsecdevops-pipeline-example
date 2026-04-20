@@ -31,8 +31,10 @@ const SENSITIVE_PATTERNS: SensitivePattern[] = [
   { name: 'API_KEY', regex: /\b[0-9a-fA-F]{32,64}\b/g },
   { name: 'JWT', regex: /\beyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\b/g },
   { name: 'CANARY_TOKEN', regex: /COUNTERSPY_CANARY_TOKEN_[0-9a-fA-F-]{36}/g },
-  { name: 'SECRET_KEY', regex: /(?:secret[-_]?key|password|passwd|api[-_]?key|token)(?:\s+is\s+|\s*[:=]\s*|\s+)([^\s]+)/gi },
+  { name: 'SECRET_KEY', regex: /(?:secret[-_]?key|password|passwd|api[-_]?key|token)(?:\s+is\s+|\s*[:=]\s*)([^\s]+)/gi },
 ];
+const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
+const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
 
 const BLOCKED_KEYWORDS = [
   'ignore all previous instructions',
@@ -61,19 +63,30 @@ const BASE64_SEGMENT_REGEX = /(?:^|[^A-Za-z0-9+/=])([A-Za-z0-9+/]{20,}={0,2})(?=
 const HEX_SEGMENT_REGEX = /\b(?:0x)?(?:[A-Fa-f0-9]{2}){12,}\b/g;
 const URL_SEGMENT_REGEX = /(?:%[0-9A-Fa-f]{2}){6,}/g;
 const HTML_ENTITY_SEGMENT_REGEX = /(?:&#(?:x[0-9A-Fa-f]+|\d+);){4,}/g;
+const UNICODE_ESCAPE_SEGMENT_REGEX = /(?:(?:\\u[0-9A-Fa-f]{4})|(?:\\x[0-9A-Fa-f]{2})){2,}/g;
 const NATO_SEGMENT_REGEX = /\b(?:alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliet|kilo|lima|mike|november|oscar|papa|quebec|romeo|sierra|tango|uniform|victor|whiskey|x-ray|xray|yankee|zulu)(?:\s+(?:alpha|bravo|charlie|delta|echo|foxtrot|golf|hotel|india|juliet|kilo|lima|mike|november|oscar|papa|quebec|romeo|sierra|tango|uniform|victor|whiskey|x-ray|xray|yankee|zulu)){3,}\b/gi;
 const MORSE_SEGMENT_REGEX = /(?:[.\-]+(?:\s+[.\-/]+){3,})/g;
+const BRAILLE_SEGMENT_REGEX = /(?:[\u2800-\u28FF]+\s*){2,}/gu;
+const REGIONAL_INDICATOR_SEGMENT_REGEX = /(?:[\u{1F1E6}-\u{1F1FF}]\s*){2,}/gu;
 const MAX_DECODE_DEPTH = 3;
 const MAX_DECODE_SEGMENTS = 24;
+const SUSPICIOUS_ENTROPY_THRESHOLD = 3.8;
+const ADVERSARIAL_ENTROPY_THRESHOLD = 4.8;
+const VERDICT_SUSPICIOUS_ENTROPY_THRESHOLD = 4.5;
 type DecodeTelemetry = 'plain_text' | 'single_hop_decode' | 'recursive_decode';
 type ObfuscationSignal =
   | 'URL_ENCODING'
   | 'HTML_ENTITIES'
+  | 'UNICODE_ESCAPES'
+  | 'COMPATIBILITY_GLYPHS'
+  | 'SYMBOL_SUBSTITUTION'
   | 'LEETSPEAK'
   | 'ROT13'
   | 'REVERSE_TEXT'
   | 'NATO_PHONETIC'
   | 'MORSE_CODE'
+  | 'BRAILLE'
+  | 'REGIONAL_INDICATORS'
   | 'RECURSIVE_DECODE'
   | 'END_SEQUENCE'
   | 'CHUNKING'
@@ -84,6 +97,9 @@ const END_SEQUENCE_REGEX = /<\/s>|<\|im_end\|>/i;
 const CHUNKING_REGEX = /(?:^|\n)Part\s+\d+:\s+/i;
 const VARIABLE_EXPANSION_REGEX = /\blet\s+v\d+\s*=|console\.log\(/i;
 const VERTICAL_TEXT_REGEX = /^(?:.{1,2}\n){5,}.{1,2}$/m;
+const NON_ASCII_REGEX = /[^\x00-\x7F]/;
+const COMBINING_MARK_REGEX = /\p{M}/u;
+const SYMBOL_LIKE_REGEX = /[\p{S}\p{M}]/u;
 const CYRILLIC_REGEX = /[\u0400-\u04FF]/;
 const ARABIC_REGEX = /[\u0600-\u06FF]/;
 const CJK_REGEX = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/;
@@ -107,6 +123,13 @@ const COMMON_CORRECTIONS: Record<string, string> = {
   systm: 'system',
   sysytem: 'system',
   yoru: 'your',
+};
+const COMPATIBILITY_GLYPH_REGEX = /[\u2460-\u24FF\u3200-\u32FF\uFF00-\uFFEF]/g;
+const CYRILLIC_CONFUSABLES: Record<string, string> = {
+  а: 'a', А: 'a', е: 'e', Е: 'e', о: 'o', О: 'o', р: 'p', Р: 'p',
+  с: 'c', С: 'c', у: 'y', У: 'y', х: 'x', Х: 'x', і: 'i', І: 'i',
+  к: 'k', К: 'k', м: 'm', М: 'm', т: 't', Т: 't', в: 'b', В: 'b',
+  н: 'h', Н: 'h',
 };
 
 const FOREIGN_LANGUAGE_STOPWORDS: Record<string, string[]> = {
@@ -151,6 +174,14 @@ const MORSE_TO_CHAR: Record<string, string> = {
   '-.--': 'y', '--..': 'z', '/': ' ',
 };
 
+const BRAILLE_TO_CHAR: Record<string, string> = {
+  '⠁': 'a', '⠃': 'b', '⠉': 'c', '⠙': 'd', '⠑': 'e', '⠋': 'f',
+  '⠛': 'g', '⠓': 'h', '⠊': 'i', '⠚': 'j', '⠅': 'k', '⠇': 'l',
+  '⠍': 'm', '⠝': 'n', '⠕': 'o', '⠏': 'p', '⠟': 'q', '⠗': 'r',
+  '⠎': 's', '⠞': 't', '⠥': 'u', '⠧': 'v', '⠺': 'w', '⠭': 'x',
+  '⠽': 'y', '⠵': 'z',
+};
+
 function calculateEntropy(value: string): number {
   if (value.length === 0) return 0;
 
@@ -165,11 +196,84 @@ function calculateEntropy(value: string): number {
   }, 0);
 }
 
+function calculateEntropyRiskBoost(value: string): number {
+  const meaningfulChars = [...value].filter((char) => !/\s/.test(char));
+  if (meaningfulChars.length < 6) return 0;
+
+  const nonAsciiCount = meaningfulChars.filter((char) => /[^\x00-\x7F]/.test(char)).length;
+  const symbolLikeCount = meaningfulChars.filter((char) => /[\p{S}\p{M}]/u.test(char)).length;
+  const combiningCount = meaningfulChars.filter((char) => /\p{M}/u.test(char)).length;
+  const uniqueChars = new Set(meaningfulChars);
+
+  const nonAsciiRatio = nonAsciiCount / meaningfulChars.length;
+  const symbolLikeRatio = symbolLikeCount / meaningfulChars.length;
+
+  let boost = 0;
+  if (nonAsciiRatio >= 0.35) boost += 0.35;
+  if (symbolLikeRatio >= 0.2) boost += 0.6;
+  if (symbolLikeRatio >= 0.4) boost += 0.35;
+  if (combiningCount >= 2) boost += 0.65;
+  if (uniqueChars.size <= 3 && symbolLikeRatio >= 0.6 && meaningfulChars.length >= 10) boost += 1.1;
+
+  return Math.min(boost, 1.75);
+}
+
+function calculateEntropyLanguagePenalty(value: string): number {
+  const chars = [...value];
+  if (chars.length < 20) return 0;
+
+  const letters = chars.filter((char) => /[a-z]/i.test(char));
+  if (letters.length === 0) return 0;
+
+  const meaningfulChars = chars.filter((char) => !/\s/.test(char));
+  const letterRatio = letters.length / meaningfulChars.length;
+  const whitespaceRatio = chars.filter((char) => /\s/.test(char)).length / chars.length;
+  const nonAsciiRatio = meaningfulChars.filter((char) => /[^\x00-\x7F]/.test(char)).length / meaningfulChars.length;
+  const symbolLikeRatio = meaningfulChars.filter((char) => /[\p{S}\p{M}]/u.test(char)).length / meaningfulChars.length;
+  const digitRatio = meaningfulChars.filter((char) => /\d/.test(char)).length / meaningfulChars.length;
+  const vowelRatio = letters.filter((char) => /[aeiou]/i.test(char)).length / letters.length;
+
+  const looksLikePlainProse =
+    letterRatio >= 0.55 &&
+    whitespaceRatio >= 0.1 &&
+    nonAsciiRatio < 0.05 &&
+    symbolLikeRatio < 0.08 &&
+    digitRatio < 0.2 &&
+    vowelRatio >= 0.2 &&
+    vowelRatio <= 0.65;
+
+  return looksLikePlainProse ? 0.95 : 0;
+}
+
+function hasEntropyEscalationContext(value: string): boolean {
+  const meaningfulChars = [...value].filter((char) => !/\s/.test(char));
+  if (meaningfulChars.length < 6) return false;
+
+  const nonAsciiCount = meaningfulChars.filter((char) => /[^\x00-\x7F]/.test(char)).length;
+  const symbolLikeCount = meaningfulChars.filter((char) => /[\p{S}\p{M}]/u.test(char)).length;
+  const combiningCount = meaningfulChars.filter((char) => /\p{M}/u.test(char)).length;
+  const nonLetterCount = meaningfulChars.filter((char) => /[^a-z]/i.test(char)).length;
+  const uniqueChars = new Set(meaningfulChars);
+
+  const nonAsciiRatio = nonAsciiCount / meaningfulChars.length;
+  const symbolLikeRatio = symbolLikeCount / meaningfulChars.length;
+  const nonLetterRatio = nonLetterCount / meaningfulChars.length;
+
+  return combiningCount >= 1 ||
+    nonAsciiRatio >= 0.18 ||
+    symbolLikeRatio >= 0.14 ||
+    nonLetterRatio >= 0.38 ||
+    (uniqueChars.size <= 3 && nonLetterRatio >= 0.7 && meaningfulChars.length >= 8);
+}
+
 function analyzeSlidingWindowEntropy(prompt: string) {
   const windowSize = 35;
   const stepSize = 5;
-  const threshold = 4.5;
-  const globalEntropy = calculateEntropy(prompt);
+  const threshold = SUSPICIOUS_ENTROPY_THRESHOLD;
+  const globalEntropy = Math.max(
+    0,
+    calculateEntropy(prompt) + calculateEntropyRiskBoost(prompt) - calculateEntropyLanguagePenalty(prompt),
+  );
   let maxEntropy = 0;
   const suspiciousChunks: string[] = [];
 
@@ -179,7 +283,10 @@ function analyzeSlidingWindowEntropy(prompt: string) {
   } else {
     for (let index = 0; index <= prompt.length - windowSize; index += stepSize) {
       const chunk = prompt.substring(index, index + windowSize);
-      const entropy = calculateEntropy(chunk);
+      const entropy = Math.max(
+        0,
+        calculateEntropy(chunk) + calculateEntropyRiskBoost(chunk) - calculateEntropyLanguagePenalty(chunk),
+      );
       maxEntropy = Math.max(maxEntropy, entropy);
       if (entropy >= threshold) suspiciousChunks.push(chunk);
     }
@@ -230,6 +337,8 @@ function normalizeWithoutLeet(prompt: string): string {
 
 function normalizeForPolicy(prompt: string): string {
   return normalizeWithoutLeet(prompt)
+    .replace(/./g, (char) => CYRILLIC_CONFUSABLES[char] ?? char)
+    .replace(/[_./\\-]+/g, ' ')
     .replace(/0/g, 'o')
     .replace(/1/g, 'i')
     .replace(/3/g, 'e')
@@ -237,13 +346,51 @@ function normalizeForPolicy(prompt: string): string {
     .replace(/5/g, 's')
     .replace(/7/g, 't')
     .replace(/8/g, 'b')
-    .replace(/@/g, 'a');
+    .replace(/@/g, 'a')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function hasCompatibilityGlyphObfuscation(prompt: string): boolean {
+  return COMPATIBILITY_GLYPH_REGEX.test(prompt) && normalizeWithoutLeet(prompt) !== prompt.toLowerCase().replace(ZERO_WIDTH_CHAR_REGEX, '');
 }
 
 function hasLeetspeakObfuscation(prompt: string): boolean {
-  const replacementCount = (prompt.match(/[0134578@]/g) || []).length;
-  if (replacementCount < 2 || !/[a-zA-Z]/.test(prompt)) return false;
-  return normalizeForPolicy(prompt) !== normalizeWithoutLeet(prompt);
+  const tokens = prompt.match(/\b[\w@]+\b/g) || [];
+  const suspiciousTokens = tokens.filter((token) => {
+    const replacementCount = (token.match(/[0134578@]/g) || []).length;
+    const hasLetters = /[a-zA-Z]/.test(token);
+    const hasLeetishShape = /^[a-zA-Z0-9@]+$/.test(token);
+    if (!hasLetters || !hasLeetishShape || replacementCount < 2) return false;
+    return normalizeForPolicy(token) !== normalizeWithoutLeet(token);
+  });
+
+  return suspiciousTokens.length > 0;
+}
+
+function hasSymbolSubstitutionObfuscation(prompt: string): boolean {
+  const meaningfulChars = [...prompt].filter((char) => !/\s/.test(char));
+  if (meaningfulChars.length < 6) return false;
+
+  const interestingChars = meaningfulChars.filter((char) =>
+    NON_ASCII_REGEX.test(char) || SYMBOL_LIKE_REGEX.test(char) || COMBINING_MARK_REGEX.test(char)
+  );
+  if (interestingChars.length < 6) return false;
+
+  const nonAsciiCount = interestingChars.filter((char) => NON_ASCII_REGEX.test(char)).length;
+  const symbolLikeCount = interestingChars.filter((char) => SYMBOL_LIKE_REGEX.test(char)).length;
+  const combiningCount = interestingChars.filter((char) => COMBINING_MARK_REGEX.test(char)).length;
+  const uniqueChars = new Set(interestingChars);
+
+  const interestingRatio = interestingChars.length / meaningfulChars.length;
+  const nonAsciiRatio = nonAsciiCount / interestingChars.length;
+  const symbolLikeRatio = symbolLikeCount / interestingChars.length;
+  const binarySymbolPattern = uniqueChars.size <= 3 && symbolLikeRatio >= 0.6 && interestingChars.length >= 6;
+
+  return binarySymbolPattern ||
+    combiningCount >= 2 ||
+    (interestingRatio >= 0.25 && nonAsciiRatio >= 0.35 && symbolLikeRatio >= 0.2) ||
+    (interestingRatio >= 0.25 && nonAsciiRatio >= 0.7 && uniqueChars.size >= 4);
 }
 
 function collapseRepeatedLetters(word: string): string {
@@ -353,6 +500,17 @@ function decodeHtmlEntitySegment(segment: string): string | null {
   }
 }
 
+function decodeUnicodeEscapeSegment(segment: string): string | null {
+  try {
+    const decoded = segment
+      .replace(/\\u([0-9A-Fa-f]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+      .replace(/\\x([0-9A-Fa-f]{2})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+    return decoded !== segment ? decoded : null;
+  } catch {
+    return null;
+  }
+}
+
 function decodeNatoSegment(segment: string): string | null {
   const words = segment.toLowerCase().trim().split(/\s+/);
   if (words.length < 4) return null;
@@ -365,6 +523,39 @@ function decodeMorseSegment(segment: string): string | null {
   if (tokens.length < 4) return null;
   const decoded = tokens.map((token) => MORSE_TO_CHAR[token]).join('');
   return decoded && !decoded.includes('undefined') ? decoded : null;
+}
+
+function decodeBrailleSegment(segment: string): string | null {
+  const cells = [...segment];
+  if (cells.length < 2) return null;
+  let makeNextUppercase = false;
+  let decoded = '';
+  for (const cell of cells) {
+    if (cell === ' ') {
+      decoded += ' ';
+      continue;
+    }
+    if (cell === '⠠') {
+      makeNextUppercase = true;
+      continue;
+    }
+    const nextChar = BRAILLE_TO_CHAR[cell];
+    if (!nextChar) return null;
+    decoded += makeNextUppercase ? nextChar.toUpperCase() : nextChar;
+    makeNextUppercase = false;
+  }
+  return decoded.trim().replace(/\s+/g, ' ') || null;
+}
+
+function decodeRegionalIndicatorSegment(segment: string): string | null {
+  const codepoints = [...segment].filter((char) => /[\u{1F1E6}-\u{1F1FF}]/u.test(char));
+  if (codepoints.length < 2) return null;
+  const decoded = codepoints.map((char) => {
+    const value = char.codePointAt(0);
+    if (value === undefined) return '';
+    return String.fromCharCode(65 + (value - 0x1F1E6));
+  }).join('');
+  return decoded || null;
 }
 
 function extractDecodedSegments(prompt: string): {
@@ -441,6 +632,20 @@ function extractDecodedSegments(prompt: string): {
       usedObfuscation = true;
     }
 
+    const unicodeEscapeMatches = current.value.match(UNICODE_ESCAPE_SEGMENT_REGEX) || [];
+    for (const match of unicodeEscapeMatches) {
+      if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
+      const decoded = decodeUnicodeEscapeSegment(match);
+      if (!decoded || seenSegments.has(decoded)) continue;
+      seenSegments.add(decoded);
+      decodedSegments.push(decoded);
+      signals.add('UNICODE_ESCAPES');
+      const nextDepth = current.depth + 1;
+      queue.push({ value: decoded, depth: nextDepth });
+      maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
+      usedObfuscation = true;
+    }
+
     const natoMatches = current.value.match(NATO_SEGMENT_REGEX) || [];
     for (const match of natoMatches) {
       if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
@@ -469,6 +674,34 @@ function extractDecodedSegments(prompt: string): {
       usedObfuscation = true;
     }
 
+    const brailleMatches = current.value.match(BRAILLE_SEGMENT_REGEX) || [];
+    for (const match of brailleMatches) {
+      if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
+      const decoded = decodeBrailleSegment(match);
+      if (!decoded || seenSegments.has(decoded)) continue;
+      seenSegments.add(decoded);
+      decodedSegments.push(decoded);
+      signals.add('BRAILLE');
+      const nextDepth = current.depth + 1;
+      queue.push({ value: decoded, depth: nextDepth });
+      maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
+      usedObfuscation = true;
+    }
+
+    const regionalMatches = current.value.match(REGIONAL_INDICATOR_SEGMENT_REGEX) || [];
+    for (const match of regionalMatches) {
+      if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
+      const decoded = decodeRegionalIndicatorSegment(match);
+      if (!decoded || seenSegments.has(decoded)) continue;
+      seenSegments.add(decoded);
+      decodedSegments.push(decoded);
+      signals.add('REGIONAL_INDICATORS');
+      const nextDepth = current.depth + 1;
+      queue.push({ value: decoded, depth: nextDepth });
+      maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
+      usedObfuscation = true;
+    }
+
   }
 
   return { decodedSegments, usedObfuscation, maxDecodeDepth, signals: [...signals] };
@@ -480,7 +713,12 @@ function extractTransformedSegments(prompt: string): { segments: string[]; signa
   const baselineNormalized = normalizeWithoutLeet(prompt);
   const policyNormalized = normalizeForPolicy(prompt);
 
-  if (/[0134578@]/.test(prompt) && policyNormalized !== baselineNormalized) {
+  if (hasCompatibilityGlyphObfuscation(prompt)) {
+    segments.push(baselineNormalized);
+    signals.push('COMPATIBILITY_GLYPHS');
+  }
+
+  if (hasLeetspeakObfuscation(prompt) && policyNormalized !== baselineNormalized) {
     segments.push(policyNormalized);
     signals.push('LEETSPEAK');
   }
@@ -507,6 +745,7 @@ function detectStructuralObfuscation(prompt: string): ObfuscationSignal[] {
   if (CHUNKING_REGEX.test(prompt)) signals.push('CHUNKING');
   if (VARIABLE_EXPANSION_REGEX.test(prompt)) signals.push('VARIABLE_EXPANSION');
   if (VERTICAL_TEXT_REGEX.test(prompt)) signals.push('VERTICAL_TEXT');
+  if (hasSymbolSubstitutionObfuscation(prompt)) signals.push('SYMBOL_SUBSTITUTION');
   return signals;
 }
 
@@ -529,16 +768,28 @@ export function sanitizePrompt(prompt: string): BackendSanitizationResult {
     }
   }
 
+  for (const match of prompt.matchAll(REDACTED_PLACEHOLDER_REGEX)) {
+    const placeholderName = match[1];
+    if (placeholderName) {
+      redactions.add(placeholderName);
+      detectionFlags.add(placeholderName);
+    }
+  }
+
   const entropyAnalysis = analyzeSlidingWindowEntropy(prompt);
+  const entropyContextSuspicious = hasEntropyEscalationContext(prompt) ||
+    entropyAnalysis.suspiciousChunks.some((chunk) => hasEntropyEscalationContext(chunk));
   const syntacticScore = analyzeSyntacticComplexity(prompt);
   const normalized = normalizeForPolicy(prompt);
   const spellingNormalization = normalizeSpellingHeuristic(prompt);
   const normalizedSpellCorrected = normalizeForPolicy(spellingNormalization.text);
   const { decodedSegments, usedObfuscation, maxDecodeDepth, signals: decodedSignals } = extractDecodedSegments(prompt);
   const structuralSignals = detectStructuralObfuscation(prompt);
+  const obfuscationSignals = [...decodedSignals, ...structuralSignals];
   const leetspeakDetected =
     hasLeetspeakObfuscation(prompt) || decodedSegments.some((segment) => hasLeetspeakObfuscation(segment));
   const languageSignals = detectLanguageSignals(prompt);
+  const externalCallDetected = EXTERNAL_CALL_REGEX.test(prompt);
   const normalizedForeignRecovery = languageSignals.translatedCandidate ? normalizeForPolicy(languageSignals.translatedCandidate) : '';
   const normalizedDecodedSegments = decodedSegments.map((segment) => normalizeForPolicy(segment));
   let transformedSignalsUsed: ObfuscationSignal[] = [];
@@ -578,14 +829,22 @@ export function sanitizePrompt(prompt: string): BackendSanitizationResult {
   }
   if (blockedKeywordHits.length > 0) detectionFlags.add('BLOCKED_KEYWORD');
   if (blockedKeywordHits.length > 0 && usedObfuscation) detectionFlags.add('OBFUSCATED_INSTRUCTION');
+  if (blockedKeywordHits.length > 0 && decodeTelemetry === 'recursive_decode') {
+    detectionFlags.add('RECURSIVE_DECODE');
+    redactions.add('RECURSIVE_DECODE');
+  }
+  for (const signal of decodedSignals) {
+    detectionFlags.add(signal);
+    redactions.add(signal);
+  }
+  for (const signal of transformedSignalsUsed.filter((value) => value === 'COMPATIBILITY_GLYPHS')) {
+    detectionFlags.add(signal);
+    redactions.add(signal);
+  }
   if (blockedKeywordHits.length > 0) {
-    for (const signal of [...decodedSignals, ...transformedSignalsUsed]) {
+    for (const signal of transformedSignalsUsed) {
       detectionFlags.add(signal);
       redactions.add(signal);
-    }
-    if (decodeTelemetry === 'recursive_decode') {
-      detectionFlags.add('RECURSIVE_DECODE');
-      redactions.add('RECURSIVE_DECODE');
     }
   }
   for (const signal of structuralSignals) {
@@ -608,15 +867,19 @@ export function sanitizePrompt(prompt: string): BackendSanitizationResult {
     detectionFlags.add('SPELLING_OBFUSCATION');
     redactions.add('SPELLING_OBFUSCATION');
   }
+  if (externalCallDetected) {
+    detectionFlags.add('EXTERNAL_CALL_ATTEMPT');
+    redactions.add('EXTERNAL_CALL_ATTEMPT');
+  }
 
-  if (entropyAnalysis.maxEntropy > 4.5) detectionFlags.add('TOKEN_DILUTION');
+  if (entropyAnalysis.maxEntropy > VERDICT_SUSPICIOUS_ENTROPY_THRESHOLD && entropyContextSuspicious) detectionFlags.add('TOKEN_DILUTION');
   if (syntacticScore >= 65) detectionFlags.add('SYNTACTIC_PROBE');
   if (prompt.length > 2000) detectionFlags.add('EXCESSIVE_LENGTH');
 
   let verdict: FirewallVerdict = 'CLEAN';
   const reasons: string[] = [];
 
-  if (entropyAnalysis.maxEntropy > 5.5) reasons.push('adversarial entropy threshold exceeded');
+  if (entropyAnalysis.maxEntropy > ADVERSARIAL_ENTROPY_THRESHOLD && entropyContextSuspicious) reasons.push('adversarial entropy threshold exceeded');
   if (syntacticScore >= 90) reasons.push('adversarial syntactic complexity threshold exceeded');
   if (redactions.has('CANARY_TOKEN')) reasons.push('canary token disclosure attempt detected');
   if (redactions.has('PRIVATE_KEY') || redactions.has('AWS_KEY')) reasons.push('high-risk secret material detected');
@@ -624,13 +887,22 @@ export function sanitizePrompt(prompt: string): BackendSanitizationResult {
   if (reasons.length > 0) {
     verdict = 'ADVERSARIAL';
   } else if (
-    entropyAnalysis.maxEntropy > 4.5 ||
+    (entropyAnalysis.maxEntropy > VERDICT_SUSPICIOUS_ENTROPY_THRESHOLD && entropyContextSuspicious) ||
     syntacticScore >= 65 ||
     blockedKeywordHits.length > 0 ||
+    externalCallDetected ||
     prompt.length > 2000
   ) {
     verdict = 'SUSPICIOUS';
     reasons.push('prompt matched suspicious firewall criteria');
+  } else if (
+    usedObfuscation ||
+    obfuscationSignals.length > 0 ||
+    leetspeakDetected ||
+    transformedSignalsUsed.includes('COMPATIBILITY_GLYPHS')
+  ) {
+    verdict = 'SUSPICIOUS';
+    reasons.push('prompt used obfuscation or concealment techniques');
   } else if (languageSignals.isForeignLanguage || spellingObfuscationDetected) {
     reasons.push('prompt triggered lightweight language or spelling recovery analysis');
   } else if (redactions.size > 0) {

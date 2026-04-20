@@ -58,8 +58,13 @@ const SENSITIVE_PATTERNS = [
   // Regex to match the specific Counter-Spy Canary Token
   { name: 'CANARY_TOKEN', regex: /COUNTERSPY_CANARY_TOKEN_[0-9a-fA-F-]{36}/g },
   // Regex to match generic secret keys or passwords assignments
-  { name: 'SECRET_KEY', regex: /(?:secret[-_]?key|password|passwd|api[-_]?key|token)(?:\s+is\s+|\s*[:=]\s*|\s+)([^\s]+)/gi }
+  { name: 'SECRET_KEY', regex: /(?:secret[-_]?key|password|passwd|api[-_]?key|token)(?:\s+is\s+|\s*[:=]\s*)([^\s]+)/gi }
 ];
+const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
+const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
+const SUSPICIOUS_ENTROPY_THRESHOLD = 3.8;
+const ADVERSARIAL_ENTROPY_THRESHOLD = 4.8;
+const VERDICT_SUSPICIOUS_ENTROPY_THRESHOLD = 4.5;
 
 // Enum defining the severity levels of detected threats
 export enum DetectionLevel {
@@ -125,6 +130,83 @@ function calculateEntropy(str: string): number {
   }, 0);
 }
 
+// Shannon entropy alone underestimates many symbol-substitution attacks because
+// they can use a tiny symbol alphabet or repeated combining marks. We add a
+// bounded risk boost so the displayed entropy reflects concealment pressure as
+// well as pure character diversity.
+function calculateEntropyRiskBoost(str: string): number {
+  const meaningfulChars = [...str].filter((char) => !/\s/.test(char));
+  if (meaningfulChars.length < 6) return 0;
+
+  const nonAsciiCount = meaningfulChars.filter((char) => /[^\x00-\x7F]/.test(char)).length;
+  const symbolLikeCount = meaningfulChars.filter((char) => /[\p{S}\p{M}]/u.test(char)).length;
+  const combiningCount = meaningfulChars.filter((char) => /\p{M}/u.test(char)).length;
+  const uniqueChars = new Set(meaningfulChars);
+
+  const nonAsciiRatio = nonAsciiCount / meaningfulChars.length;
+  const symbolLikeRatio = symbolLikeCount / meaningfulChars.length;
+
+  let boost = 0;
+  if (nonAsciiRatio >= 0.35) boost += 0.35;
+  if (symbolLikeRatio >= 0.2) boost += 0.6;
+  if (symbolLikeRatio >= 0.4) boost += 0.35;
+  if (combiningCount >= 2) boost += 0.65;
+  if (uniqueChars.size <= 3 && symbolLikeRatio >= 0.6 && meaningfulChars.length >= 10) boost += 1.1;
+
+  return Math.min(boost, 1.75);
+}
+
+function calculateEntropyLanguagePenalty(str: string): number {
+  const chars = [...str];
+  if (chars.length < 20) return 0;
+
+  const letters = chars.filter((char) => /[a-z]/i.test(char));
+  if (letters.length === 0) return 0;
+
+  const meaningfulChars = chars.filter((char) => !/\s/.test(char));
+  const letterRatio = letters.length / meaningfulChars.length;
+  const whitespaceRatio = chars.filter((char) => /\s/.test(char)).length / chars.length;
+  const nonAsciiRatio = meaningfulChars.filter((char) => /[^\x00-\x7F]/.test(char)).length / meaningfulChars.length;
+  const symbolLikeRatio = meaningfulChars.filter((char) => /[\p{S}\p{M}]/u.test(char)).length / meaningfulChars.length;
+  const digitRatio = meaningfulChars.filter((char) => /\d/.test(char)).length / meaningfulChars.length;
+  const vowelRatio = letters.filter((char) => /[aeiou]/i.test(char)).length / letters.length;
+
+  const looksLikePlainProse =
+    letterRatio >= 0.55 &&
+    whitespaceRatio >= 0.1 &&
+    nonAsciiRatio < 0.05 &&
+    symbolLikeRatio < 0.08 &&
+    digitRatio < 0.2 &&
+    vowelRatio >= 0.2 &&
+    vowelRatio <= 0.65;
+
+  return looksLikePlainProse ? 0.95 : 0;
+}
+
+// Gate entropy-driven escalation behind suspicious-looking chunk shape so normal
+// prose with dates, prices, or model numbers does not get promoted on entropy
+// alone. This keeps entropy useful for concealment while reducing false positives.
+function hasEntropyEscalationContext(str: string): boolean {
+  const meaningfulChars = [...str].filter((char) => !/\s/.test(char));
+  if (meaningfulChars.length < 6) return false;
+
+  const nonAsciiCount = meaningfulChars.filter((char) => /[^\x00-\x7F]/.test(char)).length;
+  const symbolLikeCount = meaningfulChars.filter((char) => /[\p{S}\p{M}]/u.test(char)).length;
+  const combiningCount = meaningfulChars.filter((char) => /\p{M}/u.test(char)).length;
+  const nonLetterCount = meaningfulChars.filter((char) => /[^a-z]/i.test(char)).length;
+  const uniqueChars = new Set(meaningfulChars);
+
+  const nonAsciiRatio = nonAsciiCount / meaningfulChars.length;
+  const symbolLikeRatio = symbolLikeCount / meaningfulChars.length;
+  const nonLetterRatio = nonLetterCount / meaningfulChars.length;
+
+  return combiningCount >= 1 ||
+    nonAsciiRatio >= 0.18 ||
+    symbolLikeRatio >= 0.14 ||
+    nonLetterRatio >= 0.38 ||
+    (uniqueChars.size <= 3 && nonLetterRatio >= 0.7 && meaningfulChars.length >= 8);
+}
+
 // Interface defining the result of the sliding window entropy analysis
 export interface EntropyAnalysisResult {
   // Boolean flag indicating if the entropy exceeds the adversarial threshold
@@ -145,11 +227,15 @@ export function analyzeSlidingWindowEntropy(
   windowSize: number = 35,
   // The number of characters to advance the window each step (default 5)
   stepSize: number = 5,
-  // The threshold above which a chunk is considered suspicious (default 4.5)
-  threshold: number = 4.5
+  // The threshold above which a chunk is considered suspicious
+  threshold: number = SUSPICIOUS_ENTROPY_THRESHOLD
 ): EntropyAnalysisResult {
   // Calculate the global entropy of the entire prompt
   const globalEntropy = calculateEntropy(prompt);
+  const boostedGlobalEntropy = Math.max(
+    0,
+    globalEntropy + calculateEntropyRiskBoost(prompt) - calculateEntropyLanguagePenalty(prompt),
+  );
   // Initialize the maximum entropy found to 0
   let maxEntropy = 0;
   // Initialize an array to store suspicious chunks
@@ -158,16 +244,19 @@ export function analyzeSlidingWindowEntropy(
   // If the prompt is shorter than or equal to the window size
   if (prompt.length <= windowSize) {
     // The maximum entropy is just the global entropy
-    maxEntropy = globalEntropy;
+    maxEntropy = boostedGlobalEntropy;
     // If the global entropy exceeds the threshold, add the whole prompt to suspicious chunks
-    if (globalEntropy >= threshold) suspiciousChunks.push(prompt);
+    if (boostedGlobalEntropy >= threshold) suspiciousChunks.push(prompt);
   } else {
     // Otherwise, slide the window across the prompt
     for (let i = 0; i <= prompt.length - windowSize; i += stepSize) {
       // Extract the text for the current window
       const windowText = prompt.substring(i, i + windowSize);
       // Calculate the entropy of the current window
-      const windowEntropy = calculateEntropy(windowText);
+      const windowEntropy = Math.max(
+        0,
+        calculateEntropy(windowText) + calculateEntropyRiskBoost(windowText) - calculateEntropyLanguagePenalty(windowText),
+      );
       
       // If the current window's entropy is higher than the max found so far
       if (windowEntropy > maxEntropy) {
@@ -190,7 +279,7 @@ export function analyzeSlidingWindowEntropy(
     // Return the maximum entropy found
     maxEntropy,
     // Return the global entropy
-    globalEntropy,
+    globalEntropy: boostedGlobalEntropy,
     // Return the unique suspicious chunks (removing duplicates)
     suspiciousChunks: [...new Set(suspiciousChunks)],
   };
@@ -261,6 +350,15 @@ export function sanitizeInput(
     }
   }
 
+  // Preserve already-redacted placeholders as sensitive signals so imported or
+  // replayed examples still register as containing protected material.
+  for (const match of input.matchAll(REDACTED_PLACEHOLDER_REGEX)) {
+    const placeholderName = match[1];
+    if (placeholderName && !redactions.includes(placeholderName)) {
+      redactions.push(placeholderName);
+    }
+  }
+
   // Initialize entropy variables
   let entropy = 0;
   let globalEntropy = 0;
@@ -269,7 +367,7 @@ export function sanitizeInput(
   // If the entropy filter guardrail is enabled
   if (guardrails.entropyFilter) {
     // Perform sliding window entropy analysis
-    const entropyResult = analyzeSlidingWindowEntropy(input, 35, 5, 4.5);
+    const entropyResult = analyzeSlidingWindowEntropy(input, 35, 5, SUSPICIOUS_ENTROPY_THRESHOLD);
     // Store the maximum entropy found
     entropy = entropyResult.maxEntropy;
     // Store the global entropy
@@ -277,6 +375,8 @@ export function sanitizeInput(
     // Store the suspicious chunks
     suspiciousChunks = entropyResult.suspiciousChunks;
   }
+  const entropyContextSuspicious = hasEntropyEscalationContext(input) ||
+    suspiciousChunks.some((chunk) => hasEntropyEscalationContext(chunk));
   
   // These flags track which policy families fired as we combine multiple detection passes.
   let containsBlockedKeyword = false;
@@ -284,6 +384,7 @@ export function sanitizeInput(
   let spellingObfuscationDetected = false;
   let foreignLanguageDetected = false;
   let mixedLanguageDetected = false;
+  let externalCallDetected = false;
 
   // Recovery/normalization stage:
   // - normalize direct text for policy checks
@@ -374,17 +475,24 @@ export function sanitizeInput(
       redactions.push('OBFUSCATED_INSTRUCTION');
     }
 
-    if (containsBlockedKeyword) {
-      for (const signal of [...obfuscationAnalysis.signals, ...transformedSignalsUsed]) {
-        if (!redactions.includes(signal)) redactions.push(signal);
-      }
-      if (decodeTelemetry === 'recursive_decode' && !redactions.includes('RECURSIVE_DECODE')) {
-        redactions.push('RECURSIVE_DECODE');
-      }
+    if (containsBlockedKeyword && decodeTelemetry === 'recursive_decode' && !redactions.includes('RECURSIVE_DECODE')) {
+      redactions.push('RECURSIVE_DECODE');
     }
 
     if (containsBlockedKeyword && !redactions.includes('BLOCKED_KEYWORD')) {
       redactions.push('BLOCKED_KEYWORD');
+    }
+  }
+
+  for (const signal of obfuscationAnalysis.signals) {
+    if (!redactions.includes(signal)) redactions.push(signal);
+  }
+  for (const signal of transformedSignalsUsed.filter((value) => value === 'COMPATIBILITY_GLYPHS')) {
+    if (!redactions.includes(signal)) redactions.push(signal);
+  }
+  if (containsBlockedKeyword) {
+    for (const signal of transformedSignalsUsed) {
+      if (!redactions.includes(signal)) redactions.push(signal);
     }
   }
 
@@ -428,6 +536,11 @@ export function sanitizeInput(
   }
   if (spellingObfuscationDetected && !redactions.includes('SPELLING_OBFUSCATION')) {
     redactions.push('SPELLING_OBFUSCATION');
+  }
+
+  if (EXTERNAL_CALL_REGEX.test(input)) {
+    externalCallDetected = true;
+    if (!redactions.includes('EXTERNAL_CALL_ATTEMPT')) redactions.push('EXTERNAL_CALL_ATTEMPT');
   }
 
   // Policy matching stage: custom regex rules from system configuration.
@@ -476,13 +589,14 @@ export function sanitizeInput(
   // High-level escalation heuristic used for the rest of the app UI and logging.
   const isPotentiallyAdversarial = 
     // Check if entropy filter is on and entropy exceeds 4.5
-    (guardrails.entropyFilter && entropy > 4.5) || // Lowered from 5.5 to catch complex roleplay injections
+    (guardrails.entropyFilter && entropy > SUSPICIOUS_ENTROPY_THRESHOLD && entropyContextSuspicious) ||
     // Check if a blocked keyword was found
     containsBlockedKeyword ||
     // Check if a forbidden topic was found
     containsForbiddenTopic ||
     // Check if a custom regex rule was matched
     containsRegexMatch ||
+    externalCallDetected ||
     // Check if the syntactic analyzer detected a probing attempt
     syntacticAnalysis.isProbingAttempt ||
     // Check if the input is excessively long (over 2000 characters)
@@ -492,7 +606,7 @@ export function sanitizeInput(
   // the app collapses many underlying signals into one operator-facing level.
   let detectionLevel = DetectionLevel.CLEAN;
   // If entropy is very high (> 5.5) or syntactic score is very high (>= 90)
-  if ((guardrails.entropyFilter && entropy > 5.5) || syntacticAnalysis.score >= 90) {
+  if ((guardrails.entropyFilter && entropy > ADVERSARIAL_ENTROPY_THRESHOLD && entropyContextSuspicious) || syntacticAnalysis.score >= 90) {
     // Escalate to ADVERSARIAL level
     detectionLevel = DetectionLevel.ADVERSARIAL;
   // Else if a probing attempt was detected
@@ -500,12 +614,20 @@ export function sanitizeInput(
     // Escalate to SUSPICIOUS level
     detectionLevel = DetectionLevel.SUSPICIOUS;
   // Else if a blocked keyword, forbidden topic, high entropy (> 4.5), or excessive length is detected
-  } else if (containsBlockedKeyword || containsForbiddenTopic || (guardrails.entropyFilter && entropy > 4.5) || input.length > 2000) {
+  } else if (containsBlockedKeyword || containsForbiddenTopic || externalCallDetected || (guardrails.entropyFilter && entropy > VERDICT_SUSPICIOUS_ENTROPY_THRESHOLD && entropyContextSuspicious) || input.length > 2000) {
     // Escalate to SUSPICIOUS level
     detectionLevel = DetectionLevel.SUSPICIOUS;
   // Else if a custom regex rule was matched
   } else if (containsRegexMatch) {
     // Escalate to SUSPICIOUS level
+    detectionLevel = DetectionLevel.SUSPICIOUS;
+  } else if (guardrails.obfuscationDetection && (
+    obfuscationAnalysis.usedObfuscation ||
+    obfuscationAnalysis.signals.length > 0 ||
+    structuralSignals.length > 0 ||
+    leetspeakDetected ||
+    transformedSignalsUsed.includes('COMPATIBILITY_GLYPHS')
+  )) {
     detectionLevel = DetectionLevel.SUSPICIOUS;
   } else if (foreignLanguageDetected || spellingObfuscationDetected) {
     detectionLevel = DetectionLevel.INFORMATIONAL;

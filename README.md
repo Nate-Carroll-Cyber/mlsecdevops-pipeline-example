@@ -4,6 +4,10 @@ Counter-Spy.ai is a secure GenAI control-plane for adversary-aware LLM governanc
 
 Counter-Spy.ai decouples adversarial defense from response generation by enforcing a control-plane architecture that mediates all LLM interactions before inference.
 
+<p align="center">
+  <img src="./assets/brand/counter-spy-logo.png" alt="Counter-Spy.ai logo" width="420" />
+</p>
+
 > Govern Every Prompt. Question Every Answer.
 
 ## 📚 Documentation

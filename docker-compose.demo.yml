@@ -7,6 +7,9 @@ services:
       dockerfile: backend/Dockerfile
     container_name: counter-spy-backend
     user: "0:0"
+    env_file:
+      # Local-only demo secrets and provider creds. This file is gitignored.
+      - .env.demo.local
     environment:
       # Core backend runtime settings.
       APP_PORT: 8080
@@ -17,10 +20,8 @@ services:
       SAM_SPADE_DEFAULT_CASE_ID: "case-067"
       SAM_SPADE_STORE_PATH: "/app/backend/data/sam-spade.db"
       SAM_SPADE_SERVICE_PORT: "18120"
-      # Optional provider secrets for demo use:
-      # DEEPL_API_KEY: "${DEEPL_API_KEY:-}"
-      # GOOGLE_TRANSLATE_API_KEY: "${GOOGLE_TRANSLATE_API_KEY:-}"
-      # AZURE_TRANSLATOR_API_KEY: "${AZURE_TRANSLATOR_API_KEY:-}"
+      # Lara Translate credentials come from the local env file above so the
+      # demo stack stays stable across rebuilds and restarts.
     ports:
       - "18080:8080"
     volumes:

@@ -2,7 +2,7 @@
 
 | Version | Date | Description |
 | :--- | :--- | :--- |
-| v1.9.3-Alpha | 2026-04-12 | Initial Release of HITL/HOTL Controls & Bulk Ingest Utilities. |
+| v2.0 | 2026-04-21 | Promotion to Beta: stabilized local demo stack, guarded backend responder path, Lara translation modes, Sam Spade governed intake, and layered defense funnel metrics. |
 
 ---
 

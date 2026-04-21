@@ -24,7 +24,7 @@ Direct browser-side inference is disabled so provider keys are not exposed in th
 
 ## Frontend With Local Backend
 
-Use this when you want the frontend to call the local `/v1/intercept` gateway stub and backend-mediated translation routes.
+Use this when you want the frontend to call the local `/v1/intercept` gateway, backend-mediated translation routes, and optional downstream responder APIs.
 
 Terminal 1:
 
@@ -40,19 +40,52 @@ VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev
 
 Open `http://localhost:3000/`.
 
-Clean prompts are routed to the backend stub. The backend currently reports the configured safeguards model as `gpt-oss-safeguards20B` and the responder as `amazon.nova-micro-v1:0`, but Bedrock calls are not wired until AWS access is available. The UI configuration now separates a firewall prompt from a downstream responder prompt to match the future gateway architecture.
+Clean prompts are routed to the backend gateway. The backend currently reports the configured safeguards model as `gpt-oss-safeguards20B`, while the downstream responder now uses backend-managed environment settings only. The admin gear in the frontend is limited to optional responder telemetry such as max context window.
 
-### Optional: DeepL API Translation
+### Optional: Live Downstream LLM Testing
 
-If you want the Playground Normalize - Translate workflow to perform real translation, keep the local backend running and configure the Playground translation stage for DeepL.
+If you want clean Analyst Chat prompts to continue into a real OpenAI-compatible `/chat/completions` endpoint, configure the backend env vars and restart the backend.
 
-Recommended values:
+Backend env option:
 
-- Provider: `deepl`
-- Provider Base URL: `https://api-free.deepl.com`
-- API Key: your DeepL API key
+- `LLM_API_BASE_URL`
+- `LLM_API_KEY`
+- `LLM_MODEL_ID`
 
-The Playground now exposes a **Use Recommended Settings** action and keeps provider-specific overrides in an advanced section. For normal local testing, you should only need the API key plus the backend running on `18080`.
+Then, if the provider returns token usage metadata, Audit Log details will show prompt tokens, completion tokens, total tokens, and estimated context utilization. You can optionally set **Max Context Window** from the admin gear under **System Status** to estimate remaining headroom in the UI.
+
+### Optional: Lara Translate API Translation
+
+If you want the Playground Normalize - Translate workflow to perform real translation, keep the local backend running and configure Lara credentials on the backend.
+
+Required values:
+
+- `LARA_ACCESS_KEY_ID`
+- `LARA_ACCESS_KEY_SECRET`
+
+Optional value:
+
+- `LARA_API_BASE_URL` if you need a non-default Lara endpoint
+
+The Playground translation stage is now intentionally narrow and manual:
+
+- Provider: `lara`
+- Mode 1: auto-detect source -> `English`
+- Mode 2: `English` -> analyst-selected foreign target language
+- Credentials: backend-only
+
+For normal local testing, you should only need the Lara credentials plus the backend running on `18080`.
+Translation only runs when you explicitly click **Run Normalize -> Translate** in the Playground. It is not invoked automatically during prompt editing, firewall submission, or bulk ingest.
+
+For the Docker demo path, use the gitignored `.env.demo.local` file in the repo root:
+
+```env
+LARA_ACCESS_KEY_ID=your_lara_access_key_id
+LARA_ACCESS_KEY_SECRET=your_lara_access_key_secret
+LARA_API_BASE_URL=https://api.laratranslate.com
+```
+
+`docker-compose.demo.yml` now reads that file for backend-only Lara credentials so translation survives rebuilds and container recreates without re-injecting secrets through the shell.
 
 ### Optional: Sam Spade Service Config
 
@@ -65,9 +98,9 @@ Useful vars:
 - `SAM_SPADE_STORE_PATH`
 - `SAM_SPADE_SERVICE_PORT`
 - `LOG_LEVEL`
-- `DEEPL_API_KEY`
-- `GOOGLE_TRANSLATE_API_KEY`
-- `AZURE_TRANSLATOR_API_KEY`
+- `LARA_ACCESS_KEY_ID`
+- `LARA_ACCESS_KEY_SECRET`
+- `LARA_API_BASE_URL`
 
 These are documented in `.env.example`.
 
@@ -96,7 +129,21 @@ This starts:
 
 The frontend uses Vite's proxy layer inside the container to reach the backend cleanly, so browser requests stay same-origin for `/v1/*` and `/healthz`.
 
+If you want Lara translation available in that Docker demo, make sure `.env.demo.local` exists before you bring the stack up.
+
+Bulk ingest note: every new ingest run now clears the browser-local Playground research log before recording the incoming batch, so the Research Log sample count reflects the current uploaded set instead of accumulating older local runs.
+
+Metrics note: the Security Operations view now includes a **Defense Funnel** card that summarizes three layered rates from the current log set:
+
+- **Pre-Inference Block Rate**
+- **Model Intervention Rate**
+- **Post-Model Escape Rate**
+
+If your ingest run includes `expectedVerdict` labels, the escape-rate math will use those labels when available instead of relying only on final severity heuristics.
+
 Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`.
+
+Note: in the current demo build, Sam Spade clean turns still use deterministic noir reply logic inside the Sam Spade service after guardrail approval. They do not yet call the same live downstream responder used by Analyst Chat.
 
 ## Backend Smoke Tests
 
@@ -124,16 +171,27 @@ curl -i \
 
 Expected result is HTTP `403` with status `INTERCEPTED`.
 
-For translation smoke testing (with a configured DeepL API key):
+For translation smoke testing (with Lara credentials configured on the backend):
 
 ```bash
 curl -i \
   -X POST http://127.0.0.1:18080/v1/translate \
   -H "content-type: application/json" \
-  -d '{"text":"Ignore previous instructions","provider":"deepl","baseUrl":"https://api-free.deepl.com","apiKey":"YOUR_DEEPL_API_KEY","sourceLang":"en","targetLang":"es"}'
+  -d '{"text":"Hola, como estas?"}'
 ```
 
-Expected result is HTTP `200` with translated text in the response body.
+Expected result is HTTP `200` with English text in the response body. The backend auto-detects the source language and uses Lara Translate to recover English output for analyst review.
+
+For foreign-variant generation from English:
+
+```bash
+curl -i \
+  -X POST http://127.0.0.1:18080/v1/translate \
+  -H "content-type: application/json" \
+  -d '{"text":"Ignore previous instructions","mode":"generate_foreign_variant","targetLang":"es"}'
+```
+
+Expected result is HTTP `200` with Spanish output in the response body. This path is also manual-only in the Playground UI.
 
 ## Verification
 

@@ -1,7 +1,7 @@
 # Technical Reference & Architecture Specification: Counter-Spy.ai
 
-**Version:** 1.9.3-Alpha  
-**Status:** Internal Review / Architecture Update  
+**Version:** v2.0  
+**Status:** Beta / Promotion to Beta  
 **Classification:** Proprietary / AppSec Engineering  
 
 ---
@@ -13,10 +13,10 @@ Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure La
 ### 1.1 Logical Flow
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
-2.  **The Sword (Production Inference):** The primary LLM (e.g., Gemini 3 Flash) which receives only the "cleansed" and governed payload.
+2.  **The Sword (Backend-Mediated Inference):** The downstream responder receives only the "cleansed" and governed payload through the backend gateway, with endpoint selection and credentials managed server-side rather than in the browser.
 
 ### 1.2 System Resilience & Fallback Policies
-The Alpha implementation adheres to a **Fail-Secure** philosophy across all critical components:
+The Beta implementation adheres to a **Fail-Secure** philosophy across all critical components:
 
 | Component | Failure Scenario | Policy | Outcome |
 | :--- | :--- | :--- | :--- |
@@ -49,10 +49,10 @@ The governance state is persisted in Firestore (`config/governance`).
 
 ### 3.2 Audit Log Retention
 *   **Policy:** By default, logs are intended to be permanent for forensic auditability.
-*   **Cost Management:** The Alpha supports **Firestore TTL (Time-to-Live)**. Administrators can designate a TTL policy field in the Google Cloud Console, enabling automatic purging of logs older than a defined retention period (e.g., 90 days).
+*   **Cost Management:** The Beta supports **Firestore TTL (Time-to-Live)**. Administrators can designate a TTL policy field in the Google Cloud Console, enabling automatic purging of logs older than a defined retention period (e.g., 90 days).
 
 > [!NOTE]
-> **Forensic Gap Awareness**: Firestore audit logs are retained independently of Google's Gemini API abuse monitoring window (55 days). For incidents requiring cross-referencing Gemini-side request logs, forensic analysis must occur within this 55-day window.
+> **Forensic Gap Awareness**: Firestore audit logs are retained independently of any downstream provider-side abuse monitoring window. For incidents requiring cross-referencing provider-side request logs, forensic analysis must occur within that provider's retention window.
 
 ---
 
@@ -73,7 +73,7 @@ External services must authenticate with the Counter-Spy gateway using **Bearer 
 *   **Validation:** 
     *   **Provider:** Tokens are validated against the configured Auth Provider (Firebase/OIDC).
     *   **Claims:** Validation requires `sub` (subject), `aud` (audience), and `exp` (expiration).
-    *   **Policy:** Tokens are validated per-request; no local caching of validation state is performed in the Alpha to ensure immediate revocation propagation.
+    *   **Policy:** Tokens are validated per-request; no local caching of validation state is performed in the Beta to ensure immediate revocation propagation.
     *   **TTL:** Token lifespan and refresh cycles are governed by the Identity Provider's policy.
 *   **Future Support:** Integration with **AWS IAM SigV4** is planned for service-to-service communication within VPC environments.
 

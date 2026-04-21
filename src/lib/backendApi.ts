@@ -23,6 +23,11 @@ const BackendInterceptResponseSchema = z.object({
   responder: z.object({
     modelId: z.string(),
     response: z.string(),
+    usage: z.object({
+      promptTokens: z.number().optional(),
+      completionTokens: z.number().optional(),
+      totalTokens: z.number().optional(),
+    }).optional(),
   }).optional(),
 });
 
@@ -32,7 +37,7 @@ const BackendTranslateResponseSchema = z.object({
   sourceLang: z.string(),
   targetLang: z.string(),
   targetLangName: z.string(),
-  provider: z.enum(['deepl', 'google', 'azure']),
+  provider: z.enum(['lara']),
 });
 
 const BackendHealthResponseSchema = z.object({
@@ -113,6 +118,11 @@ export interface BackendInterceptResponse {
   responder?: {
     modelId: string;
     response: string;
+    usage?: {
+      promptTokens?: number;
+      completionTokens?: number;
+      totalTokens?: number;
+    };
   };
 }
 
@@ -122,7 +132,7 @@ export interface BackendTranslateResponse {
   sourceLang: string;
   targetLang: string;
   targetLangName: string;
-  provider: 'deepl' | 'google' | 'azure';
+  provider: 'lara';
 }
 
 export interface BackendHealthResponse {
@@ -208,6 +218,13 @@ export async function interceptPrompt(input: {
   userId?: string;
   sessionId?: string;
   metadata?: Record<string, unknown>;
+  tuning?: {
+    entropyThreshold?: number;
+    syntacticThreshold?: number;
+    blockedKeywords?: string[];
+    forbiddenTopics?: string[];
+    regexRules?: string[];
+  };
 }): Promise<BackendInterceptResponse> {
   const response = await fetch(resolveBackendUrl('/v1/intercept'), {
     method: 'POST',
@@ -230,11 +247,9 @@ export async function interceptPrompt(input: {
 // Send one translation request through the backend so provider keys stay server-side.
 export async function translatePromptViaBackend(input: {
   text: string;
-  provider: 'deepl' | 'google' | 'azure';
-  baseUrl: string;
-  apiKey?: string;
-  targetLang: string;
-  sourceLang?: string;
+  provider?: 'lara';
+  mode?: 'recover_to_english' | 'generate_foreign_variant';
+  targetLang?: string;
 }): Promise<BackendTranslateResponse> {
   const response = await fetch(resolveBackendUrl('/v1/translate'), {
     method: 'POST',
@@ -299,6 +314,13 @@ export async function getSamSpadeSession(sessionId: string): Promise<SamSpadeSes
 export async function sendSamSpadeMessage(input: {
   sessionId: string;
   prompt: string;
+  tuning?: {
+    entropyThreshold?: number;
+    syntacticThreshold?: number;
+    blockedKeywords?: string[];
+    forbiddenTopics?: string[];
+    regexRules?: string[];
+  };
 }): Promise<{ session: SamSpadeSession; review: SamSpadeReviewArtifact }> {
   const { response, payload } = await fetchJsonWithTimeout('/v1/ctf/sam-spade/message', {
     method: 'POST',
@@ -318,6 +340,13 @@ export async function sendSamSpadeMessage(input: {
 export async function solveSamSpadeCase(input: {
   sessionId: string;
   theory: string;
+  tuning?: {
+    entropyThreshold?: number;
+    syntacticThreshold?: number;
+    blockedKeywords?: string[];
+    forbiddenTopics?: string[];
+    regexRules?: string[];
+  };
 }): Promise<{ session: SamSpadeSession; solved: boolean; evaluation: string; review: SamSpadeReviewArtifact }> {
   const { response, payload } = await fetchJsonWithTimeout('/v1/ctf/sam-spade/solve', {
     method: 'POST',

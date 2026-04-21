@@ -15,6 +15,14 @@ export interface BackendSanitizationResult {
   decodeTelemetry: 'plain_text' | 'single_hop_decode' | 'recursive_decode';
 }
 
+export interface BackendSanitizationTuning {
+  entropyThreshold?: number;
+  syntacticThreshold?: number;
+  blockedKeywords?: string[];
+  forbiddenTopics?: string[];
+  regexRules?: string[];
+}
+
 interface SensitivePattern {
   name: string;
   regex: RegExp;
@@ -35,6 +43,7 @@ const SENSITIVE_PATTERNS: SensitivePattern[] = [
 ];
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
+const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
 
 const BLOCKED_KEYWORDS = [
   'ignore all previous instructions',
@@ -70,9 +79,8 @@ const BRAILLE_SEGMENT_REGEX = /(?:[\u2800-\u28FF]+\s*){2,}/gu;
 const REGIONAL_INDICATOR_SEGMENT_REGEX = /(?:[\u{1F1E6}-\u{1F1FF}]\s*){2,}/gu;
 const MAX_DECODE_DEPTH = 3;
 const MAX_DECODE_SEGMENTS = 24;
-const SUSPICIOUS_ENTROPY_THRESHOLD = 3.8;
+const SUSPICIOUS_ENTROPY_THRESHOLD = 4.0;
 const ADVERSARIAL_ENTROPY_THRESHOLD = 4.8;
-const VERDICT_SUSPICIOUS_ENTROPY_THRESHOLD = 4.5;
 type DecodeTelemetry = 'plain_text' | 'single_hop_decode' | 'recursive_decode';
 type ObfuscationSignal =
   | 'URL_ENCODING'
@@ -242,7 +250,26 @@ function calculateEntropyLanguagePenalty(value: string): number {
     vowelRatio >= 0.2 &&
     vowelRatio <= 0.65;
 
-  return looksLikePlainProse ? 0.95 : 0;
+  return looksLikePlainProse ? 1.65 : 0;
+}
+
+function normalizeForEntropy(value: string): string {
+  const unescaped = value
+    .replace(/\\([_<>\[\]])/g, '$1')
+    .replace(/\\_/g, '_')
+    .replace(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/g, ' pii email ')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, ' pii ip ');
+
+  return unescaped
+    .replace(
+      /^\s*(?:[\[(<]{1,3}|--)?\s*\/?\s*[A-Z][A-Z0-9]*(?:[ _:-]+[A-Z0-9]+){0,10}\s*(?:[\])>]{1,3})?\s*$/gm,
+      ' template header ',
+    )
+    .replace(/\[\[[A-Z0-9_:-]{3,}\]\]/g, ' template header ')
+    .replace(/<[/]?[A-Z0-9_:-]{3,}>/g, ' template header ')
+    .replace(/\(([A-Z0-9_:-]{3,})\)/g, ' template header ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function hasEntropyEscalationContext(value: string): boolean {
@@ -266,23 +293,21 @@ function hasEntropyEscalationContext(value: string): boolean {
     (uniqueChars.size <= 3 && nonLetterRatio >= 0.7 && meaningfulChars.length >= 8);
 }
 
-function analyzeSlidingWindowEntropy(prompt: string) {
-  const windowSize = 35;
-  const stepSize = 5;
-  const threshold = SUSPICIOUS_ENTROPY_THRESHOLD;
+function analyzeSlidingWindowEntropy(prompt: string, windowSize = 35, stepSize = 5, threshold = SUSPICIOUS_ENTROPY_THRESHOLD) {
+  const entropyInput = normalizeForEntropy(prompt);
   const globalEntropy = Math.max(
     0,
-    calculateEntropy(prompt) + calculateEntropyRiskBoost(prompt) - calculateEntropyLanguagePenalty(prompt),
+    calculateEntropy(entropyInput) + calculateEntropyRiskBoost(entropyInput) - calculateEntropyLanguagePenalty(entropyInput),
   );
   let maxEntropy = 0;
   const suspiciousChunks: string[] = [];
 
-  if (prompt.length <= windowSize) {
+  if (entropyInput.length <= windowSize) {
     maxEntropy = globalEntropy;
-    if (globalEntropy >= threshold) suspiciousChunks.push(prompt);
+    if (globalEntropy >= threshold) suspiciousChunks.push(entropyInput);
   } else {
-    for (let index = 0; index <= prompt.length - windowSize; index += stepSize) {
-      const chunk = prompt.substring(index, index + windowSize);
+    for (let index = 0; index <= entropyInput.length - windowSize; index += stepSize) {
+      const chunk = entropyInput.substring(index, index + windowSize);
       const entropy = Math.max(
         0,
         calculateEntropy(chunk) + calculateEntropyRiskBoost(chunk) - calculateEntropyLanguagePenalty(chunk),
@@ -290,6 +315,10 @@ function analyzeSlidingWindowEntropy(prompt: string) {
       maxEntropy = Math.max(maxEntropy, entropy);
       if (entropy >= threshold) suspiciousChunks.push(chunk);
     }
+  }
+
+  if (!hasEntropyEscalationContext(entropyInput)) {
+    maxEntropy = Math.min(maxEntropy, globalEntropy + 0.6);
   }
 
   return {
@@ -302,28 +331,81 @@ function analyzeSlidingWindowEntropy(prompt: string) {
 function analyzeSyntacticComplexity(prompt: string): number {
   if (!prompt.trim()) return 0;
 
-  const lowerPrompt = prompt.toLowerCase();
-  let constraintCount = 0;
+  const wrapperShellCount =
+    (prompt.match(/^\s*(?:[\[(<]{1,3}|--)?\s*\/?\s*[A-Z][A-Z0-9]*(?:[ _:-]+[A-Z0-9]+){0,10}\s*(?:[\])>]{1,3})?\s*$/gm)?.length ?? 0) +
+    (prompt.match(/\[\[[A-Z0-9_:-]{3,}\]\]/g)?.length ?? 0) +
+    (prompt.match(/<[/]?[A-Z0-9_:-]{3,}>/g)?.length ?? 0) +
+    (prompt.match(/\(([A-Z0-9_:-]{3,})\)/g)?.length ?? 0);
+  const normalizedPrompt = prompt
+    .replace(/\\([_<>\[\]])/g, '$1')
+    .replace(/\\_/g, '_')
+    .replace(
+      /^\s*(?:[\[(<]{1,3}|--)?\s*\/?\s*[A-Z][A-Z0-9]*(?:[ _:-]+[A-Z0-9]+){0,10}\s*(?:[\])>]{1,3})?\s*$/gm,
+      ' ',
+    )
+    .replace(/\[\[[A-Z0-9_:-]{3,}\]\]/g, ' ')
+    .replace(/<[/]?[A-Z0-9_:-]{3,}>/g, ' ')
+    .replace(/\(([A-Z0-9_:-]{3,})\)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 
-  for (const keyword of OPERATIONAL_KEYWORDS) {
+  const lowerPrompt = normalizedPrompt.toLowerCase();
+  const highSignalKeywords = [
+    'ignore', 'override', 'disregard', 'forget', 'jailbreak',
+    'act as', 'simulate', 'pretend', 'from now on', 'developer mode',
+    'unfiltered', 'uncensored', 'bypass', 'roleplay', 'persona',
+    'start over', 'new instructions', 'do anything now', 'dan',
+    'sudo', 'admin', 'root', 'system prompt', 'core instructions',
+    'base instructions', 'respond as', 'answer as', 'reply as', 'behave as',
+    'chatgpt', 'openai', 'gemini'
+  ];
+  const mediumSignalKeywords = [
+    'must', 'always', 'never', 'instructions', 'output format',
+    'rules', 'guidelines', 'restriction', 'limitations', 'you are',
+    'you will', 'you must', 'you cannot', 'you shall'
+  ];
+  let constraintCount = 0;
+  let weightedConstraintScore = 0;
+
+  for (const keyword of highSignalKeywords) {
     const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
-    constraintCount += lowerPrompt.match(regex)?.length || 0;
+    const matches = lowerPrompt.match(regex)?.length || 0;
+    constraintCount += matches;
+    weightedConstraintScore += matches * 1.4;
+  }
+  for (const keyword of mediumSignalKeywords) {
+    const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+    const matches = lowerPrompt.match(regex)?.length || 0;
+    constraintCount += matches;
+    weightedConstraintScore += matches * 0.6;
   }
 
-  const totalWords = prompt.trim().split(/\s+/).length;
+  const totalWords = normalizedPrompt.trim().split(/\s+/).length;
   const constraintDensity = totalWords > 0 ? (constraintCount / totalWords) * 100 : 0;
-  const specialCharCount = prompt.match(/[^a-zA-Z0-9\s.,!?\-:']/g)?.length || 0;
-  const specialCharRatio = (specialCharCount / prompt.length) * 100;
-  const sentences = prompt.split(/[.!?]+/).filter((sentence) => sentence.trim().length > 0);
+  const specialCharCount = normalizedPrompt.match(/[^a-zA-Z0-9\s.,!?\-:']/g)?.length || 0;
+  const specialCharRatio = normalizedPrompt.length > 0 ? (specialCharCount / normalizedPrompt.length) * 100 : 0;
+  const sentences = normalizedPrompt.split(/[.!?]+/).filter((sentence) => sentence.trim().length > 0);
   const avgWordsPerSentence = sentences.length > 0 ? totalWords / sentences.length : totalWords;
 
   let score = 0;
-  score += Math.min(constraintCount * 10, 60);
+  score += Math.min(weightedConstraintScore * 10, 60);
   score += Math.min(constraintDensity * 15, 40);
   score += Math.min(specialCharRatio * 10, 30);
   if (avgWordsPerSentence > 20) score += 5;
   if (avgWordsPerSentence > 40) score += 10;
   if (avgWordsPerSentence > 60) score += 10;
+  score += Math.min(wrapperShellCount * 8, 12);
+
+  const hasBase64LikeBlob =
+    /\b(?:[A-Za-z0-9+/]{20,}={0,2})\b/.test(prompt) &&
+    /[A-Z]/.test(prompt) &&
+    /[a-z]/.test(prompt) &&
+    /(?:\d|[+/=])/.test(prompt);
+  const hasEscapeSequenceBlob = /(?:\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|%[0-9a-fA-F]{2}){3,}/.test(prompt);
+
+  if (hasBase64LikeBlob) score += 24;
+  if (hasEscapeSequenceBlob) score += 20;
+  if (hasLeetspeakObfuscation(prompt)) score += 28;
 
   return Math.min(parseFloat(score.toFixed(1)), 100);
 }
@@ -754,7 +836,7 @@ function getDecodeTelemetry(usedObfuscation: boolean, maxDecodeDepth: number): D
   return maxDecodeDepth > 1 ? 'recursive_decode' : 'single_hop_decode';
 }
 
-export function sanitizePrompt(prompt: string): BackendSanitizationResult {
+export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning = {}): BackendSanitizationResult {
   const start = performance.now();
   let sanitized = prompt;
   const redactions = new Set<string>();
@@ -776,7 +858,21 @@ export function sanitizePrompt(prompt: string): BackendSanitizationResult {
     }
   }
 
-  const entropyAnalysis = analyzeSlidingWindowEntropy(prompt);
+  const suspiciousEntropyThreshold = tuning.entropyThreshold ?? SUSPICIOUS_ENTROPY_THRESHOLD;
+  const suspiciousSyntacticThreshold = tuning.syntacticThreshold ?? 65;
+  const configuredBlockedKeywords = (tuning.blockedKeywords ?? [])
+    .map((keyword) => keyword.trim().toLowerCase())
+    .filter(Boolean);
+  const configuredForbiddenTopics = (tuning.forbiddenTopics ?? [])
+    .map((topic) => topic.trim().toLowerCase())
+    .filter(Boolean);
+  const configuredRegexRules = (tuning.regexRules ?? [])
+    .map((rule) => rule.trim())
+    .filter(Boolean);
+  const blockedKeywordsToCheck = configuredBlockedKeywords.length > 0
+    ? configuredBlockedKeywords
+    : BLOCKED_KEYWORDS;
+  const entropyAnalysis = analyzeSlidingWindowEntropy(prompt, 35, 5, suspiciousEntropyThreshold);
   const entropyContextSuspicious = hasEntropyEscalationContext(prompt) ||
     entropyAnalysis.suspiciousChunks.some((chunk) => hasEntropyEscalationContext(chunk));
   const syntacticScore = analyzeSyntacticComplexity(prompt);
@@ -795,7 +891,7 @@ export function sanitizePrompt(prompt: string): BackendSanitizationResult {
   let transformedSignalsUsed: ObfuscationSignal[] = [];
   let normalizedTransformedSegments: string[] = [];
   let decodeTelemetry = getDecodeTelemetry(usedObfuscation, maxDecodeDepth);
-  const blockedKeywordHits = BLOCKED_KEYWORDS.filter((keyword) =>
+  const blockedKeywordHits = blockedKeywordsToCheck.filter((keyword) =>
     normalized.includes(keyword) ||
     normalizedDecodedSegments.some((segment) => segment.includes(keyword)) ||
     normalizedSpellCorrected.includes(keyword) ||
@@ -815,7 +911,7 @@ export function sanitizePrompt(prompt: string): BackendSanitizationResult {
       ...rawTransformedAnalysis.segments,
       ...decodedTransformedAnalysis.segments,
     ].map((segment) => normalizeForPolicy(segment));
-    const transformedHits = BLOCKED_KEYWORDS.filter((keyword) =>
+    const transformedHits = blockedKeywordsToCheck.filter((keyword) =>
       normalizedTransformedSegments.some((segment) => segment.includes(keyword))
     );
     if (transformedHits.length > 0 && usedObfuscation && decodedTransformedAnalysis.segments.length > 0) {
@@ -871,9 +967,51 @@ export function sanitizePrompt(prompt: string): BackendSanitizationResult {
     detectionFlags.add('EXTERNAL_CALL_ATTEMPT');
     redactions.add('EXTERNAL_CALL_ATTEMPT');
   }
+  if (COORDINATE_CIPHER_REGEX.test(prompt)) {
+    detectionFlags.add('COORDINATE_CIPHER');
+    redactions.add('COORDINATE_CIPHER');
+  }
 
-  if (entropyAnalysis.maxEntropy > VERDICT_SUSPICIOUS_ENTROPY_THRESHOLD && entropyContextSuspicious) detectionFlags.add('TOKEN_DILUTION');
-  if (syntacticScore >= 65) detectionFlags.add('SYNTACTIC_PROBE');
+  const forbiddenTopicDetected = configuredForbiddenTopics.some((topic) =>
+    normalized.includes(topic) ||
+    normalizedDecodedSegments.some((segment) => segment.includes(topic)) ||
+    normalizedTransformedSegments.some((segment) => segment.includes(topic)) ||
+    normalizedSpellCorrected.includes(topic) ||
+    (normalizedForeignRecovery ? normalizedForeignRecovery.includes(topic) : false)
+  );
+  if (forbiddenTopicDetected) {
+    detectionFlags.add('FORBIDDEN_TOPIC');
+    redactions.add('FORBIDDEN_TOPIC');
+  }
+
+  let regexMatchDetected = false;
+  for (const rule of configuredRegexRules) {
+    try {
+      let pattern = rule;
+      let flags = 'gi';
+      if (rule.startsWith('/') && rule.lastIndexOf('/') > 0) {
+        pattern = rule.substring(1, rule.lastIndexOf('/'));
+        flags = rule.substring(rule.lastIndexOf('/') + 1) || 'gi';
+      }
+      const regex = new RegExp(pattern, flags);
+      if (regex.test(prompt)) {
+        regexMatchDetected = true;
+        detectionFlags.add('REGEX_MATCH');
+        redactions.add('REGEX_MATCH');
+        break;
+      }
+    } catch (error) {
+      console.error('Invalid backend regex rule:', rule, error);
+    }
+  }
+
+  if (blockedKeywordHits.length > 0 || forbiddenTopicDetected || regexMatchDetected) {
+    detectionFlags.add('POLICY_VIOLATION');
+    redactions.add('POLICY_VIOLATION');
+  }
+
+  if (entropyAnalysis.maxEntropy > suspiciousEntropyThreshold && entropyContextSuspicious) detectionFlags.add('TOKEN_DILUTION');
+  if (syntacticScore >= suspiciousSyntacticThreshold) detectionFlags.add('SYNTACTIC_PROBE');
   if (prompt.length > 2000) detectionFlags.add('EXCESSIVE_LENGTH');
 
   let verdict: FirewallVerdict = 'CLEAN';
@@ -887,10 +1025,13 @@ export function sanitizePrompt(prompt: string): BackendSanitizationResult {
   if (reasons.length > 0) {
     verdict = 'ADVERSARIAL';
   } else if (
-    (entropyAnalysis.maxEntropy > VERDICT_SUSPICIOUS_ENTROPY_THRESHOLD && entropyContextSuspicious) ||
-    syntacticScore >= 65 ||
+    (entropyAnalysis.maxEntropy > suspiciousEntropyThreshold && entropyContextSuspicious) ||
+    syntacticScore >= suspiciousSyntacticThreshold ||
     blockedKeywordHits.length > 0 ||
+    forbiddenTopicDetected ||
+    regexMatchDetected ||
     externalCallDetected ||
+    COORDINATE_CIPHER_REGEX.test(prompt) ||
     prompt.length > 2000
   ) {
     verdict = 'SUSPICIOUS';

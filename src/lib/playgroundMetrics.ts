@@ -13,6 +13,7 @@ import {
 
 const PLAYGROUND_METRICS_STORAGE_KEY = 'counter_spy_playground_metrics_v1';
 const MAX_PLAYGROUND_METRIC_ENTRIES = 2000;
+export const PLAYGROUND_METRICS_UPDATED_EVENT = 'counter-spy:playground-metrics-updated';
 
 export interface PlaygroundMetricEntry extends AtlasTaxonomyFields {
   id: string;
@@ -134,6 +135,7 @@ export function savePlaygroundMetrics(entries: PlaygroundMetricEntry[]) {
       PLAYGROUND_METRICS_STORAGE_KEY,
       JSON.stringify(entries.slice(-MAX_PLAYGROUND_METRIC_ENTRIES)),
     );
+    window.dispatchEvent(new CustomEvent(PLAYGROUND_METRICS_UPDATED_EVENT));
   } catch (error) {
     console.error('Failed to save playground metrics to localStorage.', error);
   }
@@ -145,6 +147,7 @@ export function clearPlaygroundMetrics() {
 
   try {
     window.localStorage.removeItem(PLAYGROUND_METRICS_STORAGE_KEY);
+    window.dispatchEvent(new CustomEvent(PLAYGROUND_METRICS_UPDATED_EVENT));
   } catch (error) {
     console.error('Failed to clear playground metrics from localStorage.', error);
   }

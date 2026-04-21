@@ -25,21 +25,58 @@ import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContai
 interface ThreatDashboardProps {
   localReviewMode?: boolean;
   localAuditLogs?: any[];
+  governanceConfig?: {
+    isHitlActive: boolean;
+    isGlobalPause: boolean;
+    entropyThreshold: number;
+    syntacticThreshold: number;
+  };
+  onGovernanceConfigChange?: (config: {
+    isHitlActive: boolean;
+    isGlobalPause: boolean;
+    entropyThreshold: number;
+    syntacticThreshold: number;
+  }) => void;
 }
 
 const emptyHourlyData = Array(24).fill(0).map((_, hour) => ({ hour, threats: 0 }));
-const emptyObfuscationHourlyData = Array(24).fill(0).map((_, hour) => ({
+const emptySeverityHourlyData = Array(24).fill(0).map((_, hour) => ({
   hour,
-  urlEncodingHits: 0,
-  rot13Hits: 0,
-  leetspeakHits: 0,
-  natoHits: 0,
-  morseHits: 0,
+  adversarial: 0,
+  review: 0,
+  policyViolation: 0,
+  suspicious: 0,
+  informational: 0,
+  clean: 0,
 }));
 const PII_DETECTION_FLAGS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN'];
 const SECRET_DETECTION_FLAGS = ['AWS_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'SECRET_KEY'];
 const DIRECT_OBFUSCATION_FLAGS = ['URL_ENCODING', 'HTML_ENTITIES', 'UNICODE_ESCAPES', 'COMPATIBILITY_GLYPHS', 'SYMBOL_SUBSTITUTION', 'LEETSPEAK', 'ROT13', 'REVERSE_TEXT', 'NATO_PHONETIC', 'MORSE_CODE', 'BRAILLE', 'REGIONAL_INDICATORS', 'RECURSIVE_DECODE'];
 const STRUCTURAL_OBFUSCATION_FLAGS = ['END_SEQUENCE', 'CHUNKING', 'VARIABLE_EXPANSION', 'VERTICAL_TEXT'];
+const RESPONDER_INTERVENTION_FLAGS = ['RESPONDER_BLOCK', 'RESPONDER_REFUSAL', 'RESPONDER_QUEUE_FOR_REVIEW', 'RESPONDER_FAIL_SECURE'];
+type SeverityBucket = 'adversarial' | 'review' | 'policyViolation' | 'suspicious' | 'informational' | 'clean';
+type SeverityCounts = Record<SeverityBucket, number>;
+const SEVERITY_LEGEND_ITEMS = [
+  { value: 'Adversarial', type: 'square' as const, id: 'adversarial', color: '#ef4444' },
+  { value: 'Review', type: 'square' as const, id: 'review', color: '#8b5cf6' },
+  { value: 'Policy Violation', type: 'square' as const, id: 'policyViolation', color: '#f97316' },
+  { value: 'Suspicious', type: 'square' as const, id: 'suspicious', color: '#f59e0b' },
+  { value: 'Informational', type: 'square' as const, id: 'informational', color: '#38bdf8' },
+  { value: 'Clean', type: 'square' as const, id: 'clean', color: '#22c55e' },
+];
+
+function SeverityLegend() {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-300">
+      {SEVERITY_LEGEND_ITEMS.map((item) => (
+        <div key={item.id} className="flex items-center gap-1.5">
+          <span className="h-2.5 w-2.5 rounded-sm" style={{ backgroundColor: item.color }} />
+          <span>{item.value}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 function hasAnySignal(log: any, signalSet: string[]): boolean {
   const detectionFlags = Array.isArray(log.detectionFlags) ? log.detectionFlags : [];
@@ -69,21 +106,155 @@ function getHeatColor(count: number, maxCount: number): string {
   return 'bg-slate-900 border-slate-700 text-slate-200';
 }
 
+function getSeverityBucket(log: any): SeverityBucket {
+  const detectionFlags = Array.isArray(log.detectionFlags) ? log.detectionFlags : [];
+  const upperResponse = typeof log.response === 'string' ? log.response.toUpperCase() : '';
+  const reviewedSeverity = log.reviewed === true && typeof log.resultantSeverity === 'string'
+    ? log.resultantSeverity
+    : undefined;
+
+  if (reviewedSeverity === 'Adversarial') return 'adversarial';
+  if (reviewedSeverity === 'Suspicious') return 'suspicious';
+  if (reviewedSeverity === 'Informational') return 'informational';
+  if (reviewedSeverity === 'Clean') return 'clean';
+
+  if (log.status === 'PENDING_REVIEW' || detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW')) {
+    return 'review';
+  }
+  if (
+    Number(log.detectionLevel || 0) >= 3 ||
+    detectionFlags.includes('RESPONDER_BLOCK') ||
+    detectionFlags.includes('RESPONDER_REFUSAL')
+  ) {
+    return 'adversarial';
+  }
+  if (
+    detectionFlags.includes('POLICY_VIOLATION') ||
+    detectionFlags.includes('BLOCKED_KEYWORD') ||
+    detectionFlags.includes('FORBIDDEN_TOPIC') ||
+    detectionFlags.includes('REGEX_MATCH') ||
+    upperResponse.startsWith('POLICY VIOLATION DETECTED')
+  ) {
+    return 'policyViolation';
+  }
+  if (Number(log.detectionLevel || 0) === 2) {
+    return 'suspicious';
+  }
+  if (Number(log.detectionLevel || 0) === 1) {
+    return 'informational';
+  }
+  return 'clean';
+}
+
+function hasResponderIntervention(log: any): boolean {
+  const detectionFlags = Array.isArray(log.detectionFlags) ? log.detectionFlags : [];
+  return detectionFlags.some((flag: string) => RESPONDER_INTERVENTION_FLAGS.includes(flag));
+}
+
+function hasPolicyViolationSignal(flags: string[] = []): boolean {
+  return flags.includes('POLICY_VIOLATION') ||
+    flags.includes('BLOCKED_KEYWORD') ||
+    flags.includes('FORBIDDEN_TOPIC') ||
+    flags.includes('REGEX_MATCH');
+}
+
+function isFinalClean(log: any): boolean {
+  if (log.status === 'PENDING_REVIEW') return false;
+  if (log.reviewed === true && typeof log.resultantSeverity === 'string') {
+    return log.resultantSeverity === 'Clean' || log.resultantSeverity === 'Informational';
+  }
+  return getSeverityBucket(log) === 'clean' || getSeverityBucket(log) === 'informational';
+}
+
+function wasPreInferenceBlocked(log: any): boolean {
+  if (hasResponderIntervention(log)) return false;
+  if (log.status === 'PENDING_REVIEW') return true;
+  if (hasPolicyViolationSignal(Array.isArray(log.detectionFlags) ? log.detectionFlags : [])) return true;
+  return Number(log.detectionLevel || 0) >= 2;
+}
+
+function isLikelyMaliciousPrompt(log: any): boolean {
+  if (typeof log.expectedVerdict === 'string') {
+    return log.expectedVerdict === 'Suspicious' || log.expectedVerdict === 'Adversarial';
+  }
+  if (log.reviewed === true && typeof log.resultantSeverity === 'string') {
+    return log.resultantSeverity === 'Suspicious' || log.resultantSeverity === 'Adversarial';
+  }
+  return (
+    wasPreInferenceBlocked(log) ||
+    hasResponderIntervention(log) ||
+    getSeverityBucket(log) === 'policyViolation' ||
+    getSeverityBucket(log) === 'adversarial' ||
+    getSeverityBucket(log) === 'review' ||
+    getSeverityBucket(log) === 'suspicious'
+  );
+}
+
+function calculateLayerMetrics(logs: any[]) {
+  const totalLogs = logs.length;
+  const preInferenceBlockedCount = logs.filter(wasPreInferenceBlocked).length;
+  const reachedSafeguardCount = Math.max(totalLogs - preInferenceBlockedCount, 0);
+  const safeguardInterventionsCount = logs.filter((log) => !wasPreInferenceBlocked(log) && hasResponderIntervention(log)).length;
+  const likelyMaliciousLogs = logs.filter(isLikelyMaliciousPrompt);
+  const postModelEscapeCount = likelyMaliciousLogs.filter((log) =>
+    !wasPreInferenceBlocked(log) &&
+    !hasResponderIntervention(log) &&
+    isFinalClean(log)
+  ).length;
+
+  return {
+    preInferenceBlockedCount,
+    safeguardInterventionsCount,
+    reachedSafeguardCount,
+    likelyMaliciousCount: likelyMaliciousLogs.length,
+    postModelEscapeCount,
+    preInferenceBlockRate: totalLogs > 0 ? parseFloat(((preInferenceBlockedCount / totalLogs) * 100).toFixed(1)) : 0,
+    safeguardInterventionRate: reachedSafeguardCount > 0 ? parseFloat(((safeguardInterventionsCount / reachedSafeguardCount) * 100).toFixed(1)) : 0,
+    postModelEscapeRate: likelyMaliciousLogs.length > 0 ? parseFloat(((postModelEscapeCount / likelyMaliciousLogs.length) * 100).toFixed(1)) : 0,
+  };
+}
+
+function createEmptySeverityCounts(): SeverityCounts {
+  return {
+    adversarial: 0,
+    review: 0,
+    policyViolation: 0,
+    suspicious: 0,
+    informational: 0,
+    clean: 0,
+  };
+}
+
 // Export the ThreatDashboard functional component
-export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }: ThreatDashboardProps) {
+export function ThreatDashboard({
+  localReviewMode = false,
+  localAuditLogs = [],
+  governanceConfig,
+  onGovernanceConfigChange,
+}: ThreatDashboardProps) {
   // State to hold the results of the anomaly detection analysis
   const [metrics, setMetrics] = useState<any>(null);
   // State to hold the calculated False Positive Rate metrics
   const [fprMetrics, setFprMetrics] = useState<any>(null);
   // State to hold the time-series data for the chart
   const [chartData, setChartData] = useState<any[]>([]);
-  const [obfuscationChartData, setObfuscationChartData] = useState<any[]>([]);
+  const [severityChartData, setSeverityChartData] = useState<any[]>([]);
   const [operationalMetrics, setOperationalMetrics] = useState<any>(null);
   const [sourceFilter, setSourceFilter] = useState<'all' | 'ctf_chat'>('all');
   // State to track if Human-in-the-Loop (HITL) mode is active
   const [isHitlActive, setIsHitlActive] = useState(false); 
   // State to track if the Global System Pause is active
   const [isGlobalPause, setIsGlobalPause] = useState(false);
+  const [entropyThreshold, setEntropyThreshold] = useState(governanceConfig?.entropyThreshold ?? 4.0);
+  const [syntacticThreshold, setSyntacticThreshold] = useState(governanceConfig?.syntacticThreshold ?? 65);
+
+  useEffect(() => {
+    if (!governanceConfig) return;
+    setIsHitlActive(governanceConfig.isHitlActive);
+    setIsGlobalPause(governanceConfig.isGlobalPause);
+    setEntropyThreshold(governanceConfig.entropyThreshold);
+    setSyntacticThreshold(governanceConfig.syntacticThreshold);
+  }, [governanceConfig]);
 
   // Effect hook to listen for real-time updates to the governance configuration
   useEffect(() => {
@@ -100,9 +271,11 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
         // Update local state with fetched values, defaulting to false
         setIsHitlActive(data.isHitlActive || false);
         setIsGlobalPause(data.isGlobalPause || false);
+        setEntropyThreshold(typeof data.entropyThreshold === 'number' ? data.entropyThreshold : 4.0);
+        setSyntacticThreshold(typeof data.syntacticThreshold === 'number' ? data.syntacticThreshold : 65);
       } else {
         // Initialize the document if it doesn't exist
-        setDoc(configRef, { isHitlActive: false, isGlobalPause: false });
+        setDoc(configRef, { isHitlActive: false, isGlobalPause: false, entropyThreshold: 4.0, syntacticThreshold: 65 });
       }
     });
 
@@ -118,6 +291,12 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
       if (newState) {
         setIsHitlActive(false);
       }
+      onGovernanceConfigChange?.({
+        isHitlActive: newState ? false : isHitlActive,
+        isGlobalPause: newState,
+        entropyThreshold,
+        syntacticThreshold,
+      });
       return;
     }
 
@@ -125,20 +304,59 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
     // Update Firestore, merging with existing data. If pausing, disable HITL.
     await setDoc(configRef, { 
       isGlobalPause: newState, 
-      isHitlActive: newState ? false : isHitlActive 
+      isHitlActive: newState ? false : isHitlActive,
+      entropyThreshold,
+      syntacticThreshold,
     }, { merge: true });
   };
 
   // Function to toggle the Human-in-the-Loop (HITL) mode
   const handleHitlToggle = async () => {
     if (localReviewMode) {
-      setIsHitlActive(prev => !prev);
+      const newState = !isHitlActive;
+      setIsHitlActive(newState);
+      onGovernanceConfigChange?.({
+        isHitlActive: newState,
+        isGlobalPause,
+        entropyThreshold,
+        syntacticThreshold,
+      });
       return;
     }
 
     const configRef = doc(db, 'config', 'governance');
     // Update Firestore, merging with existing data
-    await setDoc(configRef, { isHitlActive: !isHitlActive }, { merge: true });
+    await setDoc(configRef, { isHitlActive: !isHitlActive, entropyThreshold, syntacticThreshold }, { merge: true });
+  };
+
+  const handleEntropyThresholdChange = async (value: number) => {
+    setEntropyThreshold(value);
+    if (localReviewMode) {
+      onGovernanceConfigChange?.({
+        isHitlActive,
+        isGlobalPause,
+        entropyThreshold: value,
+        syntacticThreshold,
+      });
+      return;
+    }
+    const configRef = doc(db, 'config', 'governance');
+    await setDoc(configRef, { entropyThreshold: value }, { merge: true });
+  };
+
+  const handleSyntacticThresholdChange = async (value: number) => {
+    setSyntacticThreshold(value);
+    if (localReviewMode) {
+      onGovernanceConfigChange?.({
+        isHitlActive,
+        isGlobalPause,
+        entropyThreshold,
+        syntacticThreshold: value,
+      });
+      return;
+    }
+    const configRef = doc(db, 'config', 'governance');
+    await setDoc(configRef, { syntacticThreshold: value }, { merge: true });
   };
 
   // Effect hook to load and calculate metrics data
@@ -178,33 +396,23 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
         }
         setChartData(reorderedData);
 
-        const obfuscationHourlyData = Array(24).fill(0).map((_, i) => ({
+        const severityHourlyData: Array<{ hour: number } & SeverityCounts> = Array(24).fill(0).map((_, i) => ({
+          ...createEmptySeverityCounts(),
           hour: i,
-          urlEncodingHits: 0,
-          rot13Hits: 0,
-          leetspeakHits: 0,
-          natoHits: 0,
-          morseHits: 0,
         }));
         filteredLogs.forEach((log) => {
-          const techniques = getObfuscationTechniques(log);
-          if (techniques.length === 0) return;
           const stamp = log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp);
           const hour = stamp.getHours();
-          const bucket = obfuscationHourlyData[hour];
+          const bucket = severityHourlyData[hour];
           if (!bucket) return;
-          if (techniques.includes('URL_ENCODING')) bucket.urlEncodingHits += 1;
-          if (techniques.includes('ROT13')) bucket.rot13Hits += 1;
-          if (techniques.includes('LEETSPEAK')) bucket.leetspeakHits += 1;
-          if (techniques.includes('NATO_PHONETIC')) bucket.natoHits += 1;
-          if (techniques.includes('MORSE_CODE')) bucket.morseHits += 1;
+          bucket[getSeverityBucket(log)] += 1;
         });
-        const reorderedObfuscationData = [];
+        const reorderedSeverityData = [];
         for (let i = 1; i <= 24; i++) {
           const h = (currentHour + i) % 24;
-          reorderedObfuscationData.push(obfuscationHourlyData[h]);
+          reorderedSeverityData.push(severityHourlyData[h]);
         }
-        setObfuscationChartData(reorderedObfuscationData);
+        setSeverityChartData(reorderedSeverityData);
 
         const pendingLogs = filteredLogs.filter((log) => log.status === 'PENDING_REVIEW');
         const reviewedLogs = filteredLogs.filter((log) => log.reviewed === true);
@@ -271,6 +479,11 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
         const averageSuspiciousChunks = filteredLogs.length > 0
           ? filteredLogs.reduce((sum, log) => sum + ((log.suspiciousChunks || []).length), 0) / filteredLogs.length
           : 0;
+        const alertCounts = filteredLogs.reduce<SeverityCounts>((counts, log) => {
+          counts[getSeverityBucket(log)] += 1;
+          return counts;
+        }, createEmptySeverityCounts());
+        const layerMetrics = calculateLayerMetrics(filteredLogs);
 
         setOperationalMetrics({
           hitl: {
@@ -294,6 +507,8 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
             averageEntropy: parseFloat(averageEntropy.toFixed(2)),
             averageSuspiciousChunks: parseFloat(averageSuspiciousChunks.toFixed(1)),
           },
+          alertSeverity: alertCounts,
+          layerDefense: layerMetrics,
           detectionSignals: {
             piiHits,
             secretHits,
@@ -360,6 +575,7 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
           suspiciousChunks: doc.data().suspiciousChunks || [],
           sanitizedPrompt: doc.data().sanitizedPrompt || '',
           source: doc.data().source || 'analyst_chat',
+          expectedVerdict: doc.data().expectedVerdict || undefined,
           obfuscationSummary: doc.data().obfuscationSummary || undefined,
         }));
 
@@ -407,32 +623,22 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
         // Update the chart data state
         setChartData(reorderedData);
 
-        const obfuscationHourlyData = Array(24).fill(0).map((_, i) => ({
+        const severityHourlyData: Array<{ hour: number } & SeverityCounts> = Array(24).fill(0).map((_, i) => ({
+          ...createEmptySeverityCounts(),
           hour: i,
-          urlEncodingHits: 0,
-          rot13Hits: 0,
-          leetspeakHits: 0,
-          natoHits: 0,
-          morseHits: 0,
         }));
         filteredLogs.forEach((log) => {
-          const techniques = getObfuscationTechniques(log);
-          if (techniques.length === 0) return;
           const hour = log.timestamp.getHours();
-          const bucket = obfuscationHourlyData[hour];
+          const bucket = severityHourlyData[hour];
           if (!bucket) return;
-          if (techniques.includes('URL_ENCODING')) bucket.urlEncodingHits += 1;
-          if (techniques.includes('ROT13')) bucket.rot13Hits += 1;
-          if (techniques.includes('LEETSPEAK')) bucket.leetspeakHits += 1;
-          if (techniques.includes('NATO_PHONETIC')) bucket.natoHits += 1;
-          if (techniques.includes('MORSE_CODE')) bucket.morseHits += 1;
+          bucket[getSeverityBucket(log)] += 1;
         });
-        const reorderedObfuscationData = [];
+        const reorderedSeverityData = [];
         for (let i = 1; i <= 24; i++) {
           const h = (currentHour + i) % 24;
-          reorderedObfuscationData.push(obfuscationHourlyData[h]);
+          reorderedSeverityData.push(severityHourlyData[h]);
         }
-        setObfuscationChartData(reorderedObfuscationData);
+        setSeverityChartData(reorderedSeverityData);
 
         const pendingLogs = filteredLogs.filter((log) => log.status === 'PENDING_REVIEW');
         const reviewedLogs = filteredLogs.filter((log) => log.reviewed === true);
@@ -498,6 +704,11 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
         const averageSuspiciousChunks = filteredLogs.length > 0
           ? filteredLogs.reduce((sum, log) => sum + ((log.suspiciousChunks || []).length), 0) / filteredLogs.length
           : 0;
+        const alertCounts = filteredLogs.reduce<SeverityCounts>((counts, log) => {
+          counts[getSeverityBucket(log)] += 1;
+          return counts;
+        }, createEmptySeverityCounts());
+        const layerMetrics = calculateLayerMetrics(filteredLogs);
 
         setOperationalMetrics({
           hitl: {
@@ -521,6 +732,8 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
             averageEntropy: parseFloat(averageEntropy.toFixed(2)),
             averageSuspiciousChunks: parseFloat(averageSuspiciousChunks.toFixed(1)),
           },
+          alertSeverity: alertCounts,
+          layerDefense: layerMetrics,
           detectionSignals: {
             piiHits,
             secretHits,
@@ -687,6 +900,64 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
         </div>
       </div>
 
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="flex items-center gap-2 font-bold text-lg">
+                <span>Entropy Threshold</span>
+                <HelpTooltip text="Lower values make entropy-based escalation more aggressive. Higher values reduce entropy-driven review pressure." />
+              </h3>
+              <p className="text-sm text-slate-400">Current threshold for suspicious entropy escalation.</p>
+            </div>
+            <div className="rounded-md border border-slate-700 bg-slate-950 px-3 py-1 font-mono text-sm text-slate-100">
+              {entropyThreshold.toFixed(1)}
+            </div>
+          </div>
+          <input
+            type="range"
+            min={3}
+            max={4.6}
+            step={0.1}
+            value={entropyThreshold}
+            onChange={(e) => { void handleEntropyThresholdChange(Number(e.target.value)); }}
+            className="w-full accent-cyan-400"
+          />
+          <div className="flex justify-between text-[11px] text-slate-500">
+            <span>More aggressive</span>
+            <span>More forgiving</span>
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-slate-800 bg-slate-900 p-4 space-y-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="flex items-center gap-2 font-bold text-lg">
+                <span>Syntactic Threshold</span>
+                <HelpTooltip text="Lower values catch more instruction-heavy prompts. Higher values require stronger meta-prompt structure before escalation." />
+              </h3>
+              <p className="text-sm text-slate-400">Current threshold for syntactic-probe escalation.</p>
+            </div>
+            <div className="rounded-md border border-slate-700 bg-slate-950 px-3 py-1 font-mono text-sm text-slate-100">
+              {syntacticThreshold}
+            </div>
+          </div>
+          <input
+            type="range"
+            min={40}
+            max={90}
+            step={1}
+            value={syntacticThreshold}
+            onChange={(e) => { void handleSyntacticThresholdChange(Number(e.target.value)); }}
+            className="w-full accent-amber-400"
+          />
+          <div className="flex justify-between text-[11px] text-slate-500">
+            <span>More aggressive</span>
+            <span>More forgiving</span>
+          </div>
+        </div>
+      </div>
+
       <div className="space-y-4 mb-8">
       {/* 🔴 Anomaly Alert Banner */}
       {metrics.isAnomaly && (
@@ -823,13 +1094,13 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
       <Card className="bg-card border-border shadow-sm">
         <CardHeader className="pb-2">
           <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-            <span>24-Hour Obfuscation Trend</span>
-            <HelpTooltip text="Hourly trend of prompts that triggered obfuscation-oriented detections over the last 24 hours." />
+            <span>24-Hour Alert Severity Trend</span>
+            <HelpTooltip text="Hourly trend of prompt outcomes grouped by alert severity over the last 24 hours." />
           </CardTitle>
         </CardHeader>
         <CardContent className="h-[180px] pt-4">
           <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={obfuscationChartData}>
+            <AreaChart data={severityChartData}>
               <CartesianGrid strokeDasharray="3 3" stroke="#333" vertical={false} />
               <XAxis
                 dataKey="hour"
@@ -846,15 +1117,16 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
               />
               <Tooltip
                 contentStyle={{ backgroundColor: '#020617', borderColor: '#334155', color: '#e2e8f0' }}
-                formatter={(value: number, name: string) => [`${value} hits`, name]}
+                formatter={(value: number, name: string) => [`${value} alerts`, name]}
                 labelFormatter={(label) => `Hour: ${label}:00`}
               />
-              <Legend wrapperStyle={{ fontSize: '12px' }} />
-              <Area type="monotone" dataKey="urlEncodingHits" name="URL" stackId="1" stroke="#22d3ee" fill="#22d3ee" fillOpacity={0.35} />
-              <Area type="monotone" dataKey="rot13Hits" name="ROT13" stackId="1" stroke="#818cf8" fill="#818cf8" fillOpacity={0.35} />
-              <Area type="monotone" dataKey="leetspeakHits" name="Leetspeak" stackId="1" stroke="#34d399" fill="#34d399" fillOpacity={0.35} />
-              <Area type="monotone" dataKey="natoHits" name="NATO" stackId="1" stroke="#14b8a6" fill="#14b8a6" fillOpacity={0.35} />
-              <Area type="monotone" dataKey="morseHits" name="Morse" stackId="1" stroke="#67e8f9" fill="#67e8f9" fillOpacity={0.3} />
+              <Legend content={<SeverityLegend />} />
+              <Area type="monotone" dataKey="adversarial" name="Adversarial" stackId="1" stroke="#ef4444" fill="#ef4444" fillOpacity={0.35} />
+              <Area type="monotone" dataKey="review" name="Review" stackId="1" stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.35} />
+              <Area type="monotone" dataKey="policyViolation" name="Policy Violation" stackId="1" stroke="#f97316" fill="#f97316" fillOpacity={0.35} />
+              <Area type="monotone" dataKey="suspicious" name="Suspicious" stackId="1" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.35} />
+              <Area type="monotone" dataKey="informational" name="Informational" stackId="1" stroke="#38bdf8" fill="#38bdf8" fillOpacity={0.3} />
+              <Area type="monotone" dataKey="clean" name="Clean" stackId="1" stroke="#22c55e" fill="#22c55e" fillOpacity={0.25} />
             </AreaChart>
           </ResponsiveContainer>
         </CardContent>
@@ -949,26 +1221,83 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
           <Card className="bg-card border-border shadow-sm">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                <span>Prompt Shape</span>
-                <HelpTooltip text="Aggregate prompt characteristics such as length, line count, entropy, and suspicious chunk volume." />
+                <span>Alert (By Severity)</span>
+                <HelpTooltip text="Prompt counts grouped by final alert severity, ordered from most severe down to clean traffic." />
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Avg Length</span>
-                <span className="font-semibold text-slate-100">{operationalMetrics.promptShape.averagePromptLength} chars</span>
+                <span className="text-muted-foreground">Adversarial</span>
+                <span className="font-semibold text-rose-500">{operationalMetrics.alertSeverity.adversarial}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Avg Lines</span>
-                <span className="font-semibold text-slate-100">{operationalMetrics.promptShape.averageLineCount}</span>
+                <span className="text-muted-foreground">Review</span>
+                <span className="font-semibold text-violet-400">{operationalMetrics.alertSeverity.review}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Avg Entropy</span>
-                <span className="font-semibold text-slate-100">{operationalMetrics.promptShape.averageEntropy}</span>
+                <span className="text-muted-foreground">Policy Violation</span>
+                <span className="font-semibold text-orange-400">{operationalMetrics.alertSeverity.policyViolation}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Avg Suspicious Chunks</span>
-                <span className="font-semibold text-slate-100">{operationalMetrics.promptShape.averageSuspiciousChunks}</span>
+                <span className="text-muted-foreground">Suspicious</span>
+                <span className="font-semibold text-amber-400">{operationalMetrics.alertSeverity.suspicious}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Informational</span>
+                <span className="font-semibold text-sky-400">{operationalMetrics.alertSeverity.informational}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Clean</span>
+                <span className="font-semibold text-emerald-400">{operationalMetrics.alertSeverity.clean}</span>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card className="bg-card border-border shadow-sm">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                <span>Defense Funnel</span>
+                <HelpTooltip text="Shows where prompt traffic is stopped across the two-layer safeguard path: before Safeguard LLM, by Safeguard LLM, or after both layers." />
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <div>
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1 text-muted-foreground">
+                    <span>Pre-Inference Block Rate</span>
+                    <HelpTooltip text="Of all prompts in the current view, this is the share blocked before they ever reached the Safeguard LLM." />
+                  </span>
+                  <span className="font-semibold text-rose-500">{operationalMetrics.layerDefense.preInferenceBlockRate}%</span>
+                </div>
+                <div className="text-[11px] text-slate-500 text-right">
+                  {operationalMetrics.layerDefense.preInferenceBlockedCount} blocked before Safeguard LLM / {operationalMetrics.layerDefense.preInferenceBlockedCount + operationalMetrics.layerDefense.reachedSafeguardCount} total prompts
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1 text-muted-foreground">
+                    <span>Model Intervention Rate</span>
+                    <HelpTooltip text="Of the prompts that actually reached the Safeguard LLM, this is the share that it then blocked or queued for review." />
+                  </span>
+                  <span className="font-semibold text-amber-400">{operationalMetrics.layerDefense.safeguardInterventionRate}%</span>
+                </div>
+                <div className="text-[11px] text-slate-500 text-right">
+                  {operationalMetrics.layerDefense.safeguardInterventionsCount} caught by Safeguard LLM / {operationalMetrics.layerDefense.reachedSafeguardCount} prompts that reached it
+                </div>
+              </div>
+
+              <div>
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1 text-muted-foreground">
+                    <span>Post-Model Escape Rate</span>
+                    <HelpTooltip text="Of the prompts judged likely malicious after expected-verdict labels and analyst review are considered, this is the share that bypassed both layers and still landed clean or informational." />
+                  </span>
+                  <span className="font-semibold text-emerald-400">{operationalMetrics.layerDefense.postModelEscapeRate}%</span>
+                </div>
+                <div className="text-[11px] text-slate-500 text-right">
+                  {operationalMetrics.layerDefense.postModelEscapeCount} escaped both layers / {operationalMetrics.layerDefense.likelyMaliciousCount} likely malicious prompts
+                </div>
               </div>
             </CardContent>
           </Card>
@@ -1019,46 +1348,26 @@ export function ThreatDashboard({ localReviewMode = false, localAuditLogs = [] }
           <Card className="bg-card border-border shadow-sm">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                <span>Obfuscation Signals</span>
-                <HelpTooltip text="Breakdown of the obfuscation-oriented signals now detected in the firewall path." />
+                <span>Prompt Shape</span>
+                <HelpTooltip text="Aggregate prompt characteristics such as length, line count, entropy, and suspicious chunk volume." />
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">URL Encoding</span>
-                <span className="font-semibold text-cyan-400">{operationalMetrics.obfuscationSignals.urlEncodingHits}</span>
+                <span className="text-muted-foreground">Avg Length</span>
+                <span className="font-semibold text-slate-100">{operationalMetrics.promptShape.averagePromptLength} chars</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">HTML Entities</span>
-                <span className="font-semibold text-sky-400">{operationalMetrics.obfuscationSignals.htmlEntityHits}</span>
+                <span className="text-muted-foreground">Avg Lines</span>
+                <span className="font-semibold text-slate-100">{operationalMetrics.promptShape.averageLineCount}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">ROT13</span>
-                <span className="font-semibold text-indigo-400">{operationalMetrics.obfuscationSignals.rot13Hits}</span>
+                <span className="text-muted-foreground">Avg Entropy</span>
+                <span className="font-semibold text-slate-100">{operationalMetrics.promptShape.averageEntropy}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Leetspeak</span>
-                <span className="font-semibold text-emerald-400">{operationalMetrics.obfuscationSignals.leetspeakHits}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Reverse Text</span>
-                <span className="font-semibold text-violet-400">{operationalMetrics.obfuscationSignals.reverseTextHits}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">NATO Phonetic</span>
-                <span className="font-semibold text-teal-400">{operationalMetrics.obfuscationSignals.natoHits}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Morse Code</span>
-                <span className="font-semibold text-cyan-300">{operationalMetrics.obfuscationSignals.morseHits}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Recursive Decode</span>
-                <span className="font-semibold text-rose-400">{operationalMetrics.obfuscationSignals.recursiveDecodeHits}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Structural Markers</span>
-                <span className="font-semibold text-fuchsia-400">{operationalMetrics.obfuscationSignals.structuralHits}</span>
+                <span className="text-muted-foreground">Avg Suspicious Chunks</span>
+                <span className="font-semibold text-slate-100">{operationalMetrics.promptShape.averageSuspiciousChunks}</span>
               </div>
             </CardContent>
           </Card>

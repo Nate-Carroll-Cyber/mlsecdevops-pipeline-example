@@ -1,45 +1,89 @@
+import { hasLeetspeakObfuscation } from './sanitizerNormalization';
+
+const WRAPPER_SHELL_REGEX =
+  /^\s*(?:[\[(<]{1,3}|--)?\s*\/?\s*[A-Z][A-Z0-9]*(?:[ _:-]+[A-Z0-9]+){0,10}\s*(?:[\])>]{1,3})?\s*$/gm;
+const DOUBLE_BRACKET_WRAPPER_REGEX = /\[\[[A-Z0-9_:-]{3,}\]\]/g;
+const ANGLE_TAG_WRAPPER_REGEX = /<[/]?[A-Z0-9_:-]{3,}>/g;
+const PAREN_WRAPPER_REGEX = /\(([A-Z0-9_:-]{3,})\)/g;
+const BASE64_BLOB_REGEX = /\b(?:[A-Za-z0-9+/]{20,}={0,2})\b/g;
+const ESCAPE_SEQUENCE_REGEX = /(?:\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|%[0-9a-fA-F]{2}){3,}/g;
+
+function countMatches(input: string, regex: RegExp): number {
+  return input.match(regex)?.length ?? 0;
+}
+
+function hasBase64LikeBlob(input: string): boolean {
+  return BASE64_BLOB_REGEX.test(input) && /[A-Z]/.test(input) && /[a-z]/.test(input) && /\d|[+/=]/.test(input);
+}
+
+function hasEscapeSequenceBlob(input: string): boolean {
+  return ESCAPE_SEQUENCE_REGEX.test(input);
+}
+
 // Function to analyze the syntactic complexity of a prompt to detect adversarial patterns
-export function analyzeSyntacticComplexity(prompt: string) {
+export function analyzeSyntacticComplexity(prompt: string, threshold: number = 65) {
   // Check if the prompt is empty or only contains whitespace
   if (!prompt || prompt.trim().length === 0) {
     // Return a zeroed-out result if the prompt is empty
     return { score: 0, isProbingAttempt: false, metrics: { constraintCount: 0, constraintDensity: 0, specialCharRatio: 0, avgWordsPerSentence: 0 } };
   }
 
+  const wrapperShellCount =
+    countMatches(prompt, WRAPPER_SHELL_REGEX) +
+    countMatches(prompt, DOUBLE_BRACKET_WRAPPER_REGEX) +
+    countMatches(prompt, ANGLE_TAG_WRAPPER_REGEX) +
+    countMatches(prompt, PAREN_WRAPPER_REGEX);
+  const normalizedPrompt = prompt
+    .replace(/\\([_<>\[\]])/g, '$1')
+    .replace(/\\_/g, '_')
+    .replace(WRAPPER_SHELL_REGEX, ' ')
+    .replace(DOUBLE_BRACKET_WRAPPER_REGEX, ' ')
+    .replace(ANGLE_TAG_WRAPPER_REGEX, ' ')
+    .replace(PAREN_WRAPPER_REGEX, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
   // Convert the prompt to lowercase for case-insensitive keyword matching
-  const lowerPrompt = prompt.toLowerCase();
+  const lowerPrompt = normalizedPrompt.toLowerCase();
   
   // 1. Constraint Density
   // Define a list of operational keywords commonly used in prompt injection and jailbreaks
-  const operationalKeywords = [
-    'ignore', 'override', 'disregard', 'instead', 'regardless', 
-    'assume', 'hypothetical', 'must', 'always', 'never', 'system',
-    'instructions', 'prior', 'forget', 'output format', 'jailbreak',
+  const highSignalKeywords = [
+    'ignore', 'override', 'disregard', 'forget', 'jailbreak',
     'act as', 'simulate', 'pretend', 'from now on', 'developer mode',
-    'unfiltered', 'uncensored', 'bypass', 'rules', 'guidelines',
-    'policy', 'policies', 'restriction', 'limitations', 'prompt',
-    'roleplay', 'persona', 'character', 'mode', 'previous', 'context',
-    'clear', 'reset', 'start over', 'new instructions', 'do anything now',
-    'dan', 'sudo', 'admin', 'root', 'system prompt', 'core instructions',
-    'base instructions', 'you are', 'you will', 'you must', 'you cannot',
-    'you shall', 'respond as', 'answer as', 'reply as', 'behave as',
-    'enabled', 'disabled', 'developer', 'chatgpt', 'openai', 'gemini'
+    'unfiltered', 'uncensored', 'bypass', 'roleplay', 'persona',
+    'start over', 'new instructions', 'do anything now', 'dan',
+    'sudo', 'admin', 'root', 'system prompt', 'core instructions',
+    'base instructions', 'respond as', 'answer as', 'reply as', 'behave as',
+    'chatgpt', 'openai', 'gemini'
+  ];
+  const mediumSignalKeywords = [
+    'must', 'always', 'never', 'instructions', 'output format',
+    'rules', 'guidelines', 'restriction', 'limitations', 'you are',
+    'you will', 'you must', 'you cannot', 'you shall'
   ];
   
   // Initialize a counter for the number of operational keywords found
   let constraintCount = 0;
-  // Iterate over each operational keyword
-  operationalKeywords.forEach(keyword => {
-    // Create a regular expression to match the keyword as a whole word
-    const regex = new RegExp(`\\b${keyword}\\b`, 'g');
-    // Find all matches of the keyword in the lowercased prompt
+  let weightedConstraintScore = 0;
+  highSignalKeywords.forEach(keyword => {
+    const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
     const matches = lowerPrompt.match(regex);
-    // If matches are found, add the number of matches to the total count
-    if (matches) constraintCount += matches.length;
+    if (matches) {
+      constraintCount += matches.length;
+      weightedConstraintScore += matches.length * 1.4;
+    }
+  });
+  mediumSignalKeywords.forEach(keyword => {
+    const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+    const matches = lowerPrompt.match(regex);
+    if (matches) {
+      constraintCount += matches.length;
+      weightedConstraintScore += matches.length * 0.6;
+    }
   });
 
   // Calculate the total number of words in the prompt by splitting on whitespace
-  const totalWords = prompt.trim().split(/\s+/).length;
+  const totalWords = normalizedPrompt.trim().split(/\s+/).length;
   // Calculate the constraint density as a percentage of total words
   const constraintDensity = totalWords > 0 ? (constraintCount / totalWords) * 100 : 0;
 
@@ -47,15 +91,15 @@ export function analyzeSyntacticComplexity(prompt: string) {
   // Matches anything that is NOT alphanumeric, whitespace, or basic English punctuation
   // This perfectly isolates code syntax (brackets, math operators, quotes, URL encoding %, _, etc.)
   // Find all special characters in the prompt
-  const specialChars = prompt.match(/[^a-zA-Z0-9\s.,!?\-:']/g);
+  const specialChars = normalizedPrompt.match(/[^a-zA-Z0-9\s.,!?\-:']/g);
   // Count the number of special characters found
   const specialCharCount = specialChars ? specialChars.length : 0;
   // Calculate the ratio of special characters to the total prompt length as a percentage
-  const specialCharRatio = (specialCharCount / prompt.length) * 100;
+  const specialCharRatio = normalizedPrompt.length > 0 ? (specialCharCount / normalizedPrompt.length) * 100 : 0;
 
   // 3. Verbosity (Words per sentence)
   // Split the prompt into sentences based on common sentence-ending punctuation
-  const sentences = prompt.split(/[.!?]+/).filter(s => s.trim().length > 0);
+  const sentences = normalizedPrompt.split(/[.!?]+/).filter(s => s.trim().length > 0);
   // Calculate the average number of words per sentence
   const avgWordsPerSentence = sentences.length > 0 ? (totalWords / sentences.length) : totalWords;
 
@@ -65,7 +109,7 @@ export function analyzeSyntacticComplexity(prompt: string) {
   
   // Base score from raw count of operational keywords (highly indicative of meta-prompting)
   // Add 10 points per constraint, capped at 60 points
-  score += Math.min(constraintCount * 10, 60); 
+  score += Math.min(weightedConstraintScore * 10, 60); 
   
   // Score from density (catches short, dense injections)
   // Add points based on constraint density, capped at 40 points
@@ -83,15 +127,22 @@ export function analyzeSyntacticComplexity(prompt: string) {
   // Add another 10 points if sentences are extremely long (> 60 words)
   if (avgWordsPerSentence > 60) score += 10; 
 
-  // Define the threshold score for classifying a prompt as a probing attempt
-  const THRESHOLD = 65;
+  // Benign wrapper shells still indicate prompt structure, just not adversarial syntax.
+  score += Math.min(wrapperShellCount * 8, 12);
 
+  // Encoded blobs and leetspeak are syntactic concealment signals even when the
+  // wording itself does not contain explicit jailbreak verbs.
+  if (hasBase64LikeBlob(prompt)) score += 24;
+  if (hasEscapeSequenceBlob(prompt)) score += 20;
+  if (hasLeetspeakObfuscation(prompt)) score += 28;
+
+  // Define the threshold score for classifying a prompt as a probing attempt
   // Return the final analysis results
   return {
     // Cap the final score at 100 and format to 1 decimal place
     score: Math.min(parseFloat(score.toFixed(1)), 100),
     // Flag as a probing attempt if the score meets or exceeds the threshold
-    isProbingAttempt: score >= THRESHOLD,
+    isProbingAttempt: score >= threshold,
     // Return the individual metrics for detailed analysis
     metrics: {
       // The raw count of operational keywords

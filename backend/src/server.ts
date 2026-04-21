@@ -4,6 +4,7 @@
  * and the governed Sam Spade CTF routes.
  */
 import express, { type Request, type Response } from 'express';
+import { Credentials, Translator } from '@translated/lara';
 import { z } from 'zod';
 import { sanitizePrompt, type FirewallVerdict } from './security/sanitizer.js';
 import {
@@ -24,10 +25,13 @@ const EnvSchema = z.object({
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   SAFEGUARDS_MODEL_ID: z.string().min(1).default('gpt-oss-safeguards20B'),
   RESPONDER_MODEL_ID: z.string().min(1).default('amazon.nova-micro-v1:0'),
+  LLM_API_BASE_URL: z.string().url().optional(),
+  LLM_API_KEY: z.string().optional(),
+  LLM_MODEL_ID: z.string().optional(),
   INTERCEPT_BEARER_TOKEN: z.string().min(16).optional(),
-  DEEPL_API_KEY: z.string().optional(),
-  GOOGLE_TRANSLATE_API_KEY: z.string().optional(),
-  AZURE_TRANSLATOR_API_KEY: z.string().optional(),
+  LARA_ACCESS_KEY_ID: z.string().optional(),
+  LARA_ACCESS_KEY_SECRET: z.string().optional(),
+  LARA_API_BASE_URL: z.string().url().optional(),
 });
 
 // Validate backend configuration once before the server boots.
@@ -58,7 +62,7 @@ const allowedOrigins = (
   .map((origin) => origin.trim())
   .filter(Boolean);
 const safeguardsModelId = env.SAFEGUARDS_MODEL_ID;
-const responderModelId = env.RESPONDER_MODEL_ID;
+const responderModelId = env.LLM_MODEL_ID || env.RESPONDER_MODEL_ID;
 
 const LOG_LEVELS = {
   debug: 10,
@@ -84,26 +88,115 @@ function log(level: keyof typeof LOG_LEVELS, message: string, extra: Record<stri
   }));
 }
 
+async function generateResponderOutput(
+  prompt: string,
+  systemPrompt?: string,
+): Promise<{
+  response: string;
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+  };
+}> {
+  const baseUrl = env.LLM_API_BASE_URL;
+  const apiKey = env.LLM_API_KEY;
+  const modelId = responderModelId;
+
+  if (!baseUrl || !apiKey || !modelId) {
+    return {
+      response: 'Counter-Spy.ai backend accepted this clean prompt. Configure LLM_API_BASE_URL, LLM_API_KEY, and LLM_MODEL_ID to enable live downstream inference.',
+    };
+  }
+
+  const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
+  const endpoint = normalizedBaseUrl.endsWith('/chat/completions')
+    ? normalizedBaseUrl
+    : `${normalizedBaseUrl}/chat/completions`;
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [
+        ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0,
+    }),
+  });
+
+  if (!response.ok) {
+    const upstreamError = await response.text();
+    log('warn', 'responder_upstream_rejected', {
+      status: response.status,
+      upstreamError,
+      modelId,
+    });
+    throw new Error(`Responder API ${response.status} rejected the request.`);
+  }
+
+  const payload = await response.json() as {
+    choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }>;
+    usage?: {
+      prompt_tokens?: number;
+      completion_tokens?: number;
+      total_tokens?: number;
+    };
+  };
+  const content = payload.choices?.[0]?.message?.content;
+  if (typeof content === 'string') {
+    return {
+      response: content,
+      usage: {
+        promptTokens: payload.usage?.prompt_tokens,
+        completionTokens: payload.usage?.completion_tokens,
+        totalTokens: payload.usage?.total_tokens,
+      },
+    };
+  }
+  if (Array.isArray(content)) {
+    return {
+      response: content.map((part) => part?.text ?? '').join('').trim(),
+      usage: {
+        promptTokens: payload.usage?.prompt_tokens,
+        completionTokens: payload.usage?.completion_tokens,
+        totalTokens: payload.usage?.total_tokens,
+      },
+    };
+  }
+  throw new Error('Responder API returned no message content.');
+}
+
 // Request shape for the main firewall intercept endpoint.
 const InterceptRequestSchema = z.object({
   prompt: z.string().min(1).max(50_000),
   userId: z.string().min(1).optional(),
   sessionId: z.string().min(1).optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
+  tuning: z.object({
+    entropyThreshold: z.number().min(3).max(4.6).optional(),
+    syntacticThreshold: z.number().min(40).max(90).optional(),
+    blockedKeywords: z.array(z.string()).optional(),
+    forbiddenTopics: z.array(z.string()).optional(),
+    regexRules: z.array(z.string()).optional(),
+  }).optional(),
 });
 
 type InterceptRequest = z.infer<typeof InterceptRequestSchema>;
 
 // Translation proxy contracts used by the Playground language pipeline.
-const TranslationProviderSchema = z.enum(['deepl', 'google', 'azure']);
+const TranslationProviderSchema = z.enum(['lara']);
 
 const TranslateRequestSchema = z.object({
   text: z.string().min(1).max(20_000),
-  provider: TranslationProviderSchema,
-  baseUrl: z.string().url(),
-  apiKey: z.string().optional(),
-  targetLang: z.string().min(2).max(16),
-  sourceLang: z.string().min(2).max(16).optional(),
+  provider: TranslationProviderSchema.default('lara'),
+  mode: z.enum(['recover_to_english', 'generate_foreign_variant']).default('recover_to_english'),
+  targetLang: z.string().min(2).max(16).optional(),
 });
 
 type TranslateRequest = z.infer<typeof TranslateRequestSchema>;
@@ -162,11 +255,25 @@ const SamSpadeCreateSessionRequestSchema = z.object({
 const SamSpadeMessageRequestSchema = z.object({
   sessionId: z.string().min(1),
   prompt: z.string().min(1).max(10_000),
+  tuning: z.object({
+    entropyThreshold: z.number().min(3).max(4.6).optional(),
+    syntacticThreshold: z.number().min(40).max(90).optional(),
+    blockedKeywords: z.array(z.string()).optional(),
+    forbiddenTopics: z.array(z.string()).optional(),
+    regexRules: z.array(z.string()).optional(),
+  }).optional(),
 });
 
 const SamSpadeSolveRequestSchema = z.object({
   sessionId: z.string().min(1),
   theory: z.string().min(1).max(10_000),
+  tuning: z.object({
+    entropyThreshold: z.number().min(3).max(4.6).optional(),
+    syntacticThreshold: z.number().min(40).max(90).optional(),
+    blockedKeywords: z.array(z.string()).optional(),
+    forbiddenTopics: z.array(z.string()).optional(),
+    regexRules: z.array(z.string()).optional(),
+  }).optional(),
 });
 
 type SamSpadeSession = z.infer<typeof SamSpadeSessionSchema>;
@@ -204,10 +311,16 @@ interface InterceptResponse {
   responder?: {
     modelId: string;
     response: string;
+    usage?: {
+      promptTokens?: number;
+      completionTokens?: number;
+      totalTokens?: number;
+    };
   };
 }
 
 const TARGET_LANGUAGE_NAMES: Record<string, string> = {
+  en: 'English',
   zh: 'Chinese (Simplified)',
   ar: 'Arabic',
   ru: 'Russian',
@@ -225,24 +338,24 @@ const TARGET_LANGUAGE_NAMES: Record<string, string> = {
   uk: 'Ukrainian',
 };
 
-const PROVIDER_LANGUAGE_CODES: Record<TranslateRequest['provider'], Record<string, string>> = {
-  deepl: {
-    zh: 'ZH', ar: 'AR', ru: 'RU', ja: 'JA', hi: 'HI', ko: 'KO', fa: 'FA', tr: 'TR',
-    de: 'DE', fr: 'FR', es: 'ES', pt: 'PT', it: 'IT', pl: 'PL', uk: 'UK',
-  },
-  google: {
-    zh: 'zh', ar: 'ar', ru: 'ru', ja: 'ja', hi: 'hi', ko: 'ko', fa: 'fa', tr: 'tr',
-    de: 'de', fr: 'fr', es: 'es', pt: 'pt', it: 'it', pl: 'pl', uk: 'uk',
-  },
-  azure: {
-    zh: 'zh-Hans', ar: 'ar', ru: 'ru', ja: 'ja', hi: 'hi', ko: 'ko', fa: 'fa', tr: 'tr',
-    de: 'de', fr: 'fr', es: 'es', pt: 'pt', it: 'it', pl: 'pl', uk: 'uk',
-  },
+const LARA_LANGUAGE_CODES: Record<string, string> = {
+  en: 'en-US',
+  zh: 'zh-CN',
+  ar: 'ar-SA',
+  ru: 'ru-RU',
+  ja: 'ja-JP',
+  hi: 'hi-IN',
+  ko: 'ko-KR',
+  fa: 'fa-IR',
+  tr: 'tr-TR',
+  de: 'de-DE',
+  fr: 'fr-FR',
+  es: 'es-ES',
+  pt: 'pt-PT',
+  it: 'it-IT',
+  pl: 'pl-PL',
+  uk: 'uk-UA',
 };
-
-function resolveLanguageCode(langKey: string, provider: TranslateRequest['provider']): string {
-  return PROVIDER_LANGUAGE_CODES[provider][langKey] ?? langKey;
-}
 
 function getTargetLanguageName(langKey: string): string {
   return TARGET_LANGUAGE_NAMES[langKey] ?? langKey;
@@ -259,96 +372,73 @@ function isTextLikelyEncodedForTranslation(text: string): boolean {
   );
 }
 
-// Provider-specific HTTP wrappers. These keep the route handler small and make it
-// easier to replace or move translation behavior later.
-async function translateDeepl(text: string, opts: TranslateRequest): Promise<string> {
-  const response = await fetch(`${opts.baseUrl.replace(/\/$/, '')}/v2/translate`, {
-    method: 'POST',
-    headers: {
-      Authorization: `DeepL-Auth-Key ${opts.apiKey ?? ''}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      text: [text],
-      source_lang: (opts.sourceLang ?? 'en').toUpperCase(),
-      target_lang: resolveLanguageCode(opts.targetLang, 'deepl'),
-    }),
+let laraTranslator: Translator | null | undefined;
+
+function getLaraTranslator(): Translator | null {
+  if (laraTranslator !== undefined) {
+    return laraTranslator;
+  }
+
+  if (!env.LARA_ACCESS_KEY_ID || !env.LARA_ACCESS_KEY_SECRET) {
+    laraTranslator = null;
+    return laraTranslator;
+  }
+
+  const credentials = new Credentials(env.LARA_ACCESS_KEY_ID, env.LARA_ACCESS_KEY_SECRET);
+  laraTranslator = new Translator(credentials, {
+    ...(env.LARA_API_BASE_URL ? { serverUrl: env.LARA_API_BASE_URL } : {}),
+    connectionTimeoutMs: 10_000,
   });
-  if (!response.ok) throw new Error(`DeepL ${response.status}: ${await response.text()}`);
-  return ((await response.json()) as { translations: Array<{ text: string }> }).translations[0]?.text ?? text;
+  return laraTranslator;
 }
 
-async function translateGoogle(text: string, opts: TranslateRequest): Promise<string> {
-  const url = new URL(`${opts.baseUrl.replace(/\/$/, '')}/language/translate/v2`);
-  url.searchParams.set('key', opts.apiKey ?? '');
+async function translateWithLara(
+  text: string,
+  options?: { sourceLang?: string | null; targetLang?: string },
+): Promise<{ text: string; sourceLang: string }> {
+  const translator = getLaraTranslator();
+  if (!translator) {
+    throw new Error('Lara Translate is not configured. Set LARA_ACCESS_KEY_ID and LARA_ACCESS_KEY_SECRET on the backend.');
+  }
 
-  const response = await fetch(url.toString(), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      q: text,
-      source: opts.sourceLang ?? 'en',
-      target: resolveLanguageCode(opts.targetLang, 'google'),
-      format: 'text',
-    }),
-  });
-  if (!response.ok) throw new Error(`Google Translate ${response.status}: ${await response.text()}`);
-  return ((await response.json()) as { data: { translations: Array<{ translatedText: string }> } }).data.translations[0]?.translatedText ?? text;
-}
-
-async function translateAzure(text: string, opts: TranslateRequest): Promise<string> {
-  const url = new URL(`${opts.baseUrl.replace(/\/$/, '')}/translate`);
-  url.searchParams.set('api-version', '3.0');
-  url.searchParams.set('from', opts.sourceLang ?? 'en');
-  url.searchParams.set('to', resolveLanguageCode(opts.targetLang, 'azure'));
-
-  const response = await fetch(url.toString(), {
-    method: 'POST',
-    headers: {
-      'Ocp-Apim-Subscription-Key': opts.apiKey ?? '',
-      'Content-Type': 'application/json',
+  const result = await translator.translate(
+    text,
+    options?.sourceLang ?? null,
+    options?.targetLang ?? 'en-US',
+    {
+      contentType: 'text/plain',
+      style: 'faithful',
+      timeoutInMillis: 10_000,
     },
-    body: JSON.stringify([{ Text: text }]),
-  });
-  if (!response.ok) throw new Error(`Azure Translator ${response.status}: ${await response.text()}`);
-  return ((await response.json()) as Array<{ translations: Array<{ text: string }> }>)[0]?.translations[0]?.text ?? text;
+  );
+
+  return {
+    text: typeof result.translation === 'string' ? result.translation : text,
+    sourceLang: result.sourceLanguage || 'auto',
+  };
 }
 
 async function translateText(input: TranslateRequest): Promise<TranslateResponse> {
   if (isTextLikelyEncodedForTranslation(input.text)) {
     throw new Error('Translation skipped because the prompt already looks encoded or heavily obfuscated.');
   }
-
-  const resolvedInput: TranslateRequest = {
-    ...input,
-    apiKey: input.apiKey
-      ?? (input.provider === 'deepl'
-        ? env.DEEPL_API_KEY
-        : input.provider === 'google'
-          ? env.GOOGLE_TRANSLATE_API_KEY
-          : env.AZURE_TRANSLATOR_API_KEY),
-  };
-
-  let translated = input.text;
-  switch (resolvedInput.provider) {
-    case 'deepl':
-      translated = await translateDeepl(input.text, resolvedInput);
-      break;
-    case 'google':
-      translated = await translateGoogle(input.text, resolvedInput);
-      break;
-    case 'azure':
-      translated = await translateAzure(input.text, resolvedInput);
-      break;
-  }
+  const requestedTargetLang = input.mode === 'generate_foreign_variant'
+    ? (input.targetLang ?? 'es')
+    : 'en';
+  const laraTargetLang = LARA_LANGUAGE_CODES[requestedTargetLang] ?? LARA_LANGUAGE_CODES.en;
+  const laraSourceLang = input.mode === 'generate_foreign_variant' ? LARA_LANGUAGE_CODES.en : null;
+  const translated = await translateWithLara(input.text, {
+    sourceLang: laraSourceLang,
+    targetLang: laraTargetLang,
+  });
 
   return {
-    text: translated,
-    original: resolvedInput.text,
-    sourceLang: resolvedInput.sourceLang ?? 'en',
-    targetLang: resolvedInput.targetLang,
-    targetLangName: getTargetLanguageName(resolvedInput.targetLang),
-    provider: resolvedInput.provider,
+    text: translated.text,
+    original: input.text,
+    sourceLang: translated.sourceLang,
+    targetLang: requestedTargetLang,
+    targetLangName: getTargetLanguageName(requestedTargetLang),
+    provider: 'lara',
   };
 }
 
@@ -412,7 +502,7 @@ app.get('/healthz', (_req: Request, res: Response) => {
 // Firewall intercept route:
 // validates input, sanitizes the prompt, and returns a governed decision that the
 // frontend can treat as clean, queued, or intercepted without calling a model directly.
-app.post('/v1/intercept', (req: Request, res: Response<InterceptResponse | { error: string }>) => {
+app.post('/v1/intercept', async (req: Request, res: Response<InterceptResponse | { error: string }>) => {
   if (env.INTERCEPT_BEARER_TOKEN) {
     const authHeader = req.header('authorization');
     if (authHeader !== `Bearer ${env.INTERCEPT_BEARER_TOKEN}`) {
@@ -430,7 +520,7 @@ app.post('/v1/intercept', (req: Request, res: Response<InterceptResponse | { err
 
   const requestId = crypto.randomUUID();
   const input = parsed.data;
-  const sanitization = sanitizePrompt(input.prompt);
+  const sanitization = sanitizePrompt(input.prompt, input.tuning);
 
   const baseResponse: Omit<InterceptResponse, 'responder'> = {
     requestId,
@@ -453,15 +543,31 @@ app.post('/v1/intercept', (req: Request, res: Response<InterceptResponse | { err
     return;
   }
 
-  const response: InterceptResponse = {
-    ...baseResponse,
-    responder: {
-      modelId: responderModelId,
-      response: 'Counter-Spy.ai backend accepted this clean prompt. Bedrock Nova integration is not wired yet.',
-    },
-  };
+  try {
+    const responderResult = await generateResponderOutput(
+      input.prompt,
+      typeof input.metadata?.finalSystemPrompt === 'string' ? input.metadata.finalSystemPrompt : undefined,
+    );
 
-  res.status(200).json(response);
+    const response: InterceptResponse = {
+      ...baseResponse,
+      responder: {
+        modelId: responderModelId,
+        response: responderResult.response,
+        ...(responderResult.usage ? { usage: responderResult.usage } : {}),
+      },
+    };
+
+    res.status(200).json(response);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Responder request failed.';
+    log('warn', 'responder_failed', {
+      requestId,
+      error: message,
+      modelId: responderModelId,
+    });
+    res.status(502).json({ error: message });
+  }
 });
 
 // Translation proxy route:

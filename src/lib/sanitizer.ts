@@ -62,9 +62,9 @@ const SENSITIVE_PATTERNS = [
 ];
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
-const SUSPICIOUS_ENTROPY_THRESHOLD = 3.8;
+const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
+const SUSPICIOUS_ENTROPY_THRESHOLD = 4.0;
 const ADVERSARIAL_ENTROPY_THRESHOLD = 4.8;
-const VERDICT_SUSPICIOUS_ENTROPY_THRESHOLD = 4.5;
 
 // Enum defining the severity levels of detected threats
 export enum DetectionLevel {
@@ -180,7 +180,30 @@ function calculateEntropyLanguagePenalty(str: string): number {
     vowelRatio >= 0.2 &&
     vowelRatio <= 0.65;
 
-  return looksLikePlainProse ? 0.95 : 0;
+  return looksLikePlainProse ? 1.65 : 0;
+}
+
+// Entropy should measure concealment pressure, not reward predictable wrapper
+// shells like `[INSTRUCTION: ...]` or `<SYSTEM_MESSAGE_STYLE>`. We normalize
+// those structured headers out before scoring so templated clean prompts land
+// closer to their actual prose content.
+function normalizeForEntropy(str: string): string {
+  const unescaped = str
+    .replace(/\\([_<>\[\]])/g, '$1')
+    .replace(/\\_/g, '_')
+    .replace(/[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/g, ' pii email ')
+    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, ' pii ip ');
+
+  return unescaped
+    .replace(
+      /^\s*(?:[\[(<]{1,3}|--)?\s*\/?\s*[A-Z][A-Z0-9]*(?:[ _:-]+[A-Z0-9]+){0,10}\s*(?:[\])>]{1,3})?\s*$/gm,
+      ' template header ',
+    )
+    .replace(/\[\[[A-Z0-9_:-]{3,}\]\]/g, ' template header ')
+    .replace(/<[/]?[A-Z0-9_:-]{3,}>/g, ' template header ')
+    .replace(/\(([A-Z0-9_:-]{3,})\)/g, ' template header ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 // Gate entropy-driven escalation behind suspicious-looking chunk shape so normal
@@ -230,11 +253,12 @@ export function analyzeSlidingWindowEntropy(
   // The threshold above which a chunk is considered suspicious
   threshold: number = SUSPICIOUS_ENTROPY_THRESHOLD
 ): EntropyAnalysisResult {
+  const entropyInput = normalizeForEntropy(prompt);
   // Calculate the global entropy of the entire prompt
-  const globalEntropy = calculateEntropy(prompt);
+  const globalEntropy = calculateEntropy(entropyInput);
   const boostedGlobalEntropy = Math.max(
     0,
-    globalEntropy + calculateEntropyRiskBoost(prompt) - calculateEntropyLanguagePenalty(prompt),
+    globalEntropy + calculateEntropyRiskBoost(entropyInput) - calculateEntropyLanguagePenalty(entropyInput),
   );
   // Initialize the maximum entropy found to 0
   let maxEntropy = 0;
@@ -242,16 +266,16 @@ export function analyzeSlidingWindowEntropy(
   const suspiciousChunks: string[] = [];
 
   // If the prompt is shorter than or equal to the window size
-  if (prompt.length <= windowSize) {
+  if (entropyInput.length <= windowSize) {
     // The maximum entropy is just the global entropy
     maxEntropy = boostedGlobalEntropy;
     // If the global entropy exceeds the threshold, add the whole prompt to suspicious chunks
-    if (boostedGlobalEntropy >= threshold) suspiciousChunks.push(prompt);
+    if (boostedGlobalEntropy >= threshold) suspiciousChunks.push(entropyInput);
   } else {
     // Otherwise, slide the window across the prompt
-    for (let i = 0; i <= prompt.length - windowSize; i += stepSize) {
+    for (let i = 0; i <= entropyInput.length - windowSize; i += stepSize) {
       // Extract the text for the current window
-      const windowText = prompt.substring(i, i + windowSize);
+      const windowText = entropyInput.substring(i, i + windowSize);
       // Calculate the entropy of the current window
       const windowEntropy = Math.max(
         0,
@@ -270,6 +294,10 @@ export function analyzeSlidingWindowEntropy(
         suspiciousChunks.push(windowText);
       }
     }
+  }
+
+  if (!hasEntropyEscalationContext(entropyInput)) {
+    maxEntropy = Math.min(maxEntropy, boostedGlobalEntropy + 0.6);
   }
 
   // Return the analysis results
@@ -303,6 +331,11 @@ export interface ActiveGuardrails {
   regexRules: boolean;
 }
 
+export interface SanitizationTuning {
+  entropyThreshold?: number;
+  syntacticThreshold?: number;
+}
+
 // Main inbound firewall routine.
 // This is the function the frontend uses to decide whether a prompt is clean,
 // informational, suspicious, or adversarial before it moves farther downstream.
@@ -324,7 +357,8 @@ export function sanitizeInput(
     blockedKeywords: true,
     blockedTopics: true,
     regexRules: true
-  }
+  },
+  tuning: SanitizationTuning = {}
 ): SanitizationResult {
   // Record the start time to measure latency
   const startTime = performance.now();
@@ -332,6 +366,8 @@ export function sanitizeInput(
   let sanitized = input;
   // Initialize an array to track applied redactions
   const redactions: string[] = [];
+  const suspiciousEntropyThreshold = tuning.entropyThreshold ?? SUSPICIOUS_ENTROPY_THRESHOLD;
+  const suspiciousSyntacticThreshold = tuning.syntacticThreshold ?? 65;
 
   // Always detect PII for metadata/governance, but conditionally redact the string
   // Iterate over each sensitive pattern defined earlier
@@ -367,7 +403,7 @@ export function sanitizeInput(
   // If the entropy filter guardrail is enabled
   if (guardrails.entropyFilter) {
     // Perform sliding window entropy analysis
-    const entropyResult = analyzeSlidingWindowEntropy(input, 35, 5, SUSPICIOUS_ENTROPY_THRESHOLD);
+    const entropyResult = analyzeSlidingWindowEntropy(input, 35, 5, suspiciousEntropyThreshold);
     // Store the maximum entropy found
     entropy = entropyResult.maxEntropy;
     // Store the global entropy
@@ -385,6 +421,7 @@ export function sanitizeInput(
   let foreignLanguageDetected = false;
   let mixedLanguageDetected = false;
   let externalCallDetected = false;
+  let coordinateCipherDetected = false;
 
   // Recovery/normalization stage:
   // - normalize direct text for policy checks
@@ -542,6 +579,10 @@ export function sanitizeInput(
     externalCallDetected = true;
     if (!redactions.includes('EXTERNAL_CALL_ATTEMPT')) redactions.push('EXTERNAL_CALL_ATTEMPT');
   }
+  if (COORDINATE_CIPHER_REGEX.test(input)) {
+    coordinateCipherDetected = true;
+    if (!redactions.includes('COORDINATE_CIPHER')) redactions.push('COORDINATE_CIPHER');
+  }
 
   // Policy matching stage: custom regex rules from system configuration.
   let containsRegexMatch = false;
@@ -582,14 +623,18 @@ export function sanitizeInput(
     }
   }
 
+  if ((containsBlockedKeyword || containsForbiddenTopic || containsRegexMatch) && !redactions.includes('POLICY_VIOLATION')) {
+    redactions.push('POLICY_VIOLATION');
+  }
+
   // Complexity analysis runs after the earlier normalization stages so the final
   // severity can reflect both structural suspicion and explicit policy hits.
-  const syntacticAnalysis = analyzeSyntacticComplexity(input);
+  const syntacticAnalysis = analyzeSyntacticComplexity(input, suspiciousSyntacticThreshold);
 
   // High-level escalation heuristic used for the rest of the app UI and logging.
   const isPotentiallyAdversarial = 
     // Check if entropy filter is on and entropy exceeds 4.5
-    (guardrails.entropyFilter && entropy > SUSPICIOUS_ENTROPY_THRESHOLD && entropyContextSuspicious) ||
+    (guardrails.entropyFilter && entropy > suspiciousEntropyThreshold && entropyContextSuspicious) ||
     // Check if a blocked keyword was found
     containsBlockedKeyword ||
     // Check if a forbidden topic was found
@@ -597,6 +642,7 @@ export function sanitizeInput(
     // Check if a custom regex rule was matched
     containsRegexMatch ||
     externalCallDetected ||
+    coordinateCipherDetected ||
     // Check if the syntactic analyzer detected a probing attempt
     syntacticAnalysis.isProbingAttempt ||
     // Check if the input is excessively long (over 2000 characters)
@@ -614,7 +660,14 @@ export function sanitizeInput(
     // Escalate to SUSPICIOUS level
     detectionLevel = DetectionLevel.SUSPICIOUS;
   // Else if a blocked keyword, forbidden topic, high entropy (> 4.5), or excessive length is detected
-  } else if (containsBlockedKeyword || containsForbiddenTopic || externalCallDetected || (guardrails.entropyFilter && entropy > VERDICT_SUSPICIOUS_ENTROPY_THRESHOLD && entropyContextSuspicious) || input.length > 2000) {
+  } else if (
+    containsBlockedKeyword ||
+    containsForbiddenTopic ||
+    externalCallDetected ||
+    coordinateCipherDetected ||
+    (guardrails.entropyFilter && entropy > suspiciousEntropyThreshold && entropyContextSuspicious) ||
+    input.length > 2000
+  ) {
     // Escalate to SUSPICIOUS level
     detectionLevel = DetectionLevel.SUSPICIOUS;
   // Else if a custom regex rule was matched

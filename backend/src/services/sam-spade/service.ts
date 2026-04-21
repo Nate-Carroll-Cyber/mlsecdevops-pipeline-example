@@ -85,6 +85,10 @@ export function getSamSpadeSession(sessionId: string): SamSpadeSessionRecord | n
 export function submitSamSpadeMessage(args: {
   sessionId: string;
   prompt: string;
+  tuning?: {
+    entropyThreshold?: number;
+    syntacticThreshold?: number;
+  };
 }): { session: SamSpadeSessionRecord; review: SamSpadeReviewArtifact } {
   const session = getStoredSession(args.sessionId);
   if (!session) {
@@ -93,7 +97,7 @@ export function submitSamSpadeMessage(args: {
 
   const requestId = crypto.randomUUID();
   const submittedAt = nowIso();
-  const sanitization = sanitizePrompt(args.prompt);
+  const sanitization = sanitizePrompt(args.prompt, args.tuning);
   const intercepted = sanitization.verdict !== 'CLEAN';
   // Record the player turn using the sanitized text that downstream review sees.
   const reviewDisposition: SamSpadeSessionMessage['reviewDisposition'] = intercepted ? 'intercepted' : 'clean';
@@ -164,6 +168,10 @@ export function submitSamSpadeMessage(args: {
 export function solveSamSpadeCase(args: {
   sessionId: string;
   theory: string;
+  tuning?: {
+    entropyThreshold?: number;
+    syntacticThreshold?: number;
+  };
 }): { session: SamSpadeSessionRecord; solved: boolean; evaluation: string; review: SamSpadeReviewArtifact } {
   const session = getStoredSession(args.sessionId);
   if (!session) {
@@ -172,7 +180,7 @@ export function solveSamSpadeCase(args: {
 
   const submittedAt = nowIso();
   const requestId = crypto.randomUUID();
-  const sanitization = sanitizePrompt(args.theory);
+  const sanitization = sanitizePrompt(args.theory, args.tuning);
   const intercepted = sanitization.verdict !== 'CLEAN';
   const theoryMessage: SamSpadeSessionMessage = {
     id: crypto.randomUUID(),

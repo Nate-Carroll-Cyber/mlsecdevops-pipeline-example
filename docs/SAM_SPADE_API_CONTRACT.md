@@ -14,9 +14,10 @@ This document defines the current local API boundary for the Sam Spade CTF surfa
 1. Frontend creates or resumes a Sam Spade session
 2. Player submits a message or a case-solving theory
 3. Backend sanitizes and evaluates the input
-4. Backend updates Sam Spade session state
-5. Backend emits a review artifact
-6. Frontend mirrors that artifact into Analyst Chat and Audit Logs
+4. If the turn is blocked, backend marks it for review before gameplay continues
+5. If the turn is clean, backend currently produces a deterministic noir reply inside the Sam Spade service
+6. Backend updates Sam Spade session state and emits a review artifact
+7. Frontend mirrors that artifact into Analyst Chat and Audit Logs
 
 ## Endpoints
 
@@ -62,6 +63,12 @@ Fetch an existing Sam Spade session.
 ### `POST /v1/ctf/sam-spade/message`
 
 Submit a normal interrogation prompt.
+
+Current behavior note:
+
+- blocked turns are intercepted before gameplay
+- clean turns currently receive a deterministic Sam Spade reply from the service itself
+- clean turns do **not** yet call the live downstream LLM responder used by Analyst Chat
 
 Request:
 
@@ -146,7 +153,7 @@ Response:
 Current storage model:
 
 - in-memory `Map` for active runtime access
-- JSON persistence at `backend/data/sam-spade-sessions.json` for local durability across restarts
+- SQLite persistence at `backend/data/sam-spade.db` for local durability across restarts and Docker demo continuity
 
 This is intentionally a local-development persistence layer, not the final production storage shape.
 

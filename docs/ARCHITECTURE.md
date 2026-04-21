@@ -1,7 +1,7 @@
 # Technical Reference & Architecture Specification: Counter-Spy.ai
 
-**Version:** 1.9.3-Alpha  
-**Status:** Internal Review / Architecture Update  
+**Version:** v2.0  
+**Status:** Beta / Promotion to Beta  
 **Classification:** Proprietary / AppSec Engineering  
 
 ---
@@ -10,16 +10,24 @@
 
 Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure Large Language Model (LLM) interactions. This multi-stage defense-in-depth strategy ensures that adversarial payloads are neutralized at the edge before reaching high-compute inference engines.
 
-### 1.0 Current Alpha Implementation
-The current Alpha was developed using **Google AI Studio** as a React/Vite/Firebase application. Governance is enforced by local TypeScript sanitization logic in the client, with Firebase Authentication for user identity and Firestore for audit logs, knowledge-base content, and synchronized governance configuration.
+### 1.0 Current Beta Implementation
+The current Beta is a React/Vite/Firebase application with a TypeScript/Express backend gateway. Governance is still enforced first by local TypeScript sanitization logic in the client, while backend routes now own the secure intercept path, downstream responder handoff, manual Lara translation proxying, and the Sam Spade CTF API. Firebase Authentication still provides user identity and Firestore still stores audit logs, knowledge-base content, and synchronized governance configuration.
 
 ### 1.1 Logical Flow
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
-2.  **The Sword (Production Inference):** The primary LLM (e.g., Gemini 3 Flash) which receives only the "cleansed" and governed payload.
+2.  **The Sword (Backend-Mediated Inference):** The downstream responder receives only the "cleansed" and governed payload through the backend `/v1/intercept` route. Endpoint, model, and credentials are now backend-owned rather than browser-configurable, while the UI retains only lightweight telemetry settings like optional max context window.
+    *   **Current telemetry note:** When the provider returns usage metadata, the gateway now surfaces prompt/completion/total token counts, and the frontend can combine those counts with an optional operator-supplied max context window to estimate context utilization in audit review.
+*   **Manual Translation Gateway (`/v1/translate`)**:
+    *   Owns backend-only Lara Translate access for the Playground.
+    *   Runs only when an analyst explicitly triggers the Normalize - Translate pipeline.
+    *   Supports two modes:
+        *   auto-detect source -> English recovery
+        *   English -> selected foreign-language variant generation
+    *   Keeps translation licensing/cost exposure bounded by avoiding automatic calls on prompt edits or standard submissions.
 
 ### 1.2 System Resilience & Fallback Policies
-The Alpha implementation adheres to a **Fail-Secure** philosophy across all critical components:
+The Beta implementation adheres to a **Fail-Secure** philosophy across all critical components:
 
 | Component | Failure Scenario | Policy | Outcome |
 | :--- | :--- | :--- | :--- |
@@ -52,10 +60,10 @@ The governance state is persisted in Firestore (`config/governance`).
 
 ### 3.2 Audit Log Retention
 *   **Policy:** By default, logs are intended to be permanent for forensic auditability.
-*   **Cost Management:** The Alpha supports **Firestore TTL (Time-to-Live)**. Administrators can designate a TTL policy field in the Google Cloud Console, enabling automatic purging of logs older than a defined retention period (e.g., 90 days).
+*   **Cost Management:** The Beta supports **Firestore TTL (Time-to-Live)**. Administrators can designate a TTL policy field in the Google Cloud Console, enabling automatic purging of logs older than a defined retention period (e.g., 90 days).
 
 > [!NOTE]
-> **Forensic Gap Awareness**: Firestore audit logs are retained independently of Google's Gemini API abuse monitoring window (55 days). For incidents requiring cross-referencing Gemini-side request logs, forensic analysis must occur within this 55-day window.
+> **Forensic Gap Awareness**: Firestore audit logs are retained independently of any downstream provider-side abuse monitoring window. If provider-side request logs are part of an investigation, forensic correlation must still happen inside that provider's retention window.
 
 ---
 
@@ -68,9 +76,9 @@ The governance state is persisted in Firestore (`config/governance`).
 
 ---
 
-## 5. Future Gateway Architecture: `/v1/intercept`
+## 5. Gateway Architecture: `/v1/intercept`
 
-The `/v1/intercept` endpoint is a planned gateway interface, not part of the current Alpha implementation. It is retained here as a roadmap reference for future service-to-service deployments that place Counter-Spy.ai between external clients and production inference services.
+The `/v1/intercept` endpoint is now part of the current Beta implementation. It serves as the live backend gateway between the frontend control plane and downstream inference services, while still matching the longer-term service-to-service architecture planned for ECS.
 
 ### 5.1 Authentication
 Future external services would authenticate with the Counter-Spy gateway using **Bearer Tokens (JWT)**. 
@@ -78,8 +86,9 @@ Future external services would authenticate with the Counter-Spy gateway using *
 *   **Validation:** 
     *   **Provider:** Tokens are validated against the configured Auth Provider (Firebase/OIDC).
     *   **Claims:** Validation requires `sub` (subject), `aud` (audience), and `exp` (expiration).
-    *   **Policy:** Tokens are validated per-request; no local caching of validation state is performed in the Alpha to ensure immediate revocation propagation.
+    *   **Policy:** Tokens are validated per-request; no local caching of validation state is performed in the Beta to ensure immediate revocation propagation.
     *   **TTL:** Token lifespan and refresh cycles are governed by the Identity Provider's policy.
+*   **Current Beta Note:** In dev, the backend can run without a bearer token. Outside dev, `INTERCEPT_BEARER_TOKEN` can be required before the gateway serves `/v1/intercept`.
 *   **Additional Future Support:** Integration with **AWS IAM SigV4** is planned for service-to-service communication within VPC environments.
 
 ### 5.2 Endpoint Specification
@@ -102,6 +111,8 @@ Future external services would authenticate with the Counter-Spy gateway using *
 | `403` | `INTERCEPTED` | Shield blocked payload (Adversarial/Suspicious). |
 | `503` | `SHIELD_ERROR` | Fail-Secure block due to Shield Engine timeout/failure. |
 
+Downstream responder outcomes such as `BLOCK`, `FAIL_SECURE`, `QUEUE_FOR_REVIEW`, and explicit policy-violation messages are normalized back into Counter-Spy.ai severity/status labels before they land in the audit trail.
+
 ---
 
 ## 6. Operational Controls: Telemetry Isolation
@@ -118,4 +129,9 @@ The platform utilizes a real-time anomaly detection engine to monitor threat vel
 *   **Alerting Thresholds:** 
     *   **Z > 2.0**: Triggers "Anomalous Activity" dashboard alerts.
     *   **Z > 5.0**: Triggers high-priority escalation via PagerDuty/Slack integrations.
+*   **Layered Defense Funnel:** The Metrics surface now tracks the governed prompt path across both enforcement layers:
+    *   **Pre-Inference Block Rate:** Fraction of prompts blocked before the Safeguard LLM is invoked.
+    *   **Model Intervention Rate:** Fraction of prompts that reached the Safeguard LLM and were then blocked or queued there.
+    *   **Post-Model Escape Rate:** Fraction of likely malicious prompts that bypass both the pre-inference layer and the Safeguard LLM layer and still land clean or informational.
+    *   **Ground-Truth Assist:** When available, bulk-ingest `expectedVerdict` labels are used to strengthen post-model escape calculations instead of relying only on final severity heuristics.
 *   **Implementation Details**: For detailed dashboard telemetry and SOPs, refer to the [Analyst & Administrator Operations Guide](./ANALYST_GUIDE.md).

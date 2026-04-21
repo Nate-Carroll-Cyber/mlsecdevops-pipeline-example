@@ -59,7 +59,12 @@ import {
   type SamSpadeReviewArtifact,
   type SamSpadeSession,
 } from './lib/backendApi';
-import { clearPlaygroundMetrics } from './lib/playgroundMetrics';
+import {
+  clearPlaygroundMetrics,
+  loadPlaygroundMetrics,
+  savePlaygroundMetrics,
+  type PlaygroundMetricEntry,
+} from './lib/playgroundMetrics';
 // Import default security policies
 import { POLICIES, extractMcpA2AHardBlockPhrases, type Policy } from './lib/policies';
 import { ATLAS_TACTIC_VALUES, ATLAS_TECHNIQUE_ID_VALUES, LOCAL_ARCHETYPES, type AtlasTaxonomyFields } from './lib/atlasTaxonomy';
@@ -101,6 +106,7 @@ import {
 import { 
   ShieldAlert, 
   ShieldCheck, 
+  Settings2,
   History, 
   FileText, 
   MessageSquare, 
@@ -161,13 +167,23 @@ interface AuditLog extends AtlasTaxonomyFields {
   resultantSeverity?: 'Clean' | 'Informational' | 'Suspicious' | 'Adversarial';
   detectionLevel?: DetectionLevel;
   response?: string;
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  contextWindowLimit?: number;
+  contextWindowUtilization?: number;
   promoted?: boolean;
   source?: 'analyst_chat' | 'bulk_ingest' | 'playground' | 'ctf_chat';
   batchId?: string;
   expectedVerdict?: string;
 }
 
+type ResponderTelemetryConfig = {
+  maxContextWindow: string;
+};
+
 const PII_OR_SECRET_REDACTIONS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'AWS_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'SECRET_KEY'];
+const ADVERSARIAL_ENTROPY_THRESHOLD = 4.8;
 
 interface WakeLockSentinelLike {
   release(): Promise<void>;
@@ -191,7 +207,11 @@ type SystemConfig = {
 type GovernanceConfig = {
   isHitlActive: boolean;
   isGlobalPause: boolean;
+  entropyThreshold: number;
+  syntacticThreshold: number;
 };
+
+type ResponderDecision = 'allow' | 'policy_violation' | 'block' | 'queue_for_review' | 'refusal';
 
 type PolicyRecord = Policy & {
   id?: string;
@@ -220,6 +240,8 @@ const LegacySystemConfigSchema = z.object({
 const GovernanceConfigSchema = z.object({
   isHitlActive: z.boolean().default(false),
   isGlobalPause: z.boolean().default(false),
+  entropyThreshold: z.number().min(3).max(4.6).default(4.0),
+  syntacticThreshold: z.number().min(40).max(90).default(65),
 });
 
 const AuditLogSchema = z.object({
@@ -246,6 +268,11 @@ const AuditLogSchema = z.object({
   resultantSeverity: z.enum(['Clean', 'Informational', 'Suspicious', 'Adversarial']).optional(),
   detectionLevel: z.nativeEnum(DetectionLevel).optional(),
   response: z.string().optional(),
+  promptTokens: z.number().optional(),
+  completionTokens: z.number().optional(),
+  totalTokens: z.number().optional(),
+  contextWindowLimit: z.number().optional(),
+  contextWindowUtilization: z.number().optional(),
   promoted: z.boolean().optional(),
   source: z.enum(['analyst_chat', 'bulk_ingest', 'playground', 'ctf_chat']).optional(),
   batchId: z.string().optional(),
@@ -442,16 +469,78 @@ For the Bedrock firewall stage, prefer structured output with:
 - \`decodeTelemetry\`: \`plain_text\` | \`single_hop_decode\` | \`recursive_decode\`
 
 The firewall stage must not produce an end-user answer. It only emits an enforcement decision and forwarding-safe content.`;
+const DEFAULT_FORBIDDEN_TOPICS = `Financial Advice
+Political Persuasion
+Religious Guidance
+Medical Advice
+Legal Advice
+Mental Health Crisis Counseling
+Self-Harm Assistance
+Violence and Weapon Construction
+Malware or Exploit Development
+Credential Theft
+Secrets Exfiltration
+Fraud and Social Engineering
+Privacy Invasion
+Doxxing
+Illicit Drug Production
+Extremist or Hate Content
+Sexual Content Involving Minors`;
 const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
   firewallPrompt: DEFAULT_FIREWALL_PROMPT,
   responderPrompt: DEFAULT_RESPONDER_PROMPT,
   guardrailsPolicy: DEFAULT_GUARDRAILS_POLICY,
   blockedKeywords: `ignore all previous instructions\nsystem prompt\nignore instructions\ndisregard previous\ndeveloper mode\nprompt injection`,
-  forbiddenTopics: `Finances\nPolitics\nReligion\nMedical Advice`,
+  forbiddenTopics: DEFAULT_FORBIDDEN_TOPICS,
   regexRules: `/(Ignore|Disregard|Skip|Forget|Neglect|Overlook|Omit|Bypass|Pay no attention to|Do not follow|Do not obey)\\s*(prior|previous|preceding|above|foregoing|earlier|initial)?\\s*(content|text|instructions|instruction|directives|directive|commands|command|context|conversation|input|inputs|data|message|messages|communication|response|responses|request|requests)\\s*(and start over|and start anew|and begin afresh|and start from scratch)?/`
 };
 const BULK_PROMPT_START_MARKER = '===PROMPT===';
 const BULK_PROMPT_END_MARKER = '===END===';
+const RESPONDER_TELEMETRY_STORAGE_KEY = 'counter_spy_responder_telemetry_v1';
+const LOCAL_SYSTEM_CONFIG_STORAGE_KEY = 'counter_spy_local_system_config_v1';
+const DEFAULT_RESPONDER_TELEMETRY_CONFIG: ResponderTelemetryConfig = {
+  maxContextWindow: '',
+};
+
+function isResponderBlockMessage(message: string): boolean {
+  return /^BLOCK(?:\b|[-_:])/i.test(message.trim());
+}
+
+function classifyResponderDecision(message: string): ResponderDecision {
+  const normalized = message.trim().toLowerCase();
+  if (!normalized) return 'allow';
+  if (normalized.startsWith('policy violation detected:')) return 'policy_violation';
+  if (/^fail_secure(?:\b|[-_:])/.test(normalized)) return 'block';
+  if (/^block(?:\b|[-_:])/.test(normalized)) return 'block';
+  if (/^queue_for_review(?:\b|[-_:])/.test(normalized)) return 'queue_for_review';
+  if (
+    normalized.startsWith('request refused') ||
+    normalized.startsWith('standard refusal') ||
+    normalized.includes("i can’t assist") ||
+    normalized.includes("i can't assist") ||
+    normalized.includes("i can’t help") ||
+    normalized.includes("i can't help")
+  ) {
+    return 'refusal';
+  }
+  return 'allow';
+}
+
+function hasPolicyViolationFlags(flags: string[] = []): boolean {
+  return flags.includes('POLICY_VIOLATION') ||
+    flags.includes('BLOCKED_KEYWORD') ||
+    flags.includes('FORBIDDEN_TOPIC') ||
+    flags.includes('REGEX_MATCH');
+}
+
+function getAuditSeverityLabel(log: AuditLog): 'Review' | 'Adversarial' | 'Policy Violation' | 'Suspicious' | 'Informational' | 'Clean' {
+  if (log.status === 'PENDING_REVIEW') return 'Review';
+  if (log.detectionLevel === DetectionLevel.ADVERSARIAL || (log.detectionLevel === undefined && log.escalationRecommended)) return 'Adversarial';
+  if (hasPolicyViolationFlags(log.detectionFlags)) return 'Policy Violation';
+  if (log.detectionLevel === DetectionLevel.SUSPICIOUS) return 'Suspicious';
+  if (log.detectionLevel === DetectionLevel.INFORMATIONAL) return 'Informational';
+  return 'Clean';
+}
 
 function canonicalizeSystemConfig(config: SystemConfig): string {
   return JSON.stringify({
@@ -503,6 +592,78 @@ function parseBulkPrompts(text: string): string[] {
     .filter(Boolean);
 }
 
+function buildPolicyOverrides(config: SystemConfig, policies: Policy[]) {
+  return {
+    blockedKeywords: getEffectiveBlockedKeywords(config.blockedKeywords, policies),
+    forbiddenTopics: (config.forbiddenTopics || '').split('\n').map((topic) => topic.trim()).filter(Boolean),
+    regexRules: (config.regexRules || '').split('\n').map((rule) => rule.trim()).filter(Boolean),
+  };
+}
+
+async function buildPlaygroundMetricEntry(
+  prompt: string,
+  sanitization: SanitizationResult,
+  source: 'bulk_ingest' | 'playground',
+  batchId?: string,
+  expectedVerdict?: string,
+): Promise<PlaygroundMetricEntry> {
+  const promptHash = await sha256Hex(prompt);
+  return {
+    id: crypto.randomUUID(),
+    timestamp: new Date().toISOString(),
+    promptHash,
+    promptLength: prompt.length,
+    lineCount: prompt.split(/\r?\n/).length,
+    wordCount: prompt.trim() ? prompt.trim().split(/\s+/).length : 0,
+    syntacticScore: sanitization.syntacticScore,
+    entropy: sanitization.entropy,
+    globalEntropy: sanitization.globalEntropy,
+    detectionLevel: sanitization.detectionLevel,
+    verdictLabel: DetectionLevel[sanitization.detectionLevel] ?? 'CLEAN',
+    decodeTelemetry: sanitization.decodeTelemetry,
+    redactionCount: sanitization.redactions.length,
+    redactionLabels: sanitization.redactions,
+    suspiciousChunkLengths: sanitization.suspiciousChunks.map((chunk) => chunk.length),
+    suspiciousChunkHashes: await Promise.all(sanitization.suspiciousChunks.map((chunk) => sha256Hex(chunk))),
+    suspiciousChunkCount: sanitization.suspiciousChunks.length,
+    isPotentiallyAdversarial: sanitization.isPotentiallyAdversarial,
+    taxonomyNotes: [`source=${source}`, batchId ? `batch=${batchId}` : null, expectedVerdict ? `expected=${expectedVerdict}` : null]
+      .filter(Boolean)
+      .join(' | '),
+  };
+}
+
+function loadResponderTelemetryConfig(): ResponderTelemetryConfig {
+  if (typeof window === 'undefined') return DEFAULT_RESPONDER_TELEMETRY_CONFIG;
+  try {
+    const raw = window.localStorage.getItem(RESPONDER_TELEMETRY_STORAGE_KEY);
+    if (!raw) return DEFAULT_RESPONDER_TELEMETRY_CONFIG;
+    const parsed = JSON.parse(raw) as Partial<ResponderTelemetryConfig>;
+    return {
+      maxContextWindow: typeof parsed.maxContextWindow === 'string' ? parsed.maxContextWindow : DEFAULT_RESPONDER_TELEMETRY_CONFIG.maxContextWindow,
+    };
+  } catch {
+    return DEFAULT_RESPONDER_TELEMETRY_CONFIG;
+  }
+}
+
+function loadLocalSystemConfig(): SystemConfig {
+  if (typeof window === 'undefined') return DEFAULT_SYSTEM_CONFIG;
+  try {
+    const raw = window.localStorage.getItem(LOCAL_SYSTEM_CONFIG_STORAGE_KEY);
+    if (!raw) return DEFAULT_SYSTEM_CONFIG;
+    const parsed = parseSystemConfig(JSON.parse(raw));
+    return parsed ?? DEFAULT_SYSTEM_CONFIG;
+  } catch {
+    return DEFAULT_SYSTEM_CONFIG;
+  }
+}
+
+function persistLocalSystemConfig(config: SystemConfig) {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(LOCAL_SYSTEM_CONFIG_STORAGE_KEY, JSON.stringify(config));
+}
+
 // Firestore documents are treated as untrusted runtime data, so these helpers
 // parse them into the app's known shapes before they enter React state.
 function parseUserProfile(data: unknown): UserProfile | null {
@@ -539,6 +700,10 @@ function parsePolicyRecord(data: unknown): PolicyRecord | null {
   return parsed.success ? parsed.data : null;
 }
 
+function applyAuditLogPatch(logs: AuditLog[], logId: string, patch: Partial<AuditLog>): AuditLog[] {
+  return logs.map((log) => (log.id === logId ? { ...log, ...patch } : log));
+}
+
 function getEffectiveBlockedKeywords(systemBlockedKeywords: string, policies: Policy[]): string[] {
   const configuredKeywords = systemBlockedKeywords
     .split('\n')
@@ -573,6 +738,8 @@ export default function App() {
   const [samSpadeStatus, setSamSpadeStatus] = useState<'idle' | 'connecting' | 'ready' | 'sending' | 'error'>('idle');
   const [samSpadeInputAlert, setSamSpadeInputAlert] = useState(false);
   const [samSpadeUnapprovedNotice, setSamSpadeUnapprovedNotice] = useState<{ prompt: string; message: string } | null>(null);
+  const [responderTelemetryConfig, setResponderTelemetryConfig] = useState<ResponderTelemetryConfig>(() => loadResponderTelemetryConfig());
+  const [isEditingRuntimeApiConfig, setIsEditingRuntimeApiConfig] = useState(false);
   // State to store the list of audit logs
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([]);
   const [ephemeralAuditLogs, setEphemeralAuditLogs] = useState<AuditLog[]>([]);
@@ -608,10 +775,13 @@ export default function App() {
   // State to store governance configuration (HITL, Global Pause)
   const [governanceConfig, setGovernanceConfig] = useState<GovernanceConfig>({
     isHitlActive: false,
-    isGlobalPause: false
+    isGlobalPause: false,
+    entropyThreshold: 4.0,
+    syntacticThreshold: 65,
   });
   // State to toggle individual guardrail features
   const [activeGuardrails, setActiveGuardrails] = useState({
+    safeguardLlm: true,
     piiRedaction: true,
     entropyFilter: true,
     obfuscationDetection: true,
@@ -646,18 +816,39 @@ export default function App() {
   const [bulkExpectedVerdict, setBulkExpectedVerdict] = useState<'Adversarial' | 'Suspicious' | 'Informational' | 'Clean' | ''>('');
   // Ref to allow interrupting the bulk ingest process
   const processingRef = useRef(false);
+  const bulkDelayTimeoutRef = useRef<number | null>(null);
+  const isProcessingRef = useRef(false);
 
   // Ref for the chat scroll area to auto-scroll to the bottom
   const scrollRef = useRef<HTMLDivElement>(null);
   const samSpadeSessionPromiseRef = useRef<Promise<SamSpadeSession> | null>(null);
+  const samSpadeTranscriptEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(RESPONDER_TELEMETRY_STORAGE_KEY, JSON.stringify(responderTelemetryConfig));
+  }, [responderTelemetryConfig]);
 
   // State to manage the confirmation step for clearing audit logs
   const [isConfirmingClear, setIsConfirmingClear] = useState(false);
   const [playgroundResetToken, setPlaygroundResetToken] = useState(0);
   const isLocalReviewHost = typeof window !== 'undefined' && ['localhost', '127.0.0.1'].includes(window.location.hostname);
   const backendApiBaseUrl = getBackendApiBaseUrl();
+  const parsedContextWindowLimit = Number.parseInt(responderTelemetryConfig.maxContextWindow, 10);
   const configDrifted = recommendedConfigHash !== '' && currentConfigHash !== '' && recommendedConfigHash !== currentConfigHash;
   const samSpadeCaseSolved = samSpadeSession?.status === 'SOLVED';
+  const visibleSamSpadeMessages = (samSpadeSession?.messages ?? []).filter((message) => message.reviewDisposition === 'clean');
+  const canViewKnowledgeBase = profile?.role === 'admin';
+
+  useEffect(() => {
+    isProcessingRef.current = isProcessing;
+  }, [isProcessing]);
+
+  useEffect(() => {
+    if (activeTab === 'policies' && !canViewKnowledgeBase) {
+      setActiveTab('chat');
+    }
+  }, [activeTab, canViewKnowledgeBase]);
 
   // --- Auth & Profile ---
 
@@ -729,23 +920,6 @@ export default function App() {
           handleFirestoreError(error, OperationType.GET, `users/${u.uid}`);
         });
 
-        // Fetch system config from Firestore
-        const configRef = doc(db, 'config', 'system');
-        getDoc(configRef).then(snap => {
-          if (snap.exists()) {
-            const parsedConfig = parseSystemConfig(snap.data());
-            if (parsedConfig) {
-              setSystemConfig(parsedConfig);
-              setConfigForm(parsedConfig);
-            } else {
-              toast.error('System configuration failed validation.');
-            }
-          } else if (u.email === 'nate.carroll@natecarrollfilms.com') {
-            // Auto-initialize config for the primary admin if it doesn't exist
-            setDoc(configRef, DEFAULT_SYSTEM_CONFIG);
-          }
-        }).catch(err => console.error("Failed to load config", err));
-
         // Listen to governance config in real-time
         const govRef = doc(db, 'config', 'governance');
         governanceUnsubscribe = onSnapshot(govRef, (snap) => {
@@ -778,6 +952,33 @@ export default function App() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!profile) return;
+    if (localReviewMode) return;
+    if (profile.role !== 'admin') {
+      setCustomPolicies([]);
+      setSelectedPolicy(null);
+      return;
+    }
+
+    const configRef = doc(db, 'config', 'system');
+    getDoc(configRef).then((snap) => {
+      if (snap.exists()) {
+        const parsedConfig = parseSystemConfig(snap.data());
+        if (parsedConfig) {
+          setSystemConfig(parsedConfig);
+          setConfigForm(parsedConfig);
+        } else {
+          toast.error('System configuration failed validation.');
+        }
+      } else if (profile.email === 'nate.carroll@natecarrollfilms.com') {
+        void setDoc(configRef, DEFAULT_SYSTEM_CONFIG);
+      }
+    }).catch((error) => {
+      console.error('Failed to load config', error);
+    });
+  }, [localReviewMode, profile]);
+
   // Function to handle user login via Google Popup
   const handleLogin = async () => {
     try {
@@ -792,6 +993,7 @@ export default function App() {
 
   // Function to enter local review mode when Firebase/Google auth is unavailable
   const handleLocalReviewMode = () => {
+    const localSystemConfig = loadLocalSystemConfig();
     const localProfile: UserProfile = {
       uid: 'local-review-user',
       email: 'local-review@counter-spy.ai',
@@ -812,17 +1014,40 @@ export default function App() {
     setLocalReviewMode(true);
     setUser(null);
     setProfile(localProfile);
+    setSystemConfig(localSystemConfig);
+    setConfigForm(localSystemConfig);
     setCustomPolicies(defaultPolicies);
     setSelectedPolicy(defaultPolicies[0] || null);
     toast.success('Local review mode enabled');
   };
 
   // Utility function to create a delay (used in bulk ingest)
-  const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
+  const delay = (ms: number) => new Promise(res => {
+    bulkDelayTimeoutRef.current = window.setTimeout(() => {
+      bulkDelayTimeoutRef.current = null;
+      res(undefined);
+    }, ms);
+  });
+
+  const waitForProcessingToSettle = async () => {
+    while (processingRef.current && isProcessingRef.current) {
+      await new Promise((resolve) => window.setTimeout(resolve, 100));
+    }
+  };
+
+  const stopBulkIngest = () => {
+    processingRef.current = false;
+    setIsBulkProcessing(false);
+    if (bulkDelayTimeoutRef.current !== null) {
+      window.clearTimeout(bulkDelayTimeoutRef.current);
+      bulkDelayTimeoutRef.current = null;
+    }
+  };
 
   // Bulk ingest reuses the same send pipeline as live prompts, but paces entries so
   // audit trails, review surfaces, and rate-sensitive upstream services stay readable.
   const runBulkIngest = async (prompts: string[]) => {
+    clearPlaygroundMetrics();
     setIsBulkProcessing(true);
     processingRef.current = true;
     setBulkTotal(prompts.length);
@@ -857,6 +1082,8 @@ export default function App() {
           batchId: bulkBatchId || undefined, 
           expectedVerdict: bulkExpectedVerdict || undefined 
         });
+        await waitForProcessingToSettle();
+        if (!processingRef.current) break;
 
         // Update progress
         setBulkProgress(i + 1);
@@ -864,11 +1091,11 @@ export default function App() {
         // Add a random jitter delay between requests to avoid rate limits
         const jitter = Math.floor(Math.random() * 7000) + 3000;
         await delay(jitter);
+        if (!processingRef.current) break;
 
       } catch (error) {
         console.error(`Error processing prompt ${i}:`, error);
-        setIsBulkProcessing(false);
-        processingRef.current = false;
+        stopBulkIngest();
         break;
       }
     }
@@ -879,8 +1106,7 @@ export default function App() {
     }
 
     // Reset processing state
-    setIsBulkProcessing(false);
-    processingRef.current = false;
+    stopBulkIngest();
   };
 
   // Function to handle user logout
@@ -890,6 +1116,7 @@ export default function App() {
   const handleReviewLog = async (logId: string, resultantSeverity: 'Clean' | 'Informational' | 'Suspicious' | 'Adversarial') => {
     // Ensure only admins can review logs
     if (!profile || profile.role !== 'admin') return;
+    const targetLog = [...auditLogs, ...ephemeralAuditLogs].find((log) => log.id === logId) ?? null;
     if (localReviewMode) {
       setAuditLogs(prev => prev.map(log => log.id === logId ? {
         ...log,
@@ -897,6 +1124,27 @@ export default function App() {
         resultantSeverity,
         status: 'REVIEWED'
       } : log));
+      setEphemeralAuditLogs(prev => prev.map(log => log.id === logId ? {
+        ...log,
+        reviewed: true,
+        resultantSeverity,
+        status: 'REVIEWED'
+      } : log));
+      if (targetLog?.source === 'ctf_chat') {
+        setSamSpadeSession((prev) => {
+          if (!prev || prev.lastReview?.requestId !== logId) return prev;
+          return {
+            ...prev,
+            status: prev.status === 'INTERCEPTED' ? 'ACTIVE' : prev.status,
+            lastReview: {
+              ...prev.lastReview,
+              status: 'REVIEWED',
+              escalationRecommended: resultantSeverity === 'Suspicious' || resultantSeverity === 'Adversarial',
+              detectionLevel: resultantSeverity,
+            },
+          };
+        });
+      }
       toast.success(`Log marked as reviewed (${resultantSeverity})`);
       return;
     }
@@ -907,6 +1155,27 @@ export default function App() {
         resultantSeverity,
         status: 'REVIEWED'
       });
+      setEphemeralAuditLogs(prev => prev.map(log => log.id === logId ? {
+        ...log,
+        reviewed: true,
+        resultantSeverity,
+        status: 'REVIEWED'
+      } : log));
+      if (targetLog?.source === 'ctf_chat') {
+        setSamSpadeSession((prev) => {
+          if (!prev || prev.lastReview?.requestId !== logId) return prev;
+          return {
+            ...prev,
+            status: prev.status === 'INTERCEPTED' ? 'ACTIVE' : prev.status,
+            lastReview: {
+              ...prev.lastReview,
+              status: 'REVIEWED',
+              escalationRecommended: resultantSeverity === 'Suspicious' || resultantSeverity === 'Adversarial',
+              detectionLevel: resultantSeverity,
+            },
+          };
+        });
+      }
       toast.success(`Log marked as reviewed (${resultantSeverity})`);
     } catch (error) {
       // Handle errors updating the log
@@ -1184,8 +1453,18 @@ export default function App() {
 
   const deleteAllAuditLogs = async (): Promise<number> => {
     if (localReviewMode) {
-      const removedCount = auditLogs.length;
-      setAuditLogs([]);
+      const retainedLogs = auditLogs.filter((log) => log.status === 'PENDING_REVIEW');
+      const removedCount = auditLogs.length - retainedLogs.length;
+      setAuditLogs(retainedLogs);
+      setEphemeralAuditLogs((prev) => prev.filter((log) => log.status === 'PENDING_REVIEW'));
+      if (!retainedLogs.some((log) => log.source === 'ctf_chat')) {
+        setSamSpadeSession(null);
+        setSamSpadeInput('');
+        setSamSpadeTheory('');
+        setSamSpadeInputAlert(false);
+        setSamSpadeUnapprovedNotice(null);
+        setSamSpadeStatus('idle');
+      }
       return removedCount;
     }
 
@@ -1196,9 +1475,14 @@ export default function App() {
       return 0;
     }
 
+    const removableDocs = snapshot.docs.filter((docSnap) => docSnap.data().status !== 'PENDING_REVIEW');
+    if (removableDocs.length === 0) {
+      return 0;
+    }
+
     const chunks = [];
-    for (let i = 0; i < snapshot.docs.length; i += 500) {
-      chunks.push(snapshot.docs.slice(i, i + 500));
+    for (let i = 0; i < removableDocs.length; i += 500) {
+      chunks.push(removableDocs.slice(i, i + 500));
     }
 
     for (const chunk of chunks) {
@@ -1209,7 +1493,7 @@ export default function App() {
       await batch.commit();
     }
 
-    return snapshot.docs.length;
+    return removableDocs.length;
   };
 
   // Function to clear all audit logs (Admin only)
@@ -1231,13 +1515,20 @@ export default function App() {
     setIsConfirmingClear(false);
     try {
       const removedCount = await deleteAllAuditLogs();
+      const preservedPendingCount = localReviewMode
+        ? auditLogs.filter((log) => log.status === 'PENDING_REVIEW').length
+        : 0;
 
       if (removedCount === 0) {
-        toast.info('No logs to clear');
+        toast.info('No clearable logs found. Pending-review items were preserved.');
         return;
       }
 
-      toast.success(`Audit logs cleared successfully (${removedCount} entries removed)`);
+      toast.success(
+        preservedPendingCount > 0
+          ? `Audit logs cleared (${removedCount} removed, ${preservedPendingCount} pending-review items preserved)`
+          : `Audit logs cleared successfully (${removedCount} entries removed)`,
+      );
     } catch (error) {
       // Handle errors deleting the logs
       handleFirestoreError(error, OperationType.DELETE, 'audit_logs');
@@ -1255,6 +1546,8 @@ export default function App() {
     try {
       if (localReviewMode) {
         setSystemConfig(configForm);
+        setConfigForm(configForm);
+        persistLocalSystemConfig(configForm);
         setIsEditingConfig(false);
         toast.success('Local system configuration updated successfully');
         return;
@@ -1281,6 +1574,10 @@ export default function App() {
   // Function to save a modified policy
   const handleSavePolicy = async () => {
     if (!selectedPolicy || !selectedPolicy.id) return;
+    if (!profile || profile.role !== 'admin') {
+      toast.error('Unauthorized: Admin role required to save policy changes');
+      return;
+    }
     try {
       // Update the policy document in Firestore
       await updateDoc(doc(db, 'knowledge_base', selectedPolicy.id), {
@@ -1333,16 +1630,7 @@ export default function App() {
         // Escape quotes in the prompt
         const prompt = `"${log.sanitizedPrompt.replace(/"/g, '""')}"`;
         // Determine the string representation of the detection level
-        let detectionLevelStr = 'Clean';
-        if (log.status === 'PENDING_REVIEW') {
-          detectionLevelStr = 'Review';
-        } else if (log.detectionLevel === DetectionLevel.ADVERSARIAL || (log.detectionLevel === undefined && log.escalationRecommended)) {
-          detectionLevelStr = 'Adversarial';
-        } else if (log.detectionLevel === DetectionLevel.SUSPICIOUS) {
-          detectionLevelStr = 'Suspicious';
-        } else if (log.detectionLevel === DetectionLevel.INFORMATIONAL) {
-          detectionLevelStr = 'Informational';
-        }
+        const detectionLevelStr = getAuditSeverityLabel(log);
 
         // Join the fields with commas
         return [
@@ -1438,6 +1726,18 @@ export default function App() {
           // Sort by severity level
           aValue = a.detectionLevel === DetectionLevel.ADVERSARIAL || (a.detectionLevel === undefined && a.escalationRecommended) ? 3 : a.detectionLevel === DetectionLevel.SUSPICIOUS ? 2 : a.detectionLevel === DetectionLevel.INFORMATIONAL ? 1 : 0;
           bValue = b.detectionLevel === DetectionLevel.ADVERSARIAL || (b.detectionLevel === undefined && b.escalationRecommended) ? 3 : b.detectionLevel === DetectionLevel.SUSPICIOUS ? 2 : b.detectionLevel === DetectionLevel.INFORMATIONAL ? 1 : 0;
+        } else if (sortConfig.key === 'source') {
+          const sourceRank = (source?: AuditLog['source']) => {
+            switch (source) {
+              case 'ctf_chat': return '1-ctf_chat';
+              case 'analyst_chat': return '2-analyst_chat';
+              case 'playground': return '3-playground';
+              case 'bulk_ingest': return '4-bulk_ingest';
+              default: return '9-unknown';
+            }
+          };
+          aValue = sourceRank(a.source);
+          bValue = sourceRank(b.source);
         } else if (sortConfig.key === 'entropy') {
           aValue = a.entropy || 0;
           bValue = b.entropy || 0;
@@ -1535,6 +1835,11 @@ export default function App() {
   useEffect(() => {
     if (!profile) return;
     if (localReviewMode) return;
+    if (profile.role !== 'admin') {
+      setCustomPolicies([]);
+      setSelectedPolicy(null);
+      return;
+    }
     const unsubscribe = onSnapshot(collection(db, 'knowledge_base'), async (snapshot) => {
       if (snapshot.empty) {
         // Seed default policies if the collection is empty
@@ -1654,16 +1959,23 @@ export default function App() {
     }
   }, [messages]);
 
+  useEffect(() => {
+    if (activeTab !== 'sam_spade') return;
+    samSpadeTranscriptEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [activeTab, visibleSamSpadeMessages]);
+
   // Function to handle changes in the chat input field
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     const val = e.target.value;
     setInput(val);
     // Generate a real-time sanitization preview if there is input
     if (val.trim()) {
-      const keywords = getEffectiveBlockedKeywords(systemConfig.blockedKeywords, customPolicies.length > 0 ? customPolicies : POLICIES);
-      const topics = (systemConfig.forbiddenTopics || '').split('\n').map(t => t.trim()).filter(t => t);
-      const regexes = (systemConfig.regexRules || '').split('\n').map(r => r.trim()).filter(r => r);
-      setSanitizationPreview(sanitizeInput(val, keywords, topics, regexes, activeGuardrails));
+      const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
+      const { blockedKeywords: keywords, forbiddenTopics: topics, regexRules: regexes } = buildPolicyOverrides(systemConfig, policies);
+      setSanitizationPreview(sanitizeInput(val, keywords, topics, regexes, activeGuardrails, {
+        entropyThreshold: governanceConfig.entropyThreshold,
+        syntacticThreshold: governanceConfig.syntacticThreshold,
+      }));
     } else {
       setSanitizationPreview(null);
     }
@@ -1682,11 +1994,13 @@ export default function App() {
     if (!textToProcess.trim() || isProcessing || !profile) return;
 
     // Parse configuration strings into arrays
-    const keywords = getEffectiveBlockedKeywords(systemConfig.blockedKeywords, customPolicies.length > 0 ? customPolicies : POLICIES);
-    const topics = (systemConfig.forbiddenTopics || '').split('\n').map(t => t.trim()).filter(t => t);
-    const regexes = (systemConfig.regexRules || '').split('\n').map(r => r.trim()).filter(r => r);
+    const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
+    const { blockedKeywords: keywords, forbiddenTopics: topics, regexRules: regexes } = buildPolicyOverrides(systemConfig, policies);
     // Sanitize the input
-    const sanitization = sanitizeInput(textToProcess, keywords, topics, regexes, activeGuardrails);
+    const sanitization = sanitizeInput(textToProcess, keywords, topics, regexes, activeGuardrails, {
+      entropyThreshold: governanceConfig.entropyThreshold,
+      syntacticThreshold: governanceConfig.syntacticThreshold,
+    });
     setIsProcessing(true);
 
     // Active Defense Trigger (Circuit Breaker)
@@ -1762,7 +2076,10 @@ export default function App() {
         // For the Audit Log, we ALWAYS redact PII even if the live guardrail is disabled
         const logSanitization = activeGuardrails.piiRedaction 
           ? sanitization 
-          : sanitizeInput(textToProcess, keywords, topics, regexes, { ...activeGuardrails, piiRedaction: true });
+          : sanitizeInput(textToProcess, keywords, topics, regexes, { ...activeGuardrails, piiRedaction: true }, {
+              entropyThreshold: governanceConfig.entropyThreshold,
+              syntacticThreshold: governanceConfig.syntacticThreshold,
+            });
 
         try {
           if (localReviewMode) {
@@ -1835,7 +2152,14 @@ export default function App() {
           } catch (e) { console.error(e); }
         }
       // Check for Human-in-the-Loop (HITL) trigger conditions
-      } else if (governanceConfig.isHitlActive && (sanitization.detectionLevel >= DetectionLevel.SUSPICIOUS || sanitization.syntacticScore > 50 || sanitization.isPotentiallyAdversarial)) {
+      } else if (
+        governanceConfig.isHitlActive &&
+        (
+          sanitization.detectionLevel >= DetectionLevel.SUSPICIOUS ||
+          sanitization.syntacticScore >= governanceConfig.syntacticThreshold ||
+          sanitization.isPotentiallyAdversarial
+        )
+      ) {
         responseText = "PENDING REVIEW: Your request has been flagged for manual review by a security analyst. Please wait.";
         setLatency(null);
         if (auditLogId) {
@@ -1850,7 +2174,9 @@ export default function App() {
         }
       // Check if the input was flagged as adversarial or suspicious
       } else if (sanitization.isPotentiallyAdversarial) {
-        if (sanitization.detectionLevel === DetectionLevel.ADVERSARIAL) {
+        if (hasPolicyViolationFlags(sanitization.redactions)) {
+          responseText = "POLICY VIOLATION DETECTED: This request matched blocked keywords, forbidden topics, or policy regex rules. Action logged and escalated.";
+        } else if (sanitization.detectionLevel === DetectionLevel.ADVERSARIAL) {
           responseText = "ADVERSARIAL DETECTION TRIGGERED: This request violates security governance policies. High entropy or injection patterns detected. Action logged and escalated.";
         } else {
           responseText = "SUSPICIOUS DETECTION TRIGGERED: This request violates security governance policies. Blocked keywords, topics, or high entropy detected. Action logged and escalated.";
@@ -1862,24 +2188,73 @@ export default function App() {
         const finalSystemPrompt = activeGuardrails.blockedTopics 
           ? `${systemConfig.firewallPrompt}\n\n### FORBIDDEN TOPICS:\nYou must absolutely refuse to discuss the following topics under any circumstances:\n${systemConfig.forbiddenTopics || 'None'}\n\nIMPORTANT: If the user's request relates to any of these forbidden topics, you MUST include the exact tag [VIOLATION] anywhere in your response and provide a standard refusal message.\n\n### FUTURE DOWNSTREAM RESPONDER CONTRACT:\n${systemConfig.responderPrompt}`
           : `${systemConfig.firewallPrompt}\n\n### FUTURE DOWNSTREAM RESPONDER CONTRACT:\n${systemConfig.responderPrompt}`;
-          
         let rawResponse = "";
-        if (backendApiBaseUrl) {
-          const backendResponse = await interceptPrompt({
-            prompt: textToProcess,
-            userId: profile.uid,
-            sessionId,
-            metadata: {
-              localReviewMode,
-              source: 'counter-spy-frontend'
+        try {
+          if (activeGuardrails.safeguardLlm) {
+            const backendResponse = await interceptPrompt({
+              prompt: textToProcess,
+              userId: profile.uid,
+              sessionId,
+              metadata: {
+                localReviewMode,
+                source: 'counter-spy-frontend',
+                finalSystemPrompt,
+              },
+              tuning: {
+                entropyThreshold: governanceConfig.entropyThreshold,
+                syntacticThreshold: governanceConfig.syntacticThreshold,
+                blockedKeywords: keywords,
+                forbiddenTopics: topics,
+                regexRules: regexes,
+              },
+            });
+            rawResponse = backendResponse.status === 'CLEAN'
+              ? backendResponse.responder?.response || 'Backend accepted the prompt but returned no responder text.'
+              : `Backend intercepted the prompt: ${backendResponse.safeguards.analystReasoning}`;
+            const responderUsage = backendResponse.responder?.usage;
+            const contextWindowLimit = Number.isFinite(parsedContextWindowLimit) && parsedContextWindowLimit > 0
+              ? parsedContextWindowLimit
+              : undefined;
+            const contextWindowUtilization = contextWindowLimit && responderUsage?.totalTokens
+              ? parseFloat(((responderUsage.totalTokens / contextWindowLimit) * 100).toFixed(1))
+              : undefined;
+            if (auditLogId && responderUsage) {
+              if (localReviewMode) {
+                setAuditLogs(prev => prev.map(log => log.id === auditLogId ? {
+                  ...log,
+                  promptTokens: responderUsage.promptTokens,
+                  completionTokens: responderUsage.completionTokens,
+                  totalTokens: responderUsage.totalTokens,
+                  contextWindowLimit,
+                  contextWindowUtilization,
+                } : log));
+              } else {
+                await updateDoc(doc(db, 'audit_logs', auditLogId), {
+                  promptTokens: responderUsage.promptTokens ?? null,
+                  completionTokens: responderUsage.completionTokens ?? null,
+                  totalTokens: responderUsage.totalTokens ?? null,
+                  contextWindowLimit: contextWindowLimit ?? null,
+                  contextWindowUtilization: contextWindowUtilization ?? null,
+                });
+                setAuditLogs((prev) => applyAuditLogPatch(prev, auditLogId, {
+                  promptTokens: responderUsage.promptTokens,
+                  completionTokens: responderUsage.completionTokens,
+                  totalTokens: responderUsage.totalTokens,
+                  contextWindowLimit,
+                  contextWindowUtilization,
+                }));
+              }
             }
-          });
-          rawResponse = backendResponse.status === 'CLEAN'
-            ? backendResponse.responder?.response || 'Backend accepted the prompt but returned no responder text.'
-            : `Backend intercepted the prompt: ${backendResponse.safeguards.analystReasoning}`;
-        } else {
+          } else {
+            rawResponse = localReviewMode
+              ? "Safeguard LLM is disabled. This prompt passed local guardrails, but no backend inference was requested."
+              : await generateSecurityAdvice(sanitization.sanitized, messages, "", finalSystemPrompt);
+          }
+        } catch (backendError) {
+          console.warn('Backend intercept unavailable, falling back to local response path.', backendError);
+          const backendMessage = backendError instanceof Error ? backendError.message : 'Backend inference is unavailable for this session.';
           rawResponse = localReviewMode
-            ? "Local review mode response: the prompt passed the active local guardrails. External LLM calls are disabled for this session."
+            ? `Backend inference is unavailable for this session. ${backendMessage}`
             : await generateSecurityAdvice(sanitization.sanitized, messages, "", finalSystemPrompt);
         }
         
@@ -1890,25 +2265,70 @@ export default function App() {
           // Remove the violation tag from the final response
           rawResponse = rawResponse.replace(/\[VIOLATION\]/gi, '').trim();
         }
+        const responderDecision = classifyResponderDecision(rawResponse);
+        const responderEscalated = responderDecision !== 'allow';
 
         // Sanitize the output from the LLM
         const outputSanitization = sanitizeOutput(rawResponse, keywords, topics, activeGuardrails);
         responseText = outputSanitization.sanitized;
         
         // If the output was flagged or the LLM flagged a violation, update the audit log
-        if ((outputSanitization.triggeredEscalation || llmTriggeredEscalation) && auditLogId) {
+        if ((outputSanitization.triggeredEscalation || llmTriggeredEscalation || responderEscalated) && auditLogId) {
+          const escalatedDetectionLevel =
+            responderDecision === 'block' || responderDecision === 'refusal'
+              ? DetectionLevel.ADVERSARIAL
+              : responderDecision === 'policy_violation'
+                ? DetectionLevel.SUSPICIOUS
+                : Math.max(sanitization.detectionLevel, DetectionLevel.SUSPICIOUS);
+          const shouldQueueReview = responderDecision === 'queue_for_review';
           try {
             if (localReviewMode) {
               setAuditLogs(prev => prev.map(log => log.id === auditLogId ? {
                 ...log,
                 escalationRecommended: true,
-                detectionLevel: Math.max(sanitization.detectionLevel, DetectionLevel.SUSPICIOUS)
+                status: shouldQueueReview ? 'PENDING_REVIEW' : log.status,
+                detectionLevel: escalatedDetectionLevel,
+                detectionFlags: responderDecision === 'policy_violation' && !log.detectionFlags.includes('POLICY_VIOLATION')
+                  ? [...log.detectionFlags, 'POLICY_VIOLATION']
+                  : responderDecision === 'block' && !log.detectionFlags.includes('RESPONDER_BLOCK')
+                    ? Array.from(new Set([
+                        ...log.detectionFlags,
+                        'RESPONDER_BLOCK',
+                        ...( /^fail_secure(?:\b|[-_:])/i.test(rawResponse.trim()) ? ['RESPONDER_FAIL_SECURE'] : []),
+                      ]))
+                    : responderDecision === 'queue_for_review' && !log.detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW')
+                      ? [...log.detectionFlags, 'RESPONDER_QUEUE_FOR_REVIEW']
+                      : responderDecision === 'refusal' && !log.detectionFlags.includes('RESPONDER_REFUSAL')
+                        ? [...log.detectionFlags, 'RESPONDER_REFUSAL']
+                        : log.detectionFlags
               } : log));
             } else {
+            const existingLog = auditLogs.find((log) => log.id === auditLogId);
+            const nextDetectionFlags = responderDecision === 'policy_violation'
+              ? Array.from(new Set([...(existingLog?.detectionFlags ?? []), 'POLICY_VIOLATION']))
+              : responderDecision === 'block'
+                ? Array.from(new Set([
+                    ...(existingLog?.detectionFlags ?? []),
+                    'RESPONDER_BLOCK',
+                    ...( /^fail_secure(?:\b|[-_:])/i.test(rawResponse.trim()) ? ['RESPONDER_FAIL_SECURE'] : []),
+                  ]))
+                : responderDecision === 'queue_for_review'
+                  ? Array.from(new Set([...(existingLog?.detectionFlags ?? []), 'RESPONDER_QUEUE_FOR_REVIEW']))
+                  : responderDecision === 'refusal'
+                    ? Array.from(new Set([...(existingLog?.detectionFlags ?? []), 'RESPONDER_REFUSAL']))
+                    : undefined;
             await updateDoc(doc(db, 'audit_logs', auditLogId), { 
               escalationRecommended: true,
-              detectionLevel: Math.max(sanitization.detectionLevel, DetectionLevel.SUSPICIOUS)
+              ...(shouldQueueReview ? { status: 'PENDING_REVIEW' } : {}),
+              detectionLevel: escalatedDetectionLevel,
+              ...(nextDetectionFlags ? { detectionFlags: nextDetectionFlags } : {})
             });
+            setAuditLogs((prev) => applyAuditLogPatch(prev, auditLogId, {
+              escalationRecommended: true,
+              ...(shouldQueueReview ? { status: 'PENDING_REVIEW' } : {}),
+              detectionLevel: escalatedDetectionLevel,
+              ...(nextDetectionFlags ? { detectionFlags: nextDetectionFlags } : {}),
+            }));
             }
             // Update local sanitization state to reflect the escalation so the UI shows it
             setLastExecutedSanitization(prev => prev ? {
@@ -1933,10 +2353,23 @@ export default function App() {
             setAuditLogs(prev => prev.map(log => log.id === auditLogId ? { ...log, response: responseText } : log));
           } else {
           await updateDoc(doc(db, 'audit_logs', auditLogId), { response: responseText });
+          setAuditLogs((prev) => applyAuditLogPatch(prev, auditLogId, { response: responseText }));
           }
         } catch (error) {
           console.error("Failed to update audit log response", error);
         }
+      }
+
+      if (options?.source === 'bulk_ingest') {
+        const metricEntry = await buildPlaygroundMetricEntry(
+          textToProcess,
+          sanitization,
+          'bulk_ingest',
+          options.batchId,
+          options.expectedVerdict,
+        );
+        const nextEntries = [...loadPlaygroundMetrics(), metricEntry];
+        savePlaygroundMetrics(nextEntries);
       }
 
       // Add the model's response to the UI
@@ -1964,6 +2397,8 @@ export default function App() {
 
     try {
       const session = await ensureSamSpadeSession();
+      const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
+      const { blockedKeywords, forbiddenTopics, regexRules } = buildPolicyOverrides(systemConfig, policies);
       optimisticPlayerMessageId = crypto.randomUUID();
       setSamSpadeSession((prev) => {
         const activeSession = prev ?? session;
@@ -1986,6 +2421,13 @@ export default function App() {
       const result = await sendSamSpadeMessage({
         sessionId: session.sessionId,
         prompt: submittedPrompt,
+        tuning: {
+          entropyThreshold: governanceConfig.entropyThreshold,
+          syntacticThreshold: governanceConfig.syntacticThreshold,
+          blockedKeywords,
+          forbiddenTopics,
+          regexRules,
+        },
       });
       setSamSpadeSession(result.session);
       if (result.review.status === 'PENDING_REVIEW' || result.review.escalationRecommended) {
@@ -2038,10 +2480,19 @@ export default function App() {
 
     try {
       const session = await ensureSamSpadeSession();
+      const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
+      const { blockedKeywords, forbiddenTopics, regexRules } = buildPolicyOverrides(systemConfig, policies);
       setSamSpadeStatus('sending');
       const result = await solveSamSpadeCase({
         sessionId: session.sessionId,
         theory: samSpadeTheory,
+        tuning: {
+          entropyThreshold: governanceConfig.entropyThreshold,
+          syntacticThreshold: governanceConfig.syntacticThreshold,
+          blockedKeywords,
+          forbiddenTopics,
+          regexRules,
+        },
       });
       setSamSpadeSession(result.session);
       setSamSpadeTheory('');
@@ -2083,7 +2534,7 @@ export default function App() {
                 className="w-16 h-16 object-contain"
               />
               <CardTitle className="text-xl font-sans font-semibold tracking-tight flex items-baseline gap-0.5">
-                Counter-Spy<span className="text-primary">.ai</span> <span className="text-[10px] opacity-50 ml-2 font-mono">v1.0</span>
+                Counter-Spy<span className="text-primary">.ai</span> <span className="text-[10px] opacity-50 ml-2 font-mono">v2.0</span>
               </CardTitle>
             </div>
             <CardDescription className="text-sm font-semibold text-slate-200">
@@ -2178,14 +2629,16 @@ export default function App() {
             <History className="w-4 h-4 mr-3" />
             Audit Logs
           </Button>
-          <Button 
-            variant={activeTab === 'policies' ? 'secondary' : 'ghost'} 
-            className={`w-full justify-start rounded-lg font-medium text-sm ${activeTab === 'policies' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-            onClick={() => setActiveTab('policies')}
-          >
-            <FileText className="w-4 h-4 mr-3" />
-            Knowledge Base
-          </Button>
+          {canViewKnowledgeBase && (
+            <Button 
+              variant={activeTab === 'policies' ? 'secondary' : 'ghost'} 
+              className={`w-full justify-start rounded-lg font-medium text-sm ${activeTab === 'policies' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
+              onClick={() => setActiveTab('policies')}
+            >
+              <FileText className="w-4 h-4 mr-3" />
+              Knowledge Base
+            </Button>
+          )}
           <Button 
             variant={activeTab === 'playground' ? 'secondary' : 'ghost'} 
             className={`w-full justify-start rounded-lg font-medium text-sm ${activeTab === 'playground' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
@@ -2286,12 +2739,12 @@ export default function App() {
         </header>
 
         {/* Content Body */}
-        <div className="flex-1 min-h-0 overflow-y-auto p-6">
+        <div className={`flex-1 min-h-0 p-6 ${activeTab === 'sam_spade' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
           {/* Sam Spade CTF Tab */}
           {activeTab === 'sam_spade' && (
-            <div className="relative min-h-full overflow-hidden">
+            <div className="relative h-full overflow-hidden">
               <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(20,20,20,0)_0%,rgba(0,0,0,0.8)_100%)]" />
-              <div className="relative flex min-h-full flex-col items-center p-4 md:p-8">
+              <div className="relative flex h-full flex-col items-center p-4 md:p-8">
                 <header className="z-10 mb-8 flex w-full max-w-4xl items-center justify-between">
                   <div className="flex items-center gap-2">
                     {samSpadeCaseSolved ? (
@@ -2372,7 +2825,7 @@ export default function App() {
 
                     <ScrollArea className="flex-1 min-h-0 pr-2">
                       <div className="space-y-6">
-                        {(samSpadeSession?.messages ?? []).map((message) => (
+                        {visibleSamSpadeMessages.map((message) => (
                           <div key={message.id} className={`flex ${message.role === 'player' ? 'justify-end' : 'justify-start'}`}>
                             <div className={`max-w-[85%] rounded-2xl border p-5 ${
                               message.role === 'player'
@@ -2394,7 +2847,7 @@ export default function App() {
                           </div>
                         ))}
 
-                        {(!samSpadeSession || samSpadeSession.messages.length === 0) && (
+                        {visibleSamSpadeMessages.length === 0 && (
                           <div className="flex justify-center py-10 text-center opacity-55">
                             <div className="space-y-3">
                               <p className="font-mono text-xs uppercase tracking-[0.22em] text-slate-500">
@@ -2406,6 +2859,7 @@ export default function App() {
                             </div>
                           </div>
                         )}
+                        <div ref={samSpadeTranscriptEndRef} />
                       </div>
                     </ScrollArea>
 
@@ -2478,6 +2932,41 @@ export default function App() {
                   className="bg-red-600 text-white hover:bg-red-500"
                 >
                   Revise Prompt
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+
+          <Dialog open={isEditingRuntimeApiConfig} onOpenChange={setIsEditingRuntimeApiConfig}>
+            <DialogContent className="sm:max-w-[560px]">
+              <DialogHeader>
+                <DialogTitle>Responder Telemetry Settings</DialogTitle>
+                <DialogDescription>
+                  Admin-only local telemetry settings. Downstream responder endpoint, model, and API credentials are now server-managed and are no longer accepted from the browser.
+                </DialogDescription>
+              </DialogHeader>
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-xs font-medium text-muted-foreground">Max Context Window</label>
+                  <Input
+                    value={responderTelemetryConfig.maxContextWindow}
+                    onChange={(e) => setResponderTelemetryConfig((prev) => ({ ...prev, maxContextWindow: e.target.value }))}
+                    placeholder="128000"
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Add the responder model context window if you want audit-level headroom tracking. The actual provider endpoint and credentials stay on the backend.
+                </p>
+              </div>
+              <DialogFooter>
+                <Button
+                  variant="outline"
+                  onClick={() => setResponderTelemetryConfig(DEFAULT_RESPONDER_TELEMETRY_CONFIG)}
+                >
+                  Reset
+                </Button>
+                <Button onClick={() => setIsEditingRuntimeApiConfig(false)}>
+                  Done
                 </Button>
               </DialogFooter>
             </DialogContent>
@@ -2606,8 +3095,8 @@ export default function App() {
                                     <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
                                       <div 
                                         className={`h-full rounded-full transition-all ${
-                                          displaySanitization!.entropy > 4.8 ? 'bg-destructive' : 
-                                          displaySanitization!.entropy >= 3.8 ? 'bg-orange-500' : 
+                                          displaySanitization!.entropy > ADVERSARIAL_ENTROPY_THRESHOLD ? 'bg-destructive' : 
+                                          displaySanitization!.entropy >= governanceConfig.entropyThreshold ? 'bg-orange-500' : 
                                           'bg-green-500'
                                         }`} 
                                         style={{ width: `${Math.min(displaySanitization!.entropy * 10, 100)}%` }}
@@ -2618,12 +3107,12 @@ export default function App() {
                                   <div className="flex justify-between items-center">
                                     {/* Entropy Risk Level Text */}
                                     <p className="text-[10px] text-muted-foreground">
-                                      {displaySanitization!.entropy > 4.8 ? (
-                                        <span className="text-destructive font-semibold">High-Risk (&gt; 4.8)</span>
-                                      ) : displaySanitization!.entropy >= 3.8 ? (
-                                        <span className="text-orange-500 font-semibold">Suspicious (3.8 - 4.8)</span>
+                                      {displaySanitization!.entropy > ADVERSARIAL_ENTROPY_THRESHOLD ? (
+                                        <span className="text-destructive font-semibold">High-Risk (&gt; {ADVERSARIAL_ENTROPY_THRESHOLD.toFixed(1)})</span>
+                                      ) : displaySanitization!.entropy >= governanceConfig.entropyThreshold ? (
+                                        <span className="text-orange-500 font-semibold">Suspicious ({governanceConfig.entropyThreshold.toFixed(1)} - {ADVERSARIAL_ENTROPY_THRESHOLD.toFixed(1)})</span>
                                       ) : (
-                                        <span className="text-green-500 font-semibold">Normal (&lt; 3.8)</span>
+                                        <span className="text-green-500 font-semibold">Normal (&lt; {governanceConfig.entropyThreshold.toFixed(1)})</span>
                                       )}
                                     </p>
                                     {/* Global Entropy Display */}
@@ -2715,11 +3204,24 @@ export default function App() {
                   {/* System Status Sidebar Card */}
                   <Card className="flex-1 border-border rounded-2xl shadow-sm bg-card overflow-visible flex-shrink-0">
                     <CardHeader className="p-5 border-b border-border bg-muted/30">
-                      <CardTitle className="text-sm font-semibold flex items-center gap-2">
-                        <Activity className="w-4 h-4 text-primary" />
-                        System Status
-                        <HelpTooltip text="Operational status of the local firewall, including current guardrails, latency, and governance state." />
-                      </CardTitle>
+                      <div className="flex items-center justify-between gap-3">
+                        <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                          <Activity className="w-4 h-4 text-primary" />
+                          System Status
+                          <HelpTooltip text="Operational status of the local firewall, including current guardrails, latency, and governance state." />
+                        </CardTitle>
+                        {profile?.role === 'admin' && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-8 w-8 rounded-lg text-muted-foreground hover:text-foreground"
+                            onClick={() => setIsEditingRuntimeApiConfig(true)}
+                            title="Configure responder telemetry"
+                          >
+                            <Settings2 className="h-4 w-4" />
+                          </Button>
+                        )}
+                      </div>
                     </CardHeader>
                     <CardContent className="p-5 space-y-5">
                       {/* Model Info */}
@@ -2728,7 +3230,16 @@ export default function App() {
                           Model
                           <HelpTooltip text="Current inference or stub model identifier shown for the active session." />
                         </span>
-                        <span className="text-xs font-mono font-medium">GEMINI-3-FLASH</span>
+                        <span className="text-xs font-mono font-medium">
+                          {activeGuardrails.safeguardLlm ? 'BACKEND / ENV MANAGED' : 'LOCAL FALLBACK'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+                          Context Window
+                          <HelpTooltip text="Optional model context size used to estimate responder context headroom." />
+                        </span>
+                        <span className="text-xs font-mono font-medium">{responderTelemetryConfig.maxContextWindow || '--'}</span>
                       </div>
                       {/* Latency Info */}
                       <div className="flex justify-between items-center">
@@ -2746,9 +3257,9 @@ export default function App() {
                           Governance
                           <HelpTooltip text="Overall enforcement posture based on which guardrails are currently enabled." />
                         </span>
-                        {(!activeGuardrails.piiRedaction && !activeGuardrails.entropyFilter && !activeGuardrails.obfuscationDetection && !activeGuardrails.sessionAudit && !activeGuardrails.blockedKeywords && !activeGuardrails.blockedTopics && !activeGuardrails.regexRules) ? (
+                        {(!activeGuardrails.safeguardLlm && !activeGuardrails.piiRedaction && !activeGuardrails.entropyFilter && !activeGuardrails.obfuscationDetection && !activeGuardrails.sessionAudit && !activeGuardrails.blockedKeywords && !activeGuardrails.blockedTopics && !activeGuardrails.regexRules) ? (
                           <Badge variant="destructive" className="rounded-md text-[10px] uppercase px-1.5 py-0.5">DISABLED</Badge>
-                        ) : (!activeGuardrails.piiRedaction || !activeGuardrails.obfuscationDetection || !activeGuardrails.sessionAudit || !activeGuardrails.blockedKeywords || !activeGuardrails.blockedTopics) ? (
+                        ) : (!activeGuardrails.safeguardLlm || !activeGuardrails.piiRedaction || !activeGuardrails.obfuscationDetection || !activeGuardrails.sessionAudit || !activeGuardrails.blockedKeywords || !activeGuardrails.blockedTopics) ? (
                           <Badge className="bg-orange-500/20 text-orange-500 hover:bg-orange-500/30 rounded-md text-[10px] uppercase px-1.5 py-0.5 border-none">REDUCED</Badge>
                         ) : (
                           <Badge className="bg-green-500/20 text-green-500 hover:bg-green-500/30 rounded-md text-[10px] uppercase px-1.5 py-0.5 border-none">ACTIVE</Badge>
@@ -2813,23 +3324,6 @@ export default function App() {
                               />
                             )}
                           </li>
-                          {/* Session Audit Logging Toggle */}
-                          <li className="flex items-center justify-between">
-                            <div className="flex items-center gap-2.5">
-                              <ShieldCheck className={`w-3.5 h-3.5 ${activeGuardrails.sessionAudit ? 'text-green-500' : 'text-muted-foreground'}`} /> 
-                              <span className={!activeGuardrails.sessionAudit ? 'text-muted-foreground line-through' : ''}>
-                                Logging
-                              </span>
-                              <HelpTooltip text="Records prompt events and classifications for audit review and incident analysis." />
-                            </div>
-                            {profile?.role === 'admin' && (
-                              <Switch 
-                                checked={activeGuardrails.sessionAudit} 
-                                onCheckedChange={(c) => setActiveGuardrails(prev => ({ ...prev, sessionAudit: c }))}
-                                className="scale-75 data-[state=checked]:bg-green-500"
-                              />
-                            )}
-                          </li>
                           {/* Blocked Keywords Toggle */}
                           <li className="flex items-center justify-between">
                             <div className="flex items-center gap-2.5">
@@ -2881,6 +3375,40 @@ export default function App() {
                               />
                             )}
                           </li>
+                          {/* Safeguard LLM Toggle */}
+                          <li className="flex items-center justify-between">
+                            <div className="flex items-center gap-2.5">
+                              <ShieldCheck className={`w-3.5 h-3.5 ${activeGuardrails.safeguardLlm ? 'text-green-500' : 'text-muted-foreground'}`} />
+                              <span className={!activeGuardrails.safeguardLlm ? 'text-muted-foreground line-through' : ''}>
+                                Safeguard LLM
+                              </span>
+                              <HelpTooltip text="Uses the backend safeguard and responder gateway for clean prompt forwarding instead of the local-only fallback path." />
+                            </div>
+                            {profile?.role === 'admin' && (
+                              <Switch
+                                checked={activeGuardrails.safeguardLlm}
+                                onCheckedChange={(c) => setActiveGuardrails(prev => ({ ...prev, safeguardLlm: c }))}
+                                className="scale-75 data-[state=checked]:bg-green-500"
+                              />
+                            )}
+                          </li>
+                          {/* Session Audit Logging Toggle */}
+                          <li className="flex items-center justify-between">
+                            <div className="flex items-center gap-2.5">
+                              <ShieldCheck className={`w-3.5 h-3.5 ${activeGuardrails.sessionAudit ? 'text-green-500' : 'text-muted-foreground'}`} /> 
+                              <span className={!activeGuardrails.sessionAudit ? 'text-muted-foreground line-through' : ''}>
+                                Logging
+                              </span>
+                              <HelpTooltip text="Records prompt events and classifications for audit review and incident analysis." />
+                            </div>
+                            {profile?.role === 'admin' && (
+                              <Switch 
+                                checked={activeGuardrails.sessionAudit} 
+                                onCheckedChange={(c) => setActiveGuardrails(prev => ({ ...prev, sessionAudit: c }))}
+                                className="scale-75 data-[state=checked]:bg-green-500"
+                              />
+                            )}
+                          </li>
                         </ul>
                       </div>
                     </CardContent>
@@ -2893,7 +3421,12 @@ export default function App() {
           {/* Metrics Tab */}
           {activeTab === 'metrics' && (
             <div className="flex flex-col h-full min-h-0 gap-6 overflow-y-auto pr-2">
-              <ThreatDashboard localReviewMode={localReviewMode} localAuditLogs={auditLogs} />
+              <ThreatDashboard
+                localReviewMode={localReviewMode}
+                localAuditLogs={auditLogs}
+                governanceConfig={governanceConfig}
+                onGovernanceConfigChange={setGovernanceConfig}
+              />
             </div>
           )}
 
@@ -3002,9 +3535,10 @@ export default function App() {
                       </span>
                       <SortIcon columnKey="sessionId" />
                     </button>
-                    <div className="flex items-center text-xs font-semibold text-muted-foreground uppercase tracking-wider pl-4">
+                    <button onClick={() => requestSort('source')} className="flex items-center text-xs font-semibold text-muted-foreground uppercase tracking-wider pl-4 hover:text-foreground transition-colors">
                       <span className="flex items-center gap-1">Source</span>
-                    </div>
+                      <SortIcon columnKey="source" />
+                    </button>
                     <button onClick={() => requestSort('sanitizedPrompt')} className="flex items-center text-xs font-semibold text-muted-foreground uppercase tracking-wider pl-4 hover:text-foreground transition-colors">
                       Prompt <SortIcon columnKey="sanitizedPrompt" />
                     </button>
@@ -3080,18 +3614,21 @@ export default function App() {
                             {log.resultantSeverity}
                           </span>
                         ) : (
+                          (() => {
+                            const severityLabel = getAuditSeverityLabel(log);
+                            return (
                           <span className={`font-semibold ${
-                            log.status === 'PENDING_REVIEW' ? 'text-purple-500' :
-                            (log.detectionLevel === DetectionLevel.ADVERSARIAL || (log.detectionLevel === undefined && log.escalationRecommended)) ? 'text-red-500' :
-                            log.detectionLevel === DetectionLevel.SUSPICIOUS ? 'text-amber-500' :
-                            log.detectionLevel === DetectionLevel.INFORMATIONAL ? 'text-blue-500' :
+                            severityLabel === 'Review' ? 'text-purple-500' :
+                            severityLabel === 'Adversarial' ? 'text-red-500' :
+                            severityLabel === 'Policy Violation' ? 'text-orange-500' :
+                            severityLabel === 'Suspicious' ? 'text-amber-500' :
+                            severityLabel === 'Informational' ? 'text-blue-500' :
                             'text-green-500'
                           }`}>
-                            {log.status === 'PENDING_REVIEW' ? 'REVIEW' :
-                            log.detectionLevel === DetectionLevel.ADVERSARIAL || (log.detectionLevel === undefined && log.escalationRecommended) ? 'Adversarial' :
-                            log.detectionLevel === DetectionLevel.SUSPICIOUS ? 'Suspicious' :
-                            log.detectionLevel === DetectionLevel.INFORMATIONAL ? 'Informational' : 'Clean'}
+                            {severityLabel === 'Review' ? 'REVIEW' : severityLabel}
                           </span>
+                            );
+                          })()
                         )}
                       </span>
                       {/* Entropy Display */}
@@ -3110,19 +3647,18 @@ export default function App() {
                                   log.resultantSeverity === 'Informational' ? 'border-blue-500 text-blue-600 hover:bg-blue-50' :
                                   'border-green-500 text-green-600 hover:bg-green-50'
                                 ) : (
-                                  log.status === 'PENDING_REVIEW' ? 'border-purple-500 text-purple-600 hover:bg-purple-50' :
-                                  log.detectionLevel === DetectionLevel.ADVERSARIAL || (log.detectionLevel === undefined && log.escalationRecommended) ? 'border-transparent bg-destructive text-destructive-foreground hover:bg-red-700' :
-                                  log.detectionLevel === DetectionLevel.SUSPICIOUS ? 'border-amber-500 text-amber-600 hover:bg-amber-50' :
-                                  log.detectionLevel === DetectionLevel.INFORMATIONAL ? 'border-blue-400 text-blue-500 hover:bg-blue-50' :
+                                  getAuditSeverityLabel(log) === 'Review' ? 'border-purple-500 text-purple-600 hover:bg-purple-50' :
+                                  getAuditSeverityLabel(log) === 'Adversarial' ? 'border-transparent bg-destructive text-destructive-foreground hover:bg-red-700' :
+                                  getAuditSeverityLabel(log) === 'Policy Violation' ? 'border-orange-500 text-orange-600 hover:bg-orange-50' :
+                                  getAuditSeverityLabel(log) === 'Suspicious' ? 'border-amber-500 text-amber-600 hover:bg-amber-50' :
+                                  getAuditSeverityLabel(log) === 'Informational' ? 'border-blue-400 text-blue-500 hover:bg-blue-50' :
                                   'border-green-500 text-green-600 hover:bg-green-50'
                                 )
                               }`}
                             >
                               {log.reviewed ? 'Reviewed' :
-                               log.status === 'PENDING_REVIEW' ? 'Review' :
-                               log.detectionLevel === DetectionLevel.ADVERSARIAL || (log.detectionLevel === undefined && log.escalationRecommended) ? 'Review' :
-                               log.detectionLevel === DetectionLevel.SUSPICIOUS ? 'Review' :
-                               log.detectionLevel === DetectionLevel.INFORMATIONAL ? 'Informational' : 'Clean'}
+                               (getAuditSeverityLabel(log) === 'Review' || getAuditSeverityLabel(log) === 'Adversarial' || getAuditSeverityLabel(log) === 'Suspicious' || getAuditSeverityLabel(log) === 'Policy Violation') ? 'Review' :
+                               getAuditSeverityLabel(log) === 'Informational' ? 'Informational' : 'Clean'}
                             </DropdownMenuTrigger>
                             <DropdownMenuContent>
                               <DropdownMenuItem onClick={() => handleReviewLog(log.id, 'Adversarial')}>
@@ -3150,18 +3686,16 @@ export default function App() {
                           </Badge>
                         ) : (
                           <Badge 
-                            variant={log.detectionLevel === DetectionLevel.ADVERSARIAL || (log.detectionLevel === undefined && log.escalationRecommended) ? "destructive" : "outline"} 
+                            variant={getAuditSeverityLabel(log) === 'Adversarial' ? "destructive" : "outline"} 
                             className={`rounded-none text-[8px] uppercase px-1 ${
-                              log.status === 'PENDING_REVIEW' ? 'border-purple-500 text-purple-600' :
-                              log.detectionLevel === DetectionLevel.SUSPICIOUS ? 'border-orange-500 text-orange-600' : 
-                              log.detectionLevel === DetectionLevel.INFORMATIONAL ? 'border-blue-400 text-blue-500' :
-                              log.detectionLevel === DetectionLevel.CLEAN ? 'border-green-500 text-green-600' : ''
+                              getAuditSeverityLabel(log) === 'Review' ? 'border-purple-500 text-purple-600' :
+                              getAuditSeverityLabel(log) === 'Policy Violation' ? 'border-orange-500 text-orange-600' :
+                              getAuditSeverityLabel(log) === 'Suspicious' ? 'border-amber-500 text-amber-600' : 
+                              getAuditSeverityLabel(log) === 'Informational' ? 'border-blue-400 text-blue-500' :
+                              getAuditSeverityLabel(log) === 'Clean' ? 'border-green-500 text-green-600' : ''
                             }`}
                           >
-                            {log.status === 'PENDING_REVIEW' ? 'Review' :
-                             log.detectionLevel === DetectionLevel.ADVERSARIAL || (log.detectionLevel === undefined && log.escalationRecommended) ? 'Adversarial' :
-                             log.detectionLevel === DetectionLevel.SUSPICIOUS ? 'Suspicious' :
-                             log.detectionLevel === DetectionLevel.INFORMATIONAL ? 'Informational' : 'Clean'}
+                            {getAuditSeverityLabel(log)}
                           </Badge>
                         )}
                         {/* Promote to Golden Set Button (Admin Only) */}
@@ -3199,6 +3733,7 @@ export default function App() {
                 key={playgroundResetToken}
                 systemConfig={systemConfig}
                 activeGuardrails={activeGuardrails}
+                governanceConfig={governanceConfig}
                 isSubmitting={isProcessing}
                 onSubmitPrompt={async (prompt) => {
                   await handleSendMessage(undefined, prompt, { source: 'playground' });
@@ -3300,7 +3835,7 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                         variant="destructive" 
                         size="sm" 
                         className="w-full mt-4"
-                        onClick={() => { processingRef.current = false; }}
+                        onClick={stopBulkIngest}
                       >
                         Stop Ingest
                       </Button>
@@ -3667,7 +4202,7 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
           <DialogHeader>
             <DialogTitle>Prompt Details</DialogTitle>
             <DialogDescription>
-              Full text of the logged prompt.
+              Full text of the logged prompt and captured model response.
             </DialogDescription>
           </DialogHeader>
           <div className="py-4">
@@ -3716,11 +4251,50 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                 </div>
               </div>
             )}
-            {/* Scrollable area for potentially long prompts */}
-            <div className="max-h-[60vh] overflow-y-auto w-full rounded-md border p-4 bg-muted/50">
-              <pre className="text-sm whitespace-pre-wrap break-all font-mono text-foreground">
-                {viewingPromptLog?.sanitizedPrompt}
-              </pre>
+            {/* Scrollable area for potentially long prompts and responses */}
+            <div className="max-h-[60vh] overflow-y-auto w-full rounded-md border p-4 bg-muted/50 space-y-4">
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Prompt</p>
+                <pre className="text-sm whitespace-pre-wrap break-all font-mono text-foreground">
+                  {viewingPromptLog?.sanitizedPrompt}
+                </pre>
+              </div>
+              <Separator />
+              <div className="space-y-2">
+                <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">LLM Response</p>
+                <pre className="text-sm whitespace-pre-wrap break-all font-mono text-foreground">
+                  {viewingPromptLog?.response || 'No response recorded on this log entry.'}
+                </pre>
+              </div>
+              {(viewingPromptLog?.response || viewingPromptLog?.totalTokens || viewingPromptLog?.contextWindowLimit) && (
+                <>
+                  <Separator />
+                  <div className="grid grid-cols-2 gap-3 text-xs">
+                    <div className="rounded-md border bg-background/60 p-3">
+                      <div className="font-semibold uppercase tracking-wide text-muted-foreground">Prompt Tokens</div>
+                      <div className="mt-1 font-mono text-foreground">{viewingPromptLog?.promptTokens ?? '--'}</div>
+                    </div>
+                    <div className="rounded-md border bg-background/60 p-3">
+                      <div className="font-semibold uppercase tracking-wide text-muted-foreground">Completion Tokens</div>
+                      <div className="mt-1 font-mono text-foreground">{viewingPromptLog?.completionTokens ?? '--'}</div>
+                    </div>
+                    <div className="rounded-md border bg-background/60 p-3">
+                      <div className="font-semibold uppercase tracking-wide text-muted-foreground">Total Tokens</div>
+                      <div className="mt-1 font-mono text-foreground">{viewingPromptLog?.totalTokens ?? '--'}</div>
+                    </div>
+                    <div className="rounded-md border bg-background/60 p-3">
+                      <div className="font-semibold uppercase tracking-wide text-muted-foreground">Context Utilization</div>
+                      <div className="mt-1 font-mono text-foreground">
+                        {viewingPromptLog?.contextWindowUtilization !== undefined
+                          ? `${viewingPromptLog.contextWindowUtilization}% of ${viewingPromptLog.contextWindowLimit ?? '?'}`
+                          : viewingPromptLog?.contextWindowLimit
+                            ? `Usage unavailable / ${viewingPromptLog.contextWindowLimit}`
+                            : 'Usage unavailable'}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           </div>
           <DialogFooter>

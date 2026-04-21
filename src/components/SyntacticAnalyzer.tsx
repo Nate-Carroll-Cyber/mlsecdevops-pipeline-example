@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
   loadPlaygroundMetrics,
+  PLAYGROUND_METRICS_UPDATED_EVENT,
   savePlaygroundMetrics,
   summarizePlaygroundMetrics,
   type PlaygroundMetricEntry,
@@ -44,13 +45,12 @@ import {
   type SpellCheckBackend,
 } from '../lib/spellNormalize';
 import {
-  ALL_LANGUAGE_KEYS,
-  HIGH_PRIORITY_LANGUAGES,
-  TRANSLATION_PROVIDERS,
-  TRANSLATION_PROVIDER_LABELS,
-  getDefaultTranslationBaseUrl,
+  FOREIGN_LANGUAGE_KEYS,
+  TRANSLATION_PROVIDER,
+  TRANSLATION_PROVIDER_LABEL,
+  TRANSLATION_TARGET_LANGUAGE_NAME,
   getLanguageName,
-  type TranslationProvider,
+  type TranslationMode,
   type TranslationResult,
 } from '../lib/translate';
 import {
@@ -70,6 +70,10 @@ interface SyntacticAnalyzerProps {
   };
   // Optional active guardrails configuration
   activeGuardrails?: any;
+  governanceConfig?: {
+    entropyThreshold: number;
+    syntacticThreshold: number;
+  };
   // Optional callback to route the current prompt through the live firewall pipeline
   onSubmitPrompt?: (prompt: string) => Promise<void>;
   // Optional flag showing the shared send pipeline is already busy
@@ -83,12 +87,8 @@ interface LanguagePipelineResult {
   translated?: TranslationResult;
 }
 
-const KNOWN_TRANSLATION_BASE_URLS: string[] = TRANSLATION_PROVIDERS.map((provider) =>
-  getDefaultTranslationBaseUrl(provider),
-);
-
 // Export the SyntacticAnalyzer functional component
-export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitPrompt, isSubmitting = false }: SyntacticAnalyzerProps) {
+export function SyntacticAnalyzer({ systemConfig, activeGuardrails, governanceConfig, onSubmitPrompt, isSubmitting = false }: SyntacticAnalyzerProps) {
   // State to hold the current text input by the user
   const [promptText, setPromptText] = useState('');
   const [researchEntries, setResearchEntries] = useState<PlaygroundMetricEntry[]>([]);
@@ -109,12 +109,8 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
   const [normalizationBackend, setNormalizationBackend] = useState<SpellCheckBackend>('heuristic');
   const [languageToolUrl, setLanguageToolUrl] = useState('http://localhost:8010');
   const [translationEnabled, setTranslationEnabled] = useState(true);
-  const [translationProvider, setTranslationProvider] = useState<TranslationProvider>('deepl');
-  const [translationBaseUrl, setTranslationBaseUrl] = useState(getDefaultTranslationBaseUrl('deepl'));
-  const [translationApiKey, setTranslationApiKey] = useState('');
-  const [translationSourceLang, setTranslationSourceLang] = useState('en');
-  const [translationTargetLang, setTranslationTargetLang] = useState(HIGH_PRIORITY_LANGUAGES[0] ?? 'zh');
-  const [showTranslationAdvanced, setShowTranslationAdvanced] = useState(false);
+  const [translationMode, setTranslationMode] = useState<TranslationMode>('recover_to_english');
+  const [translationTargetLang, setTranslationTargetLang] = useState('es');
   const [backendHealth, setBackendHealth] = useState<BackendHealthResponse | null>(null);
   const [backendHealthError, setBackendHealthError] = useState<string | null>(null);
   const [isCheckingBackendHealth, setIsCheckingBackendHealth] = useState(false);
@@ -125,20 +121,11 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
 
   // Boot and keep the browser-local research log in sync with the current tab state.
   useEffect(() => {
-    setResearchEntries(loadPlaygroundMetrics());
+    const syncResearchEntries = () => setResearchEntries(loadPlaygroundMetrics());
+    syncResearchEntries();
+    window.addEventListener(PLAYGROUND_METRICS_UPDATED_EVENT, syncResearchEntries);
+    return () => window.removeEventListener(PLAYGROUND_METRICS_UPDATED_EVENT, syncResearchEntries);
   }, []);
-
-  // Health checks let the Playground talk plainly about whether backend-mediated
-  // translation is actually available before an analyst hits the pipeline button.
-  useEffect(() => {
-    const defaultBaseUrl = getDefaultTranslationBaseUrl(translationProvider);
-    if (
-      !translationBaseUrl ||
-      KNOWN_TRANSLATION_BASE_URLS.includes(translationBaseUrl)
-    ) {
-      setTranslationBaseUrl(defaultBaseUrl);
-    }
-  }, [translationProvider]);
 
   useEffect(() => {
     let cancelled = false;
@@ -173,7 +160,7 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
   // useMemo ensures we only recalculate the analysis when the text or config actually changes
   const analysis = useMemo(() => {
     // Run the standalone syntactic complexity analysis
-    const syntactic = analyzeSyntacticComplexity(promptText);
+    const syntactic = analyzeSyntacticComplexity(promptText, governanceConfig?.syntacticThreshold ?? 65);
     
     // Initialize fullSanitization as null
     let fullSanitization = null;
@@ -190,7 +177,10 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
       const regexes = systemConfig.regexRules.split('\n').filter(r => r.trim());
       
       // Execute the full sanitization pipeline
-      fullSanitization = sanitizeInput(promptText, keywords, topics, regexes, activeGuardrails);
+      fullSanitization = sanitizeInput(promptText, keywords, topics, regexes, activeGuardrails, {
+        entropyThreshold: governanceConfig?.entropyThreshold ?? 4.0,
+        syntacticThreshold: governanceConfig?.syntacticThreshold ?? 65,
+      });
     }
     
     // Return both the syntactic analysis and the full sanitization result
@@ -262,8 +252,9 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
   const availableObfuscationTechniques = getObfuscationTechniques(obfuscationCategory);
   const canRunSanitization = Boolean(systemConfig && activeGuardrails);
   const backendApiBaseUrl = getBackendApiBaseUrl();
-  const translationProviderLabel = TRANSLATION_PROVIDER_LABELS[translationProvider];
-  const translationApiConfigured = Boolean(translationApiKey.trim());
+  const translationModeLabel = translationMode === 'recover_to_english'
+    ? 'Recover to English'
+    : 'Generate Foreign Variant';
   const backendStatusLabel = isCheckingBackendHealth
     ? 'Checking backend'
     : backendHealth?.ok
@@ -277,11 +268,8 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
 
   const resetTranslationSettings = () => {
     setTranslationEnabled(true);
-    setTranslationProvider('deepl');
-    setTranslationBaseUrl(getDefaultTranslationBaseUrl('deepl'));
-    setTranslationSourceLang('en');
-    setTranslationTargetLang(HIGH_PRIORITY_LANGUAGES[0] ?? 'zh');
-    setShowTranslationAdvanced(false);
+    setTranslationMode('recover_to_english');
+    setTranslationTargetLang('es');
     setLanguagePipelineError(null);
   };
 
@@ -304,11 +292,6 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
       setLanguagePipelineError('Counter-Spy.ai backend is unavailable. Keep the local backend running before using translation.');
       return;
     }
-    if (translationEnabled && !translationApiConfigured) {
-      setLanguagePipelineError(`${translationProviderLabel} API key is required for provider-backed translation.`);
-      return;
-    }
-
     setLanguagePipelineError(null);
     setIsRunningLanguagePipeline(true);
 
@@ -327,15 +310,14 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
       }
 
       if (translationEnabled) {
-        translated = await translatePromptViaBackend({
+        const translationResult = await translatePromptViaBackend({
           text: currentText,
-          provider: translationProvider,
-          baseUrl: translationBaseUrl,
-          apiKey: translationApiKey.trim() || undefined,
-          sourceLang: translationSourceLang,
-          targetLang: translationTargetLang,
+          provider: TRANSLATION_PROVIDER,
+          mode: translationMode,
+          ...(translationMode === 'generate_foreign_variant' ? { targetLang: translationTargetLang } : {}),
         });
-        currentText = translated.text;
+        translated = translationResult;
+        currentText = translationResult.text;
       }
 
       const nextResult: LanguagePipelineResult = {
@@ -409,8 +391,11 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
     ];
     const topics = systemConfig.forbiddenTopics.split('\n').filter((topic) => topic.trim());
     const regexes = systemConfig.regexRules.split('\n').filter((rule) => rule.trim());
-    const syntactic = analyzeSyntacticComplexity(rawPrompt);
-    const fullSanitization = sanitizeInput(rawPrompt, keywords, topics, regexes, activeGuardrails);
+    const syntactic = analyzeSyntacticComplexity(rawPrompt, governanceConfig?.syntacticThreshold ?? 65);
+    const fullSanitization = sanitizeInput(rawPrompt, keywords, topics, regexes, activeGuardrails, {
+      entropyThreshold: governanceConfig?.entropyThreshold ?? 4.0,
+      syntacticThreshold: governanceConfig?.syntacticThreshold ?? 65,
+    });
     const promptHash = await hashText(rawPrompt);
     const suspiciousChunkHashes = await Promise.all(
       fullSanitization.suspiciousChunks.map((chunk) => hashText(chunk)),
@@ -936,7 +921,7 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
             Normalize - Translate Pipeline
           </h3>
           <p className="text-xs text-slate-400 mt-1">
-            Recover likely spelling intent before translating into another language. Use this before adding evasions, not after encoding.
+            Recover likely spelling intent, then translate natural-language prompts into English through the backend. Use this before adding evasions, not after encoding.
           </p>
         </div>
 
@@ -998,67 +983,66 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
                 />
                 Translation
               </label>
-              <HelpTooltip text="Translate natural-language prompts before adding evasions. Do not translate already encoded text." />
+              <HelpTooltip text="This stage is manual only. Use Lara on demand to either recover English analyst text or generate one foreign-language variant without spending translation calls on every prompt change." />
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="outline" className="border-slate-700 text-slate-200">
-                Recommended Provider: {translationProviderLabel}
+                Provider: {TRANSLATION_PROVIDER_LABEL}
               </Badge>
               <Badge variant="outline" className={backendStatusTone}>
                 {backendStatusLabel}
               </Badge>
-              <Badge variant="outline" className={translationApiConfigured ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200' : 'border-amber-500/40 bg-amber-950/30 text-amber-200'}>
-                {translationApiConfigured ? 'API key loaded' : 'API key needed'}
+              <Badge variant="outline" className="border-slate-700 text-slate-200">
+                Mode: {translationModeLabel}
+              </Badge>
+              <Badge variant="outline" className="border-slate-700 text-slate-200">
+                Manual only
               </Badge>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <div className="space-y-2">
                 <label className="flex items-center gap-2 text-xs font-medium text-slate-400">
-                  <span>Target Language</span>
-                  <HelpTooltip text="Foreign language used for the translated prompt before the obfuscation stage." />
+                  <span>Translation Mode</span>
+                  <HelpTooltip text="Recover to English is the default analyst path. Generate Foreign Variant translates English prompts into one analyst-selected language for later obfuscation and firewall testing." />
                 </label>
                 <select
                   className="flex h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-                  value={translationTargetLang}
-                  onChange={(e) => setTranslationTargetLang(e.target.value)}
+                  value={translationMode}
+                  onChange={(e) => setTranslationMode(e.target.value as TranslationMode)}
                   disabled={!translationEnabled}
                 >
-                  {ALL_LANGUAGE_KEYS.map((languageKey) => (
-                    <option key={languageKey} value={languageKey}>
-                      {getLanguageName(languageKey)}
-                    </option>
-                  ))}
+                  <option value="recover_to_english">Recover to English</option>
+                  <option value="generate_foreign_variant">Generate Foreign Variant</option>
                 </select>
               </div>
 
               <div className="space-y-2">
                 <label className="flex items-center gap-2 text-xs font-medium text-slate-400">
-                  <span>API Key</span>
-                  <HelpTooltip text="Hosted translation providers usually require a key. The browser sends it to the local Counter-Spy.ai backend, not directly to the provider." />
+                  <span>Target Language</span>
+                  <HelpTooltip text="Only used for Generate Foreign Variant. Recover to English always uses English as the fixed destination." />
                 </label>
-                <input
-                  type="password"
+                <select
                   className="flex h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-                  value={translationApiKey}
-                  onChange={(e) => setTranslationApiKey(e.target.value)}
-                  disabled={!translationEnabled}
-                  placeholder={`Paste ${translationProviderLabel} API key`}
-                />
+                  value={translationMode === 'recover_to_english' ? 'en' : translationTargetLang}
+                  onChange={(e) => setTranslationTargetLang(e.target.value)}
+                  disabled={!translationEnabled || translationMode === 'recover_to_english'}
+                >
+                  {translationMode === 'recover_to_english' ? (
+                    <option value="en">{TRANSLATION_TARGET_LANGUAGE_NAME}</option>
+                  ) : (
+                    FOREIGN_LANGUAGE_KEYS.map((languageKey) => (
+                      <option key={languageKey} value={languageKey}>
+                        {getLanguageName(languageKey)}
+                      </option>
+                    ))
+                  )}
+                </select>
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-3">
-              <Button
-                type="button"
-                variant="outline"
-                className="border-slate-700 bg-slate-950 text-slate-100 hover:bg-slate-800"
-                onClick={() => setShowTranslationAdvanced((prev) => !prev)}
-                disabled={!translationEnabled}
-              >
-                {showTranslationAdvanced ? 'Hide Advanced' : 'Show Advanced'}
-              </Button>
               <Button
                 type="button"
                 variant="outline"
@@ -1069,74 +1053,15 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
               </Button>
             </div>
 
-            {showTranslationAdvanced && (
-              <div className="rounded-lg border border-slate-800 bg-slate-950/40 p-4 space-y-3">
-                <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Advanced Translation Settings
-                </div>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-xs font-medium text-slate-400">
-                      <span>Provider</span>
-                      <HelpTooltip text="Translation service used by the backend language stage. DeepL is the recommended local testing path." />
-                    </label>
-                    <select
-                      className="flex h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-                      value={translationProvider}
-                      onChange={(e) => setTranslationProvider(e.target.value as TranslationProvider)}
-                      disabled={!translationEnabled}
-                    >
-                      {TRANSLATION_PROVIDERS.map((provider) => (
-                        <option key={provider} value={provider}>
-                          {TRANSLATION_PROVIDER_LABELS[provider]}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div className="space-y-2">
-                    <label className="flex items-center gap-2 text-xs font-medium text-slate-400">
-                      <span>Source Language</span>
-                      <HelpTooltip text="Language code for the current prompt. Leave this as en for the default English workflow." />
-                    </label>
-                    <input
-                      type="text"
-                      className="flex h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-                      value={translationSourceLang}
-                      onChange={(e) => setTranslationSourceLang(e.target.value)}
-                      disabled={!translationEnabled}
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <label className="flex items-center gap-2 text-xs font-medium text-slate-400">
-                    <span>Provider Base URL</span>
-                    <HelpTooltip text="Provider endpoint used by the backend translation route. Leave this at the default unless you intentionally need a different host." />
-                  </label>
-                  <input
-                    type="text"
-                    className="flex h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
-                    value={translationBaseUrl}
-                    onChange={(e) => setTranslationBaseUrl(e.target.value)}
-                    disabled={!translationEnabled}
-                  />
-                </div>
-              </div>
-            )}
-
             <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-3 py-3 text-xs text-slate-300 space-y-1">
               <div>
                 Backend route: <span className="font-mono text-slate-100">{backendApiBaseUrl || 'same-origin dev proxy'}</span>
-              </div>
-              <div>
-                Provider endpoint: <span className="font-mono text-slate-100">{translationBaseUrl}</span>
               </div>
               {backendHealthError ? (
                 <div className="text-rose-300">{backendHealthError}</div>
               ) : (
                 <div className="text-slate-400">
-                  Keep the Counter-Spy.ai backend running for provider-backed translation. The Playground now uses the backend, not direct browser-to-provider calls.
+                  Keep the Counter-Spy.ai backend running with Lara credentials configured. This stage only runs when you click the pipeline button, so translation usage stays explicit and predictable.
                 </div>
               )}
             </div>
@@ -1155,7 +1080,7 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
               <Languages className="w-4 h-4 mr-2" />
               {isRunningLanguagePipeline ? 'Running Pipeline...' : 'Run Normalize -> Translate'}
             </Button>
-            <HelpTooltip text="Run the selected spelling-verification and translation stages, then stage the result for obfuscation testing or firewall submission." />
+            <HelpTooltip text="Run spelling verification first, then optionally call Lara in the selected translation mode. Nothing in this stage runs automatically during normal prompt editing." />
           </div>
 
           {languagePipelineResult && (
@@ -1407,7 +1332,7 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, onSubmitProm
           <span className={`text-6xl font-black ${getScoreColor(analysis.syntactic.score)}`}>
             {analysis.syntactic.score}
           </span>
-          <span className="text-slate-500 text-xs mt-2">Threshold: 65</span>
+          <span className="text-slate-500 text-xs mt-2">Threshold: {governanceConfig?.syntacticThreshold ?? 65}</span>
         </div>
 
         {/* Metrics Breakdown Section */}

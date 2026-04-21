@@ -57,7 +57,7 @@ A secondary sanitization layer is applied to all LLM responses:
 The system evaluates the sanitization results against active guardrails and provides real-time administrative controls:
 - **Adversarial Interception**: If high entropy (>5.5) or high syntactic complexity (>90) is detected, the request is blocked pre-inference as Adversarial.
 - **Suspicious Interception**: If blocked keywords, forbidden topics, symbol/encoding obfuscation, suspicious external-call attempts, or suspicious entropy plus concealment-like structure are detected, the request is blocked pre-inference as Suspicious.
-- **Human-in-the-Loop (HITL) Mode**: When activated, automatically intercepts borderline traffic (e.g., Entropy > 4.0 or Syntactic Complexity > 50) and routes it to a manual review queue (`PENDING_REVIEW`), allowing human analysts to intervene before the payload reaches the inference engine.
+- **Human-in-the-Loop (HITL) Mode**: When activated, automatically intercepts borderline traffic using the live governance thresholds (default entropy threshold `4.0` plus the active syntactic threshold) and routes it to a manual review queue (`PENDING_REVIEW`), allowing human analysts to intervene before the payload reaches the inference engine.
 - **Forbidden Topics Enforcement**: A semantic governance layer that instructs the model to refuse and flag (via `[VIOLATION]` tags) any discussion of forbidden topics (e.g., Finances, Politics).
 
 ### 4. Operator Controls
@@ -71,11 +71,11 @@ The system evaluates the sanitization results against active guardrails and prov
 ### 5. Inference Engine (Pluggable LLM Architecture)
 - **Backend-Only Inference Path**: Direct browser-side model access is disabled so provider credentials are not exposed in the client bundle.
 - **Authenticated Gateway Pattern**: Clean prompts are intended to flow through an authenticated backend gateway (`/v1/intercept`) before any external inference provider is called.
-- **Vendor-Neutral Posture**: The control-plane is designed to stay decoupled from any single provider so the downstream inference engine can evolve from the current Gemini-aligned development path toward future multi-model support.
+- **Vendor-Neutral Posture**: The control-plane is designed to stay decoupled from any single provider so the downstream inference engine can evolve across backend-managed OpenAI-compatible and future multi-model runtimes without exposing provider secrets to the browser.
 - **Split Prompt Roles**: System configuration now separates a **Firewall Prompt** from a **Downstream Responder Prompt** so enforcement logic and forwarded generation instructions stay distinct.
 - **Future Structured Output Contract**: The firewall prompt is being shaped around structured decisions such as `ALLOW_AND_FORWARD`, `BLOCK`, `QUEUE_FOR_REVIEW`, and `FAIL_SECURE` for the future Bedrock gateway path.
 - **Config Drift Fingerprint**: The System Configuration view exposes a SHA-256 hash for the recommended baseline and the active live config, making prompt drift easier to detect during review and incident response.
-- **Fail-Closed Fallback**: If no backend API is configured, the UI remains reviewable but live model inference is intentionally unavailable.
+- **Fail-Closed Fallback**: If the backend or downstream responder is unavailable, the UI remains reviewable but clean prompts do not silently bypass the control plane. Runtime responder failures are surfaced so operators can distinguish provider issues from local review behavior.
 
 ## 📦 Security Mitigations & Dependency Management
 
@@ -90,29 +90,33 @@ To ensure the integrity of the security operations platform, Counter-Spy.ai impl
 
 - **Advanced Audit Trail**: Every interaction is logged with its entropy score, detection flags, and a unique Session ID. The audit table features **multi-column sorting**, optimized column spacing, and **Full Prompt Inspection**—allowing analysts to click any truncated prompt to view the complete text in a scrollable, text-only pop-up dialog. Admins can also use **Purge Session** to **remove all data** before a fresh test run.
 - **Research-Ready Exports**: Audit log CSV exports now reserve fields for **MITRE ATLAS organizer labeling**, optional local archetypes, and analyst confidence/notes so longitudinal adversarial prompt analysis can evolve without another schema reset.
-- **Anomaly Detection & Metrics Dashboard**: A dedicated dashboard for real-time threat velocity analysis. It compares current hourly threat rates against a 24-hour baseline to identify significant spikes in adversarial activity. Utilizes real-time Z-Score calculations ($Z = \frac{x - \mu}{\sigma}$) to distinguish between random noise and coordinated automated attacks. Features a critical alert banner for immediate incident response and a time-series chart for trend analysis.
+- **Anomaly Detection & Metrics Dashboard**: A dedicated dashboard for real-time threat velocity analysis. It compares current hourly threat rates against a 24-hour baseline to identify significant spikes in adversarial activity. Utilizes real-time Z-Score calculations ($Z = \frac{x - \mu}{\sigma}$) to distinguish between random noise and coordinated automated attacks. Features a critical alert banner for immediate incident response, a time-series chart for trend analysis, and a layered **Defense Funnel** summary that reports pre-inference block rate, Safeguard LLM intervention rate, and post-model escape rate.
 - **MITRE ATLAS Technique Heat Map**: The Metrics view uses the active 16-node MITRE ATLAS organizer taxonomy as its top-level structure so labeled prompt activity can be reviewed in the same corpus-driven layout used by the research dataset.
 - **Analyst Review Workflow**: Administrators can review **all** interactions (including those marked as Clean) to catch false negatives. The workflow supports **Multi-Tier Review**, allowing analysts to re-edit and update the **Resultant Severity** at any time as new threat intelligence becomes available.
   - **False Negative Highlighting**: Logs pre-labeled as "Adversarial" (via the Bulk Ingestor) that are classified as "Clean" by the system are automatically highlighted with a red border and an **FN (False Negative)** badge, allowing for rapid identification of firewall bypasses.
   - *The platform automatically calculates both the False Positive Rate and the analyst-upgrade False Negative Rate, ensuring the firewall's regex and entropy thresholds can be tuned against both overblocking and under-severity classification.*
 - **Automated Golden Set Refinement**: Administrators can "Promote" specific audit logs to a **Golden Set** for future DPO (Direct Preference Optimization) fine-tuning. This captures the prompt, the AI's response, and a user-provided "Rejected" reason in a structured JSON format. Supports **one-click JSON export** of the entire set for training pipelines.
 - **Dynamic Guardrails**: Administrators can toggle security features (PII Redaction, Entropy Filtering, Obfuscation Detection, Blocked Keywords, Blocked Topics, Logging, etc.) on the fly.
-- **Knowledge Base**: Integrated security policies, MITRE ATLAS mapping, Markdown-rendered System Configuration, and full lifecycle management (upload/delete) of custom `.md` documents. Includes a dedicated **Fine-Tuning Training Data** section for managing the Golden Set.
+- **Knowledge Base**: Integrated security policies, MITRE ATLAS mapping, Markdown-rendered System Configuration, and full lifecycle management (upload/delete) of custom `.md` documents. This internal guardrail workspace is now restricted to admin roles. Includes a dedicated **Fine-Tuning Training Data** section for managing the Golden Set.
 - **MCP / A2A Safety Detection**: The built-in MCP / A2A Agent Safety Policy contributes hard-block indicator phrases to the effective blocked-keyword set used by the live sanitization path and the Analyst Playground, helping detect instruction-override, approval-bypass, and exfiltration patterns common to tool-using agents.
 - **MCP / A2A Guardrail Reference**: The recommended Guardrails Policy now explicitly tells the firewall baseline to review the MCP / A2A Agent Safety Policy when evaluating tool-use, routing, approval-bypass, or exfiltration patterns.
 - **Analyst Mode**: A toggleable administrative view for managing system configurations and reviewing logs.
-- **Analyst Playground**: A dedicated sandbox environment featuring the Syntactic Complexity Analyzer, allowing security teams to test and tune firewall thresholds against complex prompt injection attempts in real-time. Single-prompt Playground submissions can also be routed through the same live firewall path used by Analyst Chat, with audit provenance preserved as `playground`. It now includes a manual **Normalize - Translate** pipeline so analysts can verify likely spelling intent, translate into another language, and then hand off the result into the obfuscation workflow.
-- **Backend-Mediated Translation**: The Playground translation stage now routes through the Counter-Spy.ai backend instead of calling translation providers directly from the browser, which keeps the control-plane shape aligned with the future frontend API boundary and simplifies translation testing around API-backed providers such as DeepL. The UI now defaults to a recommended DeepL-style path, surfaces backend readiness directly in the Playground, and hides provider/base-url tuning behind an advanced section.
+- **Analyst Playground**: A dedicated sandbox environment featuring the Syntactic Complexity Analyzer, allowing security teams to test and tune firewall thresholds against complex prompt injection attempts in real-time. Single-prompt Playground submissions can also be routed through the same live firewall path used by Analyst Chat, with audit provenance preserved as `playground`. It now includes a manual **Normalize - Translate** pipeline so analysts can verify likely spelling intent, either recover foreign-language prompts back into English or generate one foreign-language variant from English, and then hand the result into the obfuscation workflow.
+- **Backend-Mediated Lara Translation**: The Playground translation stage now routes through the Counter-Spy.ai backend instead of calling translation providers directly from the browser. It is still intentionally manual and text-only: Lara Translate runs only when an analyst explicitly triggers the pipeline, supporting both auto-detect source -> English recovery and English -> analyst-selected foreign-language variant generation while keeping credentials server-side.
 - **Sam Spade CTF Intake**: The Sam Spade home tab now includes a live question field backed by a dedicated backend session/message/solve API under a `ctf_chat` source. This keeps the noir CTF surface aligned with the same governed sanitization, review, and audit path as the rest of Counter-Spy.ai without treating Analyst Chat as the transport layer.
-- **Dedicated Sam Spade API Path**: The Sam Spade surface now uses its own backend session/message/solve API (`/v1/ctf/sam-spade/...`) with separate frontend session state and local backend persistence. All Sam Spade turns are logged into the audit trail, while only suspicious or pending-review traffic is mirrored into Analyst Chat as downstream review content.
+- **Dedicated Sam Spade API Path**: The Sam Spade surface now uses its own backend session/message/solve API (`/v1/ctf/sam-spade/...`) with separate frontend session state and local backend persistence. All Sam Spade turns are logged into the audit trail, while only suspicious or pending-review traffic is mirrored into Analyst Chat as downstream review content. Clean Sam Spade turns currently use deterministic noir reply logic after guardrail approval; they are not yet routed through the live downstream responder.
 - **CTF Audit Filter**: Audit Logs now include a quick `CTF Chat` source filter so Sam Spade traffic can be isolated immediately without losing the broader audit trail view.
 - **CTF Metrics Filter**: The Metrics view now includes a dedicated `CTF Chat` source filter so Sam Spade traffic can be isolated in charts and operational summaries without leaving the main telemetry surface.
+- **Layered Defense Metrics**: The Metrics view now calculates three explicit funnel rates for governed traffic: **Pre-Inference Block Rate** (% blocked before the Safeguard LLM), **Model Intervention Rate** (% caught by the Safeguard LLM after reaching it), and **Post-Model Escape Rate** (% of likely malicious prompts that bypass both layers and still land clean/informational). When present, bulk-ingest `expectedVerdict` labels are used to strengthen escape-rate calculations.
 - **Local Docker Demo Stack**: A minimal `docker-compose.demo.yml` now brings up the backend plus a frontend demo container for an end-to-end local pass, while Sam Spade session state persists in a Docker-backed SQLite volume instead of a raw JSON file.
-- **Obfuscation Lab**: The Prompt Playground includes an analyst-facing obfuscation workbench for generating test variants across encoding, cipher, unicode, structural-injection, and language-framing techniques. Analysts can generate a single variant, fan out an entire category, use **Analyze All Variants** to record a mini evaluation run into the research log, or **Submit All Variants** to create full firewall and audit-log coverage from one source prompt with adjustable replay delay and jitter. The intended augmentation order is now explicit in the UI: normalize, translate, then add evasions.
-- **Playground Research Log**: The Analyst Playground can record explicit metrics snapshots to browser-local storage, capturing prompt hashes, syntactic score, syntactic sub-metrics, entropy, decode telemetry, redaction labels, suspicious-chunk metadata, verdict trends, optional normalization/translation metadata, and optional MITRE ATLAS organizer annotations for later export and longitudinal analysis (for example, 30-day and 180-day trend summaries). The research log now exports in both **JSON** and **CSV** formats. **Purge Session** removes this data too.
+- **Obfuscation Lab**: The Prompt Playground includes an analyst-facing obfuscation workbench for generating test variants across encoding, cipher, unicode, structural-injection, and language-framing techniques. Analysts can generate a single variant, fan out an entire category, use **Analyze All Variants** to record a mini evaluation run into the research log, or **Submit All Variants** to create full firewall and audit-log coverage from one source prompt with adjustable replay delay and jitter. The intended augmentation order is now explicit in the UI: normalize, optionally translate, then add evasions.
+- **Playground Research Log**: The Analyst Playground can record explicit metrics snapshots to browser-local storage, capturing prompt hashes, syntactic score, syntactic sub-metrics, entropy, decode telemetry, redaction labels, suspicious-chunk metadata, verdict trends, optional normalization/translation metadata, and optional MITRE ATLAS organizer annotations for later export and longitudinal analysis (for example, 30-day and 180-day trend summaries). The research log now exports in both **JSON** and **CSV** formats. **Purge Session** removes this data too, and a new bulk ingest run clears the prior local research batch before recording the new upload so the sample count reflects the current ingest session.
 - **Cheap Upstream Triage**: The sanitization layer now treats obvious encodings and evasions as first-pass security signals, applies lightweight spelling recovery when it helps expose blocked policy language, performs heuristic foreign-language recovery for policy analysis, and elevates non-ASCII/symbol-heavy concealment patterns before traffic earns upstream tokens. Foreign-language and spelling-recovery hits are visible in Metrics and Audit Log detail views, while strong content hits still drive the final severity.
 - **Sensitive Data Alerting**: PII, credit-card, secret, and redacted-secret disclosures now surface as their own analyst-facing alert category instead of reading like generic suspicious chatter, which makes data-exposure review easier to distinguish from jailbreak-style prompting.
+- **Policy Violation Labeling**: Blocked keywords, forbidden topics, and regex-rule matches now emit a shared `POLICY_VIOLATION` signal so operator-facing responses, Audit Logs, and CSV exports distinguish explicit policy hits from generic suspicious traffic.
 - **Obfuscation Metrics Visibility**: The Metrics tab breaks out obfuscation-oriented detections such as URL encoding, HTML entities, leetspeak, ROT13, reverse text, NATO phonetic, Morse code, recursive decode chains, and structural wrappers, and now includes a stacked 24-hour obfuscation trend so key techniques can be compared in one view. Audit records also persist a compact `obfuscationSummary` field (`hasObfuscation`, `techniques`, `decodeTelemetry`) to simplify reporting without re-deriving everything from raw flag arrays. Audit Logs now support both saved family presets and specific-technique filtering, and prompt details surface the recorded obfuscation signal badges and stored decode telemetry for each entry.
+- **Responder Telemetry Settings**: Admin view now exposes a small responder telemetry dialog under Analyst Chat system status. Browser-side responder endpoint, model, and API key overrides have been removed; only an optional **Max Context Window** value is stored locally so the audit trail can estimate responder context utilization when the provider returns token usage.
+- **Responder Outcome Classification**: Non-standard downstream responses such as `BLOCK`, `FAIL_SECURE`, `QUEUE_FOR_REVIEW`, and explicit policy-violation strings are normalized back into Counter-Spy.ai severity labels so Audit Logs and Metrics reflect the final safeguarded outcome instead of assuming clean traffic.
 - **Modular Sanitization Pipeline**: The TypeScript sanitization layer is now split into focused normalization, language-recovery, and obfuscation helper modules so the hot path stays easier to profile, test, and extend as the frontend firewall and future API boundary continue to grow.
 - **Bulk Ingest Simulator**: A high-velocity ingestion utility for processing `.txt` files of prompts (one per line). Features **Base Delay + Random Jitter** (3-10s) to simulate realistic traffic patterns while respecting API rate limits. Integrated with the **Screen Wake Lock API** to maintain session persistence during long-running batch operations.
   - **Multi-line Prompt Blocks**: In addition to one-line prompts, the simulator accepts `===PROMPT===` / `===END===` blocks so long or multi-line test payloads can be uploaded without manual escaping or JSON formatting.
@@ -136,6 +140,11 @@ Every interaction is captured in Firestore with the following schema:
 | `status` | `string` | The current status of the log (e.g., `PENDING_REVIEW`, `REVIEWED`). |
 | `resultantSeverity` | `string` | Final severity assigned by an analyst (Clean to Adversarial). |
 | `response` | `string` | The AI's generated response to the prompt. |
+| `promptTokens` | `number` | Optional provider-reported prompt token count for safeguarded downstream responses. |
+| `completionTokens` | `number` | Optional provider-reported completion token count. |
+| `totalTokens` | `number` | Optional total token count returned by the responder provider. |
+| `contextWindowLimit` | `number` | Optional admin-configured context window used for headroom estimation. |
+| `contextWindowUtilization` | `number` | Optional estimated percentage of context consumed by the responder call. |
 | `promoted` | `boolean` | Whether the log has been added to the Golden Set. |
 | `source` | `string` | Provenance of the record, such as `analyst_chat` or `bulk_ingest`. |
 | `batchId` | `string` | Unique identifier for a specific bulk ingest run. |
@@ -177,21 +186,41 @@ VITE_API_BASE_URL=http://127.0.0.1:18080
 
 For local review without Google authentication, use **Continue in Local Review Mode** on `localhost`. Direct browser-side inference is disabled so provider secrets do not ship in the client bundle. To route clean prompts through the local backend stub, start `APP_PORT=18080 npm run backend:dev` and run the frontend with `VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev`.
 
-For local translation testing, use an API-backed provider such as DeepL through the local Counter-Spy.ai backend:
+For the Docker demo stack on `http://localhost:3000`, the frontend uses same-origin proxying to reach the backend. Analyst Chat clean traffic still uses `/v1/intercept` even when `VITE_API_BASE_URL` is unset, and the admin-only gear under **System Status** now only controls optional responder telemetry such as max context window.
+
+For stable local demo secrets, the Docker stack now reads provider credentials from a gitignored file at `.env.demo.local`. This keeps backend-only credentials stable across `docker compose up --build`, container recreates, and laptop restarts without committing secrets to the repo.
+
+For local translation testing, use Lara Translate through the local Counter-Spy.ai backend:
 
 ```bash
 APP_PORT=18080 npm run backend:dev
 VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev
 ```
 
-Then open the Playground and use **Use Recommended Settings** in the Normalize - Translate panel. The default path is:
+Then set the backend env vars:
 
-- Provider: `deepl`
-- Target language: high-priority foreign-language set
-- Provider Base URL: `https://api-free.deepl.com`
-- API Key: your DeepL API key
+- `LARA_ACCESS_KEY_ID`
+- `LARA_ACCESS_KEY_SECRET`
+- optional `LARA_API_BASE_URL` if you are not using the default Lara host
 
-Leave the advanced translation settings collapsed unless you intentionally need to override the provider, source language, or endpoint.
+Then open the Playground and use **Use Recommended Settings** in the Normalize - Translate panel. The current translation path is hardcoded to:
+
+- Provider: `lara`
+- Mode 1: auto-detect source -> `English`
+- Mode 2: `English` -> analyst-selected foreign target language
+- Credentials: backend-only
+
+Translation still runs only when you explicitly click **Run Normalize -> Translate** in the Playground. It is not executed on every prompt edit or submission.
+
+For the Docker demo stack, place Lara credentials in `.env.demo.local`:
+
+```env
+LARA_ACCESS_KEY_ID=your_lara_access_key_id
+LARA_ACCESS_KEY_SECRET=your_lara_access_key_secret
+LARA_API_BASE_URL=https://api.laratranslate.com
+```
+
+That file is ignored by git and is the preferred stable local-demo path for Lara configuration.
 
 ### Customization
 The branding shield is bundled at `public/brand/counter-spy-shield.png`, with the original source image preserved at `public/brand/counter-spy-shield-original.png`. To change the app chrome logo, replace the display PNG or update the `APP_LOGO_URL` constant in `src/App.tsx`.

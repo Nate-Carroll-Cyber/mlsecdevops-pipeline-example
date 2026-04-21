@@ -76,12 +76,26 @@ test('detects symbol-substitution obfuscation as suspicious traffic', () => {
   assert(result.entropy >= 3.8);
 });
 
+test('does not over-score structured template wrappers as high entropy', () => {
+  const result = sanitizePrompt('[INSTRUCTION: SUMMARIZE_LEGAL_DOC]\nProvide a plain-language summary of the "Fair Use" doctrine in United States copyright law.');
+
+  assert(result.entropy < 3.8);
+  assert.equal(result.verdict, 'CLEAN');
+});
+
 test('detects binary symbol concealment as suspicious traffic', () => {
   const result = sanitizePrompt('Two symbols hide the message: ○●○●● ○○●●○');
 
   assert.notEqual(result.verdict, 'CLEAN');
   assert(result.detectionFlags.includes('SYMBOL_SUBSTITUTION'));
   assert(result.entropy >= 3.8);
+});
+
+test('detects coordinate-cipher prompts as suspicious traffic', () => {
+  const result = sanitizePrompt('Decode: (4,2)(1,5)(4,5)(1,5)(1,1)(3,1)', { entropyThreshold: 4.0 });
+
+  assert.equal(result.verdict, 'SUSPICIOUS');
+  assert(result.detectionFlags.includes('COORDINATE_CIPHER'));
 });
 
 test('detects structural obfuscation markers', () => {

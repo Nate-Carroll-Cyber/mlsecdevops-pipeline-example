@@ -3,9 +3,21 @@
 ```
 counter-spy.ai/
 │
-├── 📚 docs/                              # Platform Documentation
+├── 📚 Technical/                         # Engineering & implementation documentation
+│   ├── ADVERSARIAL_PROMPT_ANALYSIS.md    # Research and evaluation plan
+│   ├── ARCHITECTURE.md                   # Technical specs (Shield-and-Sword pattern & heuristics)
+│   ├── LOCAL_DEVELOPMENT.md              # Local dev and Docker workflow
+│   ├── MITRE_ATLAS_MAPPING.md            # Threat taxonomy mapping
+│   ├── SAM_SPADE_API_CONTRACT.md         # Sam Spade backend contract
+│   ├── SAM_SPADE_CTF_INTEGRATION.md      # Sam Spade integration design
+│   ├── SBOM.md                           # Technical software bill of materials
+│   └── Technical_Specification.md        # Deep technical reference
+│
+├── 🏛️ Regulatory/                       # Compliance, assurance, and trust materials
 │   ├── ANALYST_GUIDE.md                  # SOPs for SOC personnel (HITL/HOTL workflows)
-│   └── ARCHITECTURE.md                   # Technical specs (Shield-and-Sword pattern & heuristics)
+│   ├── EU_AI_Act_Mapping.md              # EU AI Act compliance mapping
+│   ├── Model_Card.md                     # Model reference and risk notes
+│   └── Threat_Model.md                   # Threat model narrative
 │
 ├── 💻 src/                               # Application Source Code
 │   │
@@ -55,7 +67,6 @@ counter-spy.ai/
 ├── metadata.json                         # App metadata & frame permissions
 ├── package.json                          # Dependency manifest (pinned versions)
 ├── README.md                             # Project overview & documentation hub
-├── SBOM.md                               # Software Bill of Materials & CVE mitigations
 ├── tsconfig.json                         # TypeScript compiler configuration
 └── vite.config.ts                        # Vite build & dev server configuration
 ```
@@ -70,4 +81,4 @@ counter-spy.ai/
 | ⚔️ **The Sword** | `src/lib/gemini.ts` | Primary inference engine — receives only the cleansed, governed payload from the Shield. |
 | 📡 **The Radar** | `src/lib/anomalyDetector.ts` | Statistical anomaly engine — calculates real-time Z-Scores to detect coordinated automated attacks. |
 | 🔒 **The Vault** | `firestore.rules` | Database-layer enforcement — ensures data integrity and PII privacy even if the client layer is compromised. |
-| 📚 **The Manual** | `docs/` | Operational documentation — provides context for both technical implementers and SOC analysts. |
+| 📚 **The Manual** | `Technical/` + `Regulatory/` | Operational and assurance documentation — provides context for implementers, analysts, and compliance review. |

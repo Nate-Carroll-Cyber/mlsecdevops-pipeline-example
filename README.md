@@ -7,13 +7,13 @@ Counter-Spy.ai decouples adversarial defense from response generation by enforci
 > Govern Every Prompt. Question Every Answer.
 
 ## 📚 Documentation
-- [Technical Architecture & Specifications](./docs/ARCHITECTURE.md) - Deep dive into the Shield-and-Sword pattern and heuristics.
-- [Analyst & Administrator Operations Guide](./docs/ANALYST_GUIDE.md) - Standard Operating Procedures for SOC personnel.
-- [Adversarial Prompt Analysis Plan](./docs/ADVERSARIAL_PROMPT_ANALYSIS.md) - Research plan for taxonomy, trend analysis, detection effectiveness, and failure-case reporting.
-- [MITRE ATLAS Organizer Mapping](./docs/MITRE_ATLAS_MAPPING.md) - Active 16-node ATLAS organizer taxonomy used for labeling, heat maps, and research exports.
-- [Sam Spade CTF Integration Spec](./docs/SAM_SPADE_CTF_INTEGRATION.md) - Architecture plan for bringing the noir elicitation scenario into Counter-Spy.ai as a governed input source.
-- [Sam Spade API Contract](./docs/SAM_SPADE_API_CONTRACT.md) - Current backend session/message/solve interface for the Sam Spade CTF surface, shaped for a later service/container split.
-- [Local Development](./docs/LOCAL_DEVELOPMENT.md) - Run the frontend, backend stub, tests, and Docker build before AWS access is available.
+- [Technical Architecture & Specifications](./Technical/ARCHITECTURE.md) - Deep dive into the Shield-and-Sword pattern and heuristics.
+- [Analyst & Administrator Operations Guide](./Regulatory/ANALYST_GUIDE.md) - Standard Operating Procedures for SOC personnel.
+- [Adversarial Prompt Analysis Plan](./Technical/ADVERSARIAL_PROMPT_ANALYSIS.md) - Research plan for taxonomy, trend analysis, detection effectiveness, and failure-case reporting.
+- [MITRE ATLAS Organizer Mapping](./Technical/MITRE_ATLAS_MAPPING.md) - Active 16-node ATLAS organizer taxonomy used for labeling, heat maps, and research exports.
+- [Sam Spade CTF Integration Spec](./Technical/SAM_SPADE_CTF_INTEGRATION.md) - Architecture plan for bringing the noir elicitation scenario into Counter-Spy.ai as a governed input source.
+- [Sam Spade API Contract](./Technical/SAM_SPADE_API_CONTRACT.md) - Current backend session/message/solve interface for the Sam Spade CTF surface, shaped for a later service/container split.
+- [Local Development](./Technical/LOCAL_DEVELOPMENT.md) - Run the frontend, backend stub, tests, and Docker build before AWS access is available.
 
 > [!IMPORTANT]
 > **Sanitized Pass-through Guarantee**: Only the redacted version of a prompt is ever sent to the inference engine. Raw PII and secrets are neutralized at the local sanitization layer before any external API call is initiated.

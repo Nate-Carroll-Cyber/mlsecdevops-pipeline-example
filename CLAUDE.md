@@ -47,14 +47,14 @@ The codebase is bifurcated into two distinct security layers:
 
 ## Dependency Constraints
 
-Versions are pinned for security reasons. Do not upgrade the following without reviewing the associated CVEs documented in `SBOM.md`:
+Versions are pinned for security reasons. Do not upgrade the following without reviewing the associated CVEs documented in `Technical/SBOM.md`:
 
 - `react` and `react-dom` — pinned to `~19.0.4` (CVE-2025-55182, CVE-2026-23864)
 - `vite` — pinned to `^8.0.5` (CVE-2026-39363 and related)
 - `@google/genai` — `^1.48.0`
 - `express` — `^5.2.1`
 
-Do not add new dependencies without updating `SBOM.md`.
+Do not add new dependencies without updating `Technical/SBOM.md`.
 
 ---
 
@@ -85,11 +85,11 @@ Do not add new dependencies without updating `SBOM.md`.
 | File | Purpose |
 | :--- | :--- |
 | `README.md` | Project overview, security architecture, tech stack |
-| `SBOM.md` | Dependency versions, CVE mitigations, known risks |
-| `docs/ARCHITECTURE.md` | Shield-and-Sword deep dive, API reference, heuristic math |
-| `docs/ANALYST_GUIDE.md` | SOC operator SOPs, HITL/HOTL workflows, DPO pipeline |
+| `Technical/SBOM.md` | Dependency versions, CVE mitigations, known risks |
+| `Technical/ARCHITECTURE.md` | Shield-and-Sword deep dive, API reference, heuristic math |
+| `Regulatory/ANALYST_GUIDE.md` | SOC operator SOPs, HITL/HOTL workflows, DPO pipeline |
 
-If you modify the security architecture, update `docs/ARCHITECTURE.md`. If you add or update a dependency, update `SBOM.md`.
+If you modify the security architecture, update `Technical/ARCHITECTURE.md`. If you add or update a dependency, update `Technical/SBOM.md`.
 
 ---
 

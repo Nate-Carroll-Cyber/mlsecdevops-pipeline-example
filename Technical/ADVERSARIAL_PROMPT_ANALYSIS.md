@@ -268,8 +268,8 @@ Rules:
 
 Recommended outputs:
 
-- `docs/ADVERSARIAL_PROMPT_ANALYSIS.md` (this plan)
-- `docs/research/analysis-report.md` or similar
+- `Technical/ADVERSARIAL_PROMPT_ANALYSIS.md` (this plan)
+- `Technical/research/analysis-report.md` or similar
 - exported chart images or notebook outputs
 - sanitized CSV/JSON summaries
 

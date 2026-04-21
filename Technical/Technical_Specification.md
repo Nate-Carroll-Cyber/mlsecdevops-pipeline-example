@@ -113,4 +113,4 @@ The platform utilizes a real-time anomaly detection engine to monitor threat vel
 *   **Alerting Thresholds:** 
     *   **Z > 2.0**: Triggers "Anomalous Activity" dashboard alerts.
     *   **Z > 5.0**: Triggers high-priority escalation via PagerDuty/Slack integrations.
-*   **Implementation Details**: For detailed dashboard telemetry and SOPs, refer to the [Analyst & Administrator Operations Guide](https://github.com/natecarroll-hue/CounterAgent/blob/main/OPERATIONS_GUIDE.MD).
+*   **Implementation Details**: For detailed dashboard telemetry and SOPs, refer to the [Analyst & Administrator Operations Guide](../OPERATIONS_GUIDE.MD).

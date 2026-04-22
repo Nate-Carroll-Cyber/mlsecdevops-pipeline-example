@@ -27,7 +27,7 @@ import {
   type DecodeTelemetry,
   type ObfuscationSignal,
 } from './sanitizerObfuscation';
-import { normalizeForPolicy } from './sanitizerNormalization';
+import { normalizeForPolicy, normalizeWithoutLeet } from './sanitizerNormalization';
 
 // Define an array of sensitive patterns (Regex) to detect and redact PII and secrets
 const SENSITIVE_PATTERNS = [
@@ -63,11 +63,18 @@ const SENSITIVE_PATTERNS = [
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
 const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
-const SUSPICIOUS_ENTROPY_THRESHOLD = 4.0;
-const ADVERSARIAL_ENTROPY_THRESHOLD = 4.8;
+export const SUSPICIOUS_ENTROPY_THRESHOLD = 3.2;
 const SCRIPT_TAG_REGEX = /<script\b[^>]*(?:>[\s\S]*?<\/script>|\s*\/?>)/gi;
 const URL_WITH_SCHEME_REGEX = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/gi;
 const JAVASCRIPT_URI_REGEX = /\bjavascript:[^\s<>"']*/gi;
+const ENGLISH_TRIGRAMS = new Set([
+  'the', 'and', 'ing', 'ion', 'tio', 'ent', 'ati', 'for', 'her', 'tha', 'nth',
+  'int', 'ere', 'ter', 'est', 'ers', 'hat', 'ate', 'all', 'eth', 'his', 'ver',
+  'wit', 'thi', 'oth', 'res', 'ont', 'rea', 'eve', 'not', 'you', 'are', 'was',
+  'but', 'use', 'our', 'out', 'str', 'sys', 'pro', 'req', 'sen', 'sho', 'con',
+  'ple', 'ase', 'msg', 'ing', 'ide', 'com', 'sec', 'pol', 'tri', 'ans', 'tim',
+  'lat', 'gue', 'que', 'log', 'red', 'act', 'exp', 'ect', 'tra', 'ate', 'rom',
+]);
 
 // Enum defining the severity levels of detected threats
 export enum DetectionLevel {
@@ -93,7 +100,7 @@ export interface SanitizationResult {
   entropy: number;
   // The overall entropy score of the entire input
   globalEntropy: number;
-  // Array of text chunks that exceeded the entropy threshold
+  // Array of text chunks that exceeded the active entropy analysis threshold
   suspiciousChunks: string[];
   // Boolean flag indicating if the input is potentially adversarial
   isPotentiallyAdversarial: boolean;
@@ -232,10 +239,81 @@ function calculateEntropyLanguagePenalty(str: string): number {
   return looksLikePlainProse ? 1.65 : 0;
 }
 
+function normalizeForEnglishLikelihood(input: string): string {
+  const normalized = normalizeWithoutLeet(input)
+    .replace(REDACTED_PLACEHOLDER_REGEX, ' ')
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return normalized;
+}
+
+function getEnglishTrigramHitRate(input: string): number {
+  const lettersOnly = input.replace(/\s+/g, '');
+  if (lettersOnly.length < 12) return 0;
+
+  let total = 0;
+  let hits = 0;
+  for (let index = 0; index <= lettersOnly.length - 3; index += 1) {
+    total += 1;
+    if (ENGLISH_TRIGRAMS.has(lettersOnly.slice(index, index + 3))) {
+      hits += 1;
+    }
+  }
+
+  return total > 0 ? hits / total : 0;
+}
+
+function shiftCaesarText(input: string, shift: number): string {
+  return [...input].map((char) => {
+    if (!/[a-z]/.test(char)) return char;
+    const base = 'a'.charCodeAt(0);
+    const normalized = char.charCodeAt(0) - base;
+    return String.fromCharCode(((normalized - shift + 26) % 26) + base);
+  }).join('');
+}
+
+// Detect alphabetic gibberish that still looks like spaced prose by comparing
+// normalized character trigrams and bounded Caesar-shift recovery. This is used
+// as an obfuscation-family signal, not as a generic "bad writing" detector.
+function hasLowNaturalLanguageLikelihood(input: string): boolean {
+  const normalized = normalizeForEnglishLikelihood(input);
+
+  if (!normalized) return false;
+
+  const tokens = normalized
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 4);
+
+  if (tokens.length < 5) return false;
+
+  const vowelishTokens = tokens.filter((token) => /[aeiouy]/.test(token));
+  if (vowelishTokens.length / tokens.length < 0.7) return false;
+
+  const uniqueTokenRate = new Set(tokens).size / tokens.length;
+  const averageTokenLength = tokens.reduce((sum, token) => sum + token.length, 0) / tokens.length;
+  const originalTrigramRate = getEnglishTrigramHitRate(normalized);
+
+  let bestShiftRate = 0;
+  for (let shift = 1; shift < 26; shift += 1) {
+    bestShiftRate = Math.max(bestShiftRate, getEnglishTrigramHitRate(shiftCaesarText(normalized, shift)));
+  }
+
+  return uniqueTokenRate >= 0.75 &&
+    averageTokenLength >= 4.2 &&
+    (
+      (originalTrigramRate <= 0.035 && bestShiftRate >= 0.16 && bestShiftRate - originalTrigramRate >= 0.08) ||
+      (originalTrigramRate <= 0.015 && tokens.length >= 7)
+    );
+}
+
 // Entropy should measure concealment pressure, not reward predictable wrapper
 // shells like `[INSTRUCTION: ...]` or `<SYSTEM_MESSAGE_STYLE>`. We normalize
 // those structured headers out before scoring so templated clean prompts land
-// closer to their actual prose content.
+// closer to their actual prose content before the shared 3.2 / configurable
+// threshold policy bands are applied.
 function normalizeForEntropy(str: string): string {
   const unescaped = str
     .replace(/\\([_<>\[\]])/g, '$1')
@@ -255,9 +333,10 @@ function normalizeForEntropy(str: string): string {
     .trim();
 }
 
-// Gate entropy-driven escalation behind suspicious-looking chunk shape so normal
-// prose with dates, prices, or model numbers does not get promoted on entropy
-// alone. This keeps entropy useful for concealment while reducing false positives.
+// This helper still shapes the displayed max-window entropy by dampening obvious
+// plain-prose inputs, but it no longer decides whether entropy can escalate on
+// its own. The actual verdict policy now uses fixed bands: <= 3.2 allowed on
+// entropy grounds, > 3.2 suspicious, and > configured threshold adversarial.
 function hasEntropyEscalationContext(str: string): boolean {
   const meaningfulChars = [...str].filter((char) => !/\s/.test(char));
   if (meaningfulChars.length < 6) return false;
@@ -281,13 +360,13 @@ function hasEntropyEscalationContext(str: string): boolean {
 
 // Interface defining the result of the sliding window entropy analysis
 export interface EntropyAnalysisResult {
-  // Boolean flag indicating if the entropy exceeds the adversarial threshold
+  // Boolean flag indicating if the entropy exceeds the supplied analysis threshold
   isAdversarial: boolean;
   // The maximum entropy score found in any window
   maxEntropy: number;
   // The overall entropy score of the entire input
   globalEntropy: number;
-  // Array of text chunks that exceeded the entropy threshold
+  // Array of text chunks that exceeded the active entropy analysis threshold
   suspiciousChunks: string[];
 }
 
@@ -299,7 +378,7 @@ export function analyzeSlidingWindowEntropy(
   windowSize: number = 35,
   // The number of characters to advance the window each step (default 5)
   stepSize: number = 5,
-  // The threshold above which a chunk is considered suspicious
+  // The threshold above which a chunk is recorded as suspicious for telemetry
   threshold: number = SUSPICIOUS_ENTROPY_THRESHOLD
 ): EntropyAnalysisResult {
   const entropyInput = normalizeForEntropy(prompt);
@@ -345,13 +424,15 @@ export function analyzeSlidingWindowEntropy(
     }
   }
 
+  // Keep a mild cap for clearly prose-like text so the displayed max window
+  // entropy stays readable in the UI even when wrapper noise inflates a chunk.
   if (!hasEntropyEscalationContext(entropyInput)) {
     maxEntropy = Math.min(maxEntropy, boostedGlobalEntropy + 0.6);
   }
 
   // Return the analysis results
   return {
-    // Flag as adversarial if the max entropy exceeds the threshold
+    // Flag that the score crossed the supplied analysis threshold
     isAdversarial: maxEntropy >= threshold,
     // Return the maximum entropy found
     maxEntropy,
@@ -415,7 +496,10 @@ export function sanitizeInput(
   let sanitized = input;
   // Initialize an array to track applied redactions
   const redactions: string[] = [];
-  const suspiciousEntropyThreshold = tuning.entropyThreshold ?? SUSPICIOUS_ENTROPY_THRESHOLD;
+  const adversarialEntropyThreshold = Math.max(
+    tuning.entropyThreshold ?? 4.0,
+    SUSPICIOUS_ENTROPY_THRESHOLD,
+  );
   const suspiciousSyntacticThreshold = tuning.syntacticThreshold ?? 65;
 
   // Always detect PII for metadata/governance, but conditionally redact the string
@@ -452,7 +536,7 @@ export function sanitizeInput(
   // If the entropy filter guardrail is enabled
   if (guardrails.entropyFilter) {
     // Perform sliding window entropy analysis
-    const entropyResult = analyzeSlidingWindowEntropy(input, 35, 5, suspiciousEntropyThreshold);
+    const entropyResult = analyzeSlidingWindowEntropy(input, 35, 5, SUSPICIOUS_ENTROPY_THRESHOLD);
     // Store the maximum entropy found
     entropy = entropyResult.maxEntropy;
     // Store the global entropy
@@ -460,9 +544,6 @@ export function sanitizeInput(
     // Store the suspicious chunks
     suspiciousChunks = entropyResult.suspiciousChunks;
   }
-  const entropyContextSuspicious = hasEntropyEscalationContext(input) ||
-    suspiciousChunks.some((chunk) => hasEntropyEscalationContext(chunk));
-  
   // These flags track which policy families fired as we combine multiple detection passes.
   let containsBlockedKeyword = false;
   let containsForbiddenTopic = false;
@@ -485,6 +566,10 @@ export function sanitizeInput(
   const languageSignals = detectLanguageSignals(input);
   foreignLanguageDetected = languageSignals.isForeignLanguage;
   mixedLanguageDetected = languageSignals.isMixedLanguage;
+  const lowNaturalLanguageLikelihoodDetected =
+    hasLowNaturalLanguageLikelihood(input) &&
+    !foreignLanguageDetected &&
+    !mixedLanguageDetected;
   const normalizedForeignRecovery = languageSignals.translatedCandidate ? normalizeForPolicy(languageSignals.translatedCandidate) : '';
   let transformedSignalsUsed: ObfuscationSignal[] = [];
   let normalizedTransformedSegments: string[] = [];
@@ -624,6 +709,9 @@ export function sanitizeInput(
   if (spellingObfuscationDetected && !redactions.includes('SPELLING_OBFUSCATION')) {
     redactions.push('SPELLING_OBFUSCATION');
   }
+  if (lowNaturalLanguageLikelihoodDetected && !redactions.includes('LOW_DICTIONARY_HIT_RATE')) {
+    redactions.push('LOW_DICTIONARY_HIT_RATE');
+  }
 
   if (EXTERNAL_CALL_REGEX.test(input)) {
     externalCallDetected = true;
@@ -682,14 +770,27 @@ export function sanitizeInput(
     redactions.push('POLICY_VIOLATION');
   }
 
+  const obfuscationSignalDetected =
+    obfuscationAnalysis.usedObfuscation ||
+    obfuscationAnalysis.signals.length > 0 ||
+    structuralSignals.length > 0 ||
+    leetspeakDetected ||
+    spellingObfuscationDetected ||
+    transformedSignalsUsed.length > 0 ||
+    lowNaturalLanguageLikelihoodDetected;
+
   // Complexity analysis runs after the earlier normalization stages so the final
   // severity can reflect both structural suspicion and explicit policy hits.
   const syntacticAnalysis = analyzeSyntacticComplexity(input, suspiciousSyntacticThreshold);
 
   // High-level escalation heuristic used for the rest of the app UI and logging.
+  // Entropy alone now participates directly: > 3.2 is suspicious, and above the
+  // configured entropy threshold is adversarial.
   const isPotentiallyAdversarial = 
-    // Check if entropy filter is on and entropy exceeds 4.5
-    (guardrails.entropyFilter && entropy > suspiciousEntropyThreshold && entropyContextSuspicious) ||
+    // Check if entropy filter is on and entropy exceeds the suspicious floor
+    (guardrails.entropyFilter && entropy > SUSPICIOUS_ENTROPY_THRESHOLD) ||
+    // Check if any recognized obfuscation family fired
+    obfuscationSignalDetected ||
     // Check if a blocked keyword was found
     containsBlockedKeyword ||
     // Check if a forbidden topic was found
@@ -698,6 +799,7 @@ export function sanitizeInput(
     containsRegexMatch ||
     externalCallDetected ||
     coordinateCipherDetected ||
+    lowNaturalLanguageLikelihoodDetected ||
     // Check if the syntactic analyzer detected a probing attempt
     syntacticAnalysis.isProbingAttempt ||
     // Check if the input is excessively long (over 2000 characters)
@@ -706,21 +808,23 @@ export function sanitizeInput(
   // Final severity assignment:
   // the app collapses many underlying signals into one operator-facing level.
   let detectionLevel = DetectionLevel.CLEAN;
-  // If entropy is very high (> 5.5) or syntactic score is very high (>= 90)
-  if ((guardrails.entropyFilter && entropy > ADVERSARIAL_ENTROPY_THRESHOLD && entropyContextSuspicious) || syntacticAnalysis.score >= 90) {
+  // Promote to adversarial if entropy exceeds the configured ceiling, if
+  // syntactic score is extremely high, or if any recognized obfuscation family fires.
+  if ((guardrails.entropyFilter && entropy > adversarialEntropyThreshold) || syntacticAnalysis.score >= 90 || obfuscationSignalDetected) {
     // Escalate to ADVERSARIAL level
     detectionLevel = DetectionLevel.ADVERSARIAL;
   // Else if a probing attempt was detected
   } else if (syntacticAnalysis.isProbingAttempt) {
     // Escalate to SUSPICIOUS level
     detectionLevel = DetectionLevel.SUSPICIOUS;
-  // Else if a blocked keyword, forbidden topic, high entropy (> 4.5), or excessive length is detected
+  // Else if blocked content, moderate entropy, or other supporting risk signals are detected
   } else if (
     containsBlockedKeyword ||
     containsForbiddenTopic ||
     externalCallDetected ||
     coordinateCipherDetected ||
-    (guardrails.entropyFilter && entropy > suspiciousEntropyThreshold && entropyContextSuspicious) ||
+    lowNaturalLanguageLikelihoodDetected ||
+    (guardrails.entropyFilter && entropy > SUSPICIOUS_ENTROPY_THRESHOLD) ||
     input.length > 2000
   ) {
     // Escalate to SUSPICIOUS level
@@ -728,14 +832,6 @@ export function sanitizeInput(
   // Else if a custom regex rule was matched
   } else if (containsRegexMatch) {
     // Escalate to SUSPICIOUS level
-    detectionLevel = DetectionLevel.SUSPICIOUS;
-  } else if (guardrails.obfuscationDetection && (
-    obfuscationAnalysis.usedObfuscation ||
-    obfuscationAnalysis.signals.length > 0 ||
-    structuralSignals.length > 0 ||
-    leetspeakDetected ||
-    transformedSignalsUsed.includes('COMPATIBILITY_GLYPHS')
-  )) {
     detectionLevel = DetectionLevel.SUSPICIOUS;
   } else if (foreignLanguageDetected || spellingObfuscationDetected) {
     detectionLevel = DetectionLevel.INFORMATIONAL;

@@ -76,8 +76,10 @@ $$H(X) = -\sum_{i=1}^{n} P(x_i) \log_b P(x_i)$$
 
 | Guardrail | Suspicious | Adversarial | Purpose |
 | :--- | :--- | :--- | :--- |
-| **Entropy** | 4.5 | 5.5 | Catching Base64/Hex obfuscation |
+| **Entropy** | `> 3.2` | `> configured Entropy Threshold` | Shared entropy policy used by submit-time sanitization, Audit Logs, and Metrics |
 | **Syntactic Complexity** | 50 | 90 | Catching instruction stacking |
+
+Operator note: entropy now has two roles. First, it contributes a direct verdict band: above `3.2` is `Suspicious`, and above the configured threshold is `Adversarial`. Second, it still acts as supporting concealment telemetry in Prompt Details and Metrics. Recognized obfuscation families remain adversarial by policy even when the entropy score alone would not cross the configured ceiling.
 
 ---
 
@@ -179,3 +181,12 @@ Only promote logs that meet at least one of the following criteria:
 | `SYNTACTIC_PROBE` | **Medium** | Elevated density of imperative verbs (e.g., "forget," "ignore," "must"). Indicates system override attempt. |
 | `PII_LEAK` | **Variable** | Detection of SSN, email addresses, or AWS keys. Verify whether redaction succeeded before releasing. |
 | `CANARY_EXFIL` | **Critical** | Prompt or response contained the unique `COUNTERSPY_CANARY_TOKEN`. Indicates System Instruction breach — activate HOTL immediately. |
+
+## Obfuscation Posture
+
+Counter-Spy.ai currently operates as a plain-text English chatbot control plane. Under that posture:
+
+- Any recognized obfuscation signal is treated as `Adversarial`.
+- Analysts should not expect leetspeak, ROT13, symbol substitution, coordinate ciphers, recursive decode chains, or similar concealment patterns to remain merely `Suspicious`.
+- Alphabetic substitution gibberish that scores as low-English-likeness under the local trigram / bounded Caesar-shift heuristic is also treated as an obfuscation-family adversarial signal, even if it contains only letters and spaces.
+- If a prompt is already carrying a local obfuscation-family `Adversarial` verdict, the user-facing response should be a local detection banner, not `Backend Error`. Treat any backend-availability message on a clearly obfuscated prompt as a routing bug worth investigation.

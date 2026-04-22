@@ -149,6 +149,8 @@ Metrics note: the Security Operations view now includes a **Defense Funnel** car
 
 If your ingest run includes `expectedVerdict` labels, the escape-rate math will use those labels when available instead of relying only on final severity heuristics.
 
+Sanitizer note: the current runtime now treats any recognized obfuscation signal as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. If you are testing encoded, transformed, or cipher-like prompts, expect the local firewall to block them at the highest severity even before a decoded policy phrase is confirmed. Entropy also follows the shared live policy: `<= 3.2` stays allowed on entropy grounds, `> 3.2` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
+
 Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`.
 
 Note: in the current demo build, Sam Spade clean turns still use deterministic noir reply logic inside the Sam Spade service after guardrail approval. They do not yet call the same live downstream responder used by Analyst Chat. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.

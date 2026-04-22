@@ -47,7 +47,7 @@ import {
   getDocFromServer
 } from 'firebase/firestore';
 // Import custom sanitization logic and types
-import { sanitizeInput, sanitizeOutput, SanitizationResult, DetectionLevel } from './lib/sanitizer';
+import { sanitizeInput, sanitizeOutput, SanitizationResult, DetectionLevel, SUSPICIOUS_ENTROPY_THRESHOLD } from './lib/sanitizer';
 // Import Gemini API integration and types
 import { generateSecurityAdvice, ChatMessage } from './lib/gemini';
 import {
@@ -193,7 +193,6 @@ type ResponderTelemetryConfig = {
 };
 
 const PII_OR_SECRET_REDACTIONS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'AWS_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'SECRET_KEY'];
-const ADVERSARIAL_ENTROPY_THRESHOLD = 4.8;
 
 interface WakeLockSentinelLike {
   release(): Promise<void>;
@@ -260,7 +259,7 @@ const LegacySystemConfigSchema = z.object({
 const GovernanceConfigSchema = z.object({
   isHitlActive: z.boolean().default(false),
   isGlobalPause: z.boolean().default(false),
-  entropyThreshold: z.number().min(3).max(4.6).default(4.0),
+  entropyThreshold: z.number().min(SUSPICIOUS_ENTROPY_THRESHOLD).max(4.6).default(4.0),
   syntacticThreshold: z.number().min(40).max(90).default(65),
 });
 
@@ -1147,6 +1146,7 @@ export default function App() {
 
   // Ref for the chat scroll area to auto-scroll to the bottom
   const scrollRef = useRef<HTMLDivElement>(null);
+  const analystTranscriptEndRef = useRef<HTMLDivElement>(null);
   const samSpadeSessionPromiseRef = useRef<Promise<SamSpadeSession> | null>(null);
   const samSpadeTranscriptEndRef = useRef<HTMLDivElement>(null);
 
@@ -2304,10 +2304,9 @@ export default function App() {
 
   // Effect hook to auto-scroll the chat window to the bottom when new messages arrive
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
-    }
-  }, [messages]);
+    if (activeTab !== 'chat') return;
+    analystTranscriptEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }, [activeTab, messages, isProcessing]);
 
   useEffect(() => {
     if (activeTab !== 'sam_spade') return;
@@ -2343,37 +2342,129 @@ export default function App() {
     // Don't process empty input, if already processing, or if not logged in
     if (!textToProcess.trim() || isProcessing || !profile) return;
 
-    // Parse configuration strings into arrays
-    const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
-    const { blockedKeywords: keywords, forbiddenTopics: topics, regexRules: regexes } = buildPolicyOverrides(systemConfig, policies);
-    const finalSystemPrompt = buildDownstreamResponderSystemPrompt({
-      prompt: textToProcess,
-      systemConfig,
-      policies,
-      blockedTopicsActive: activeGuardrails.blockedTopics,
-    });
-    // Sanitize the input
-    const sanitization = sanitizeInput(textToProcess, keywords, topics, regexes, activeGuardrails, {
-      entropyThreshold: governanceConfig.entropyThreshold,
-      syntacticThreshold: governanceConfig.syntacticThreshold,
-    });
+    try {
+      // Parse configuration strings into arrays
+      const policies = (customPolicies.length > 0 ? customPolicies : POLICIES).filter((policy) =>
+        policy &&
+        typeof policy.title === 'string' &&
+        typeof policy.date === 'string' &&
+        typeof policy.content === 'string',
+      );
+      const { blockedKeywords: keywords, forbiddenTopics: topics, regexRules: regexes } = buildPolicyOverrides(systemConfig, policies);
+      const finalSystemPrompt = buildDownstreamResponderSystemPrompt({
+        prompt: textToProcess,
+        systemConfig,
+        policies,
+        blockedTopicsActive: activeGuardrails.blockedTopics,
+      });
+      // Sanitize the input
+      const sanitization = sanitizeInput(textToProcess, keywords, topics, regexes, activeGuardrails, {
+        entropyThreshold: governanceConfig.entropyThreshold,
+        syntacticThreshold: governanceConfig.syntacticThreshold,
+      });
 
-    if (activeGuardrails.safeguardLlm && Number.isFinite(parsedContextWindowLimit) && parsedContextWindowLimit > 0) {
-      const estimatedPromptTokens = estimateResponderPromptTokens(finalSystemPrompt, sanitization.sanitized);
-      if (estimatedPromptTokens > parsedContextWindowLimit) {
-        toast.error(`Submission blocked: estimated prompt footprint ${estimatedPromptTokens} tokens exceeds the configured max context window of ${parsedContextWindowLimit}.`);
-        setLatency(null);
-        setLastExecutedSanitization(sanitization);
-        setSanitizationPreview(null);
-        return;
+      if (activeGuardrails.safeguardLlm && Number.isFinite(parsedContextWindowLimit) && parsedContextWindowLimit > 0) {
+        const estimatedPromptTokens = estimateResponderPromptTokens(finalSystemPrompt, sanitization.sanitized);
+        if (estimatedPromptTokens > parsedContextWindowLimit) {
+          const contextWindowMessage = `MAX CONTEXT WINDOW EXCEEDED: Estimated prompt footprint ${estimatedPromptTokens} tokens exceeds the configured max context window of ${parsedContextWindowLimit}. Submission blocked before backend inference.`;
+          toast.error(`Submission blocked: estimated prompt footprint ${estimatedPromptTokens} tokens exceeds the configured max context window of ${parsedContextWindowLimit}.`);
+          setLatency(null);
+          setLastExecutedSanitization(sanitization);
+          setSanitizationPreview(null);
+          const blockedUserMessage: ChatMessage = {
+            role: 'user',
+            text: options?.displayInputPrefix ? `${options.displayInputPrefix}${sanitization.sanitized}` : sanitization.sanitized,
+          };
+          const blockedModelMessage: ChatMessage = {
+            role: 'model',
+            text: contextWindowMessage,
+          };
+          setMessages((prev) => [...prev, blockedUserMessage, blockedModelMessage]);
+          if (overrideInput === undefined) {
+            setInput('');
+          }
+          if (activeGuardrails.sessionAudit) {
+            const logSanitization = activeGuardrails.piiRedaction
+              ? sanitization
+              : sanitizeInput(textToProcess, keywords, topics, regexes, { ...activeGuardrails, piiRedaction: true }, {
+                  entropyThreshold: governanceConfig.entropyThreshold,
+                  syntacticThreshold: governanceConfig.syntacticThreshold,
+                });
+            const detectionFlags = Array.from(new Set([...logSanitization.redactions, 'MAX_CONTEXT_WINDOW_EXCEEDED']));
+            const blockedDetectionLevel = Math.max(logSanitization.detectionLevel, DetectionLevel.SUSPICIOUS);
+            try {
+              if (localReviewMode) {
+                setAuditLogs(prev => [{
+                  id: crypto.randomUUID(),
+                  userId: profile.uid,
+                  userRole: profile.role,
+                  sessionId,
+                  timestamp: new Date(),
+                  sanitizedPrompt: logSanitization.sanitized,
+                  detectionFlags,
+                  obfuscationSummary: buildObfuscationSummary(logSanitization.redactions, logSanitization.decodeTelemetry),
+                  entropy: logSanitization.entropy,
+                  latencyMs: logSanitization.latencyMs,
+                  globalEntropy: logSanitization.globalEntropy,
+                  suspiciousChunks: logSanitization.suspiciousChunks,
+                  escalationRecommended: true,
+                  detectionLevel: blockedDetectionLevel,
+                  modelId: 'local-review',
+                  source: options?.source || 'analyst_chat',
+                  batchId: options?.batchId || undefined,
+                  expectedVerdict: options?.expectedVerdict || undefined,
+                  response: contextWindowMessage,
+                  contextWindowLimit: parsedContextWindowLimit,
+                  contextWindowUtilization: parseFloat(((estimatedPromptTokens / parsedContextWindowLimit) * 100).toFixed(1)),
+                }, ...prev].slice(0, 50));
+              } else {
+                await addDoc(collection(db, 'audit_logs'), {
+                  userId: profile.uid,
+                  userRole: profile.role,
+                  sessionId,
+                  timestamp: serverTimestamp(),
+                  sanitizedPrompt: logSanitization.sanitized,
+                  detectionFlags,
+                  obfuscationSummary: buildObfuscationSummary(logSanitization.redactions, logSanitization.decodeTelemetry),
+                  entropy: logSanitization.entropy,
+                  globalEntropy: logSanitization.globalEntropy,
+                  suspiciousChunks: logSanitization.suspiciousChunks,
+                  escalationRecommended: true,
+                  detectionLevel: blockedDetectionLevel,
+                  latencyMs: logSanitization.latencyMs,
+                  modelId: 'gemini-3-flash-preview',
+                  source: options?.source || 'analyst_chat',
+                  batchId: options?.batchId || null,
+                  expectedVerdict: options?.expectedVerdict || null,
+                  response: contextWindowMessage,
+                  contextWindowLimit: parsedContextWindowLimit,
+                  contextWindowUtilization: parseFloat(((estimatedPromptTokens / parsedContextWindowLimit) * 100).toFixed(1)),
+                });
+              }
+            } catch (error) {
+              handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
+            }
+          }
+          if (options?.source === 'bulk_ingest') {
+            const metricEntry = await buildPlaygroundMetricEntry(
+              textToProcess,
+              sanitization,
+              'bulk_ingest',
+              options.batchId,
+              options.expectedVerdict,
+            );
+            const nextEntries = [...loadPlaygroundMetrics(), metricEntry];
+            savePlaygroundMetrics(nextEntries);
+          }
+          return;
+        }
       }
-    }
 
-    setIsProcessing(true);
+      setIsProcessing(true);
 
-    // Active Defense Trigger (Circuit Breaker)
-    // If sanitization takes too long, block the request to prevent ReDoS attacks
-	    if (sanitization.latencyMs > 100) {
+      // Active Defense Trigger (Circuit Breaker)
+      // If sanitization takes too long, block the request to prevent ReDoS attacks
+	      if (sanitization.latencyMs > 100) {
 	      if (activeGuardrails.sessionAudit) {
 	        try {
           if (localReviewMode) {
@@ -2546,10 +2637,10 @@ export default function App() {
         }
       // Check if the input was flagged as adversarial or suspicious
       } else if (sanitization.isPotentiallyAdversarial) {
-        if (hasPolicyViolationFlags(sanitization.redactions)) {
-          responseText = "POLICY VIOLATION DETECTED: This request matched blocked keywords, forbidden topics, or policy regex rules. Action logged and escalated.";
-        } else if (sanitization.detectionLevel === DetectionLevel.ADVERSARIAL) {
+        if (sanitization.detectionLevel === DetectionLevel.ADVERSARIAL) {
           responseText = "ADVERSARIAL DETECTION TRIGGERED: This request violates security governance policies. High entropy or injection patterns detected. Action logged and escalated.";
+        } else if (hasPolicyViolationFlags(sanitization.redactions)) {
+          responseText = "POLICY VIOLATION DETECTED: This request matched blocked keywords, forbidden topics, or policy regex rules. Action logged and escalated.";
         } else {
           responseText = "SUSPICIOUS DETECTION TRIGGERED: This request violates security governance policies. Blocked keywords, topics, or high entropy detected. Action logged and escalated.";
         }
@@ -2766,11 +2857,18 @@ export default function App() {
       const modelMsg: ChatMessage = { role: 'model', text: responseText };
       setMessages(prev => [...prev, modelMsg]);
 
+      } catch (error) {
+        console.error(error);
+        const message = error instanceof Error ? error.message : 'Security pipeline error';
+        toast.error(message || 'Security pipeline error');
+      } finally {
+        // Reset processing state
+        setIsProcessing(false);
+      }
     } catch (error) {
       console.error(error);
-      toast.error('Security pipeline error');
-    } finally {
-      // Reset processing state
+      const message = error instanceof Error ? error.message : 'Security pipeline error';
+      toast.error(message || 'Security pipeline error');
       setIsProcessing(false);
     }
   };
@@ -3386,7 +3484,7 @@ export default function App() {
 
           {/* Chat Tab */}
           {activeTab === 'chat' && (
-            <div className="min-h-full flex flex-col gap-6">
+            <div className="h-full min-h-0 flex flex-col gap-6">
               <div className="flex-1 flex gap-6 min-h-0">
                 {/* Chat Window */}
                 <Card className="flex-1 min-h-0 flex flex-col border-border rounded-2xl shadow-sm bg-card overflow-hidden">
@@ -3395,7 +3493,7 @@ export default function App() {
                     <div className="space-y-6">
                       {/* Empty State */}
                       {messages.length === 0 && (
-                        <div className="min-h-[calc(100vh-24rem)] flex flex-col items-center justify-center text-center opacity-40">
+                        <div className="min-h-[24rem] h-full flex flex-col items-center justify-center text-center opacity-40">
                           <img
                             src={APP_LOGO_URL}
                             alt="Counter-Spy.ai shield logo"
@@ -3480,6 +3578,7 @@ export default function App() {
                           </div>
                         </div>
                       )}
+                      <div ref={analystTranscriptEndRef} />
                     </div>
                   </ScrollArea>
                   
@@ -3544,8 +3643,8 @@ export default function App() {
                                     <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden">
                                       <div 
                                         className={`h-full rounded-full transition-all ${
-                                          displaySanitization!.entropy > ADVERSARIAL_ENTROPY_THRESHOLD ? 'bg-destructive' : 
-                                          displaySanitization!.entropy >= governanceConfig.entropyThreshold ? 'bg-orange-500' : 
+                                          displaySanitization!.entropy > governanceConfig.entropyThreshold ? 'bg-destructive' : 
+                                          displaySanitization!.entropy > SUSPICIOUS_ENTROPY_THRESHOLD ? 'bg-orange-500' : 
                                           'bg-green-500'
                                         }`} 
                                         style={{ width: `${Math.min(displaySanitization!.entropy * 10, 100)}%` }}
@@ -3556,12 +3655,12 @@ export default function App() {
                                   <div className="flex justify-between items-center">
                                     {/* Entropy Risk Level Text */}
                                     <p className="text-[10px] text-muted-foreground">
-                                      {displaySanitization!.entropy > ADVERSARIAL_ENTROPY_THRESHOLD ? (
-                                        <span className="text-destructive font-semibold">High-Risk (&gt; {ADVERSARIAL_ENTROPY_THRESHOLD.toFixed(1)})</span>
-                                      ) : displaySanitization!.entropy >= governanceConfig.entropyThreshold ? (
-                                        <span className="text-orange-500 font-semibold">Suspicious ({governanceConfig.entropyThreshold.toFixed(1)} - {ADVERSARIAL_ENTROPY_THRESHOLD.toFixed(1)})</span>
+                                      {displaySanitization!.entropy > governanceConfig.entropyThreshold ? (
+                                        <span className="text-destructive font-semibold">Adversarial (&gt; {governanceConfig.entropyThreshold.toFixed(1)})</span>
+                                      ) : displaySanitization!.entropy > SUSPICIOUS_ENTROPY_THRESHOLD ? (
+                                        <span className="text-orange-500 font-semibold">Suspicious ({SUSPICIOUS_ENTROPY_THRESHOLD.toFixed(1)} - {governanceConfig.entropyThreshold.toFixed(1)})</span>
                                       ) : (
-                                        <span className="text-green-500 font-semibold">Normal (&lt; {governanceConfig.entropyThreshold.toFixed(1)})</span>
+                                        <span className="text-green-500 font-semibold">Allowed (&le; {SUSPICIOUS_ENTROPY_THRESHOLD.toFixed(1)})</span>
                                       )}
                                     </p>
                                     {/* Global Entropy Display */}
@@ -4263,24 +4362,36 @@ Second line
 Still the same prompt
 ${BULK_PROMPT_END_MARKER}`}</pre>
                     </div>
-                    <Input 
-                      type="file" 
-                      accept=".txt" 
+                    <input
+                      type="file"
+                      accept=".txt,text/plain"
                       disabled={isBulkProcessing}
+                      className="block h-11 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground file:mr-3 file:h-9 file:rounded-md file:border-0 file:bg-muted file:px-4 file:text-sm file:font-medium file:leading-none file:text-foreground file:align-middle file:inline-flex file:items-center file:justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      onClick={(e) => {
+                        e.currentTarget.value = '';
+                      }}
                       onChange={(e) => {
-                        const file = e.target.files?.[0];
+                        const inputEl = e.currentTarget;
+                        const file = inputEl.files?.[0];
                         if (!file) return;
                         const reader = new FileReader();
                         reader.onload = async (event) => {
-                          const text = event.target?.result as string;
+                          const text = typeof event.target?.result === 'string' ? event.target.result : '';
                           if (text) {
                             const prompts = parseBulkPrompts(text);
                             if (prompts.length > 0) {
-                              runBulkIngest(prompts);
+                              void runBulkIngest(prompts);
                             } else {
                               toast.error('No prompts found. Use one prompt per line or wrap multi-line prompts in ===PROMPT=== / ===END=== blocks.');
                             }
+                          } else {
+                            toast.error('The selected ingest file was empty or unreadable.');
                           }
+                          inputEl.value = '';
+                        };
+                        reader.onerror = () => {
+                          toast.error('Failed to read the selected ingest file.');
+                          inputEl.value = '';
                         };
                         reader.readAsText(file);
                       }}

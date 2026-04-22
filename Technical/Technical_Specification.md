@@ -33,11 +33,30 @@ To defeat **Token Dilution**, the system utilizes a **Sliding Window Shannon Ent
 *   **Formula:** $H(X) = -\sum_{i=1}^{n} P(x_i) \log_2 P(x_i)$
 *   **Intent:** By isolating high-entropy spikes (e.g., Base64 shellcode) in 35-character windows, the system identifies obfuscated payloads that would otherwise be averaged out in a global entropy check.
 
+### 2.1.1 English-Likeness Heuristic
+To catch alphabetic substitution gibberish that still resembles plain prose, the frontend sanitizer also applies a bounded English-likeness check.
+*   **Signals:** low English trigram support after normalization, bounded Caesar-shift recovery improvement, high token uniqueness, and prose-like spacing.
+*   **Intent:** Surface cipher-style concealment that entropy and syntactic heuristics alone may under-rate.
+*   **Current Policy:** A hit is treated as an obfuscation-family signal and therefore classified as `Adversarial`.
+
+### 2.1.2 Entropy Policy Bands
+The current Beta uses one shared entropy policy across the submit-time firewall, Audit Logs, and Metrics.
+*   **Allowed:** prompt entropy `<= 3.2`
+*   **Suspicious:** prompt entropy `> 3.2` and `<= configured Entropy Threshold`
+*   **Adversarial:** prompt entropy `> configured Entropy Threshold`
+*   **Operator Meaning:** the governance slider now sets the maximum approved entropy before a prompt becomes adversarial; it no longer acts as the suspicious floor.
+
 ### 2.2 Syntactic Complexity Scoring
 The analyzer uses a weighted heuristic to detect "Instruction Stacking":
 *   **Constraint Density (High Weight):** Frequency of imperative keywords.
 *   **Special Char Ratio (Medium Weight):** Inverse-match regex `/[a-zA-Z0-9\s]/g` to detect code-like syntax.
-*   **Thresholds:** Scores > 50 trigger `Suspicious` classification; scores > 90 trigger `Adversarial` classification.
+*   **Thresholds:** Scores > 50 contribute to `Suspicious` classification; scores > 90 independently trigger `Adversarial` classification.
+
+### 2.3 Obfuscation Severity Policy
+Counter-Spy.ai now treats prompt concealment itself as a hostile act in the governed path.
+*   **Policy:** Any recognized obfuscation signal is classified as `Adversarial`, even if the concealed content would otherwise decode into something benign.
+*   **Covered families:** URL encoding, HTML entities, unicode escapes, compatibility glyphs, symbol substitution, leetspeak, ROT13, reverse text, NATO phonetic, Morse code, braille, regional indicators, recursive decode chains, coordinate ciphers, structural wrappers, and low-English-likeness alphabetic gibberish.
+*   **Routing rule:** Once the frontend sanitizer classifies a prompt as obfuscation-family `Adversarial` or otherwise locally `Suspicious`/`Adversarial`, that prompt should terminate before backend inference. Backend error messaging is reserved for prompts that were actually allowed to attempt `/v1/intercept`.
 
 ---
 

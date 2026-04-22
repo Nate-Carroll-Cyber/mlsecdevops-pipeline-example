@@ -17,6 +17,7 @@ import { detectThreatSpikes, ThreatLog } from '../lib/anomalyDetector';
 // Import metrics calculation logic and types
 import { calculateFalsePositiveMetrics, AuditLogMetrics } from '../lib/metrics';
 import { ATLAS_TACTICS, ATLAS_TECHNIQUE_DEFINITIONS } from '../lib/atlasTaxonomy';
+import { SUSPICIOUS_ENTROPY_THRESHOLD } from '../lib/sanitizer';
 // Import icons from Lucide React
 import { AlertTriangle, Activity, UserCheck, ShieldX, PauseOctagon, PlayCircle } from 'lucide-react';
 // Import charting components from Recharts
@@ -106,12 +107,27 @@ function getHeatColor(count: number, maxCount: number): string {
   return 'bg-slate-900 border-slate-700 text-slate-200';
 }
 
-function getSeverityBucket(log: any): SeverityBucket {
+function getEffectiveDetectionLevel(log: any, entropyThreshold?: number): number {
+  const baseLevel = Number(log.detectionLevel || 0);
+  const entropy = Number(log.entropy || 0);
+  if (typeof entropyThreshold === 'number' && Number.isFinite(entropy)) {
+    if (entropy > entropyThreshold) {
+      return Math.max(baseLevel, 3);
+    }
+    if (entropy > SUSPICIOUS_ENTROPY_THRESHOLD) {
+      return Math.max(baseLevel, 2);
+    }
+  }
+  return baseLevel;
+}
+
+function getSeverityBucket(log: any, entropyThreshold?: number): SeverityBucket {
   const detectionFlags = Array.isArray(log.detectionFlags) ? log.detectionFlags : [];
   const upperResponse = typeof log.response === 'string' ? log.response.toUpperCase() : '';
   const reviewedSeverity = log.reviewed === true && typeof log.resultantSeverity === 'string'
     ? log.resultantSeverity
     : undefined;
+  const effectiveDetectionLevel = getEffectiveDetectionLevel(log, entropyThreshold);
 
   if (reviewedSeverity === 'Adversarial') return 'adversarial';
   if (reviewedSeverity === 'Suspicious') return 'suspicious';
@@ -122,7 +138,7 @@ function getSeverityBucket(log: any): SeverityBucket {
     return 'review';
   }
   if (
-    Number(log.detectionLevel || 0) >= 3 ||
+    effectiveDetectionLevel >= 3 ||
     detectionFlags.includes('RESPONDER_BLOCK') ||
     detectionFlags.includes('RESPONDER_REFUSAL')
   ) {
@@ -137,24 +153,25 @@ function getSeverityBucket(log: any): SeverityBucket {
   ) {
     return 'policyViolation';
   }
-  if (Number(log.detectionLevel || 0) === 2) {
+  if (effectiveDetectionLevel === 2) {
     return 'suspicious';
   }
-  if (Number(log.detectionLevel || 0) === 1) {
+  if (effectiveDetectionLevel === 1) {
     return 'informational';
   }
   return 'clean';
 }
 
-function getAutomatedSeverityBucket(log: any): SeverityBucket {
+function getAutomatedSeverityBucket(log: any, entropyThreshold?: number): SeverityBucket {
   const detectionFlags = Array.isArray(log.detectionFlags) ? log.detectionFlags : [];
   const upperResponse = typeof log.response === 'string' ? log.response.toUpperCase() : '';
+  const effectiveDetectionLevel = getEffectiveDetectionLevel(log, entropyThreshold);
 
   if (log.status === 'PENDING_REVIEW' || detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW')) {
     return 'review';
   }
   if (
-    Number(log.detectionLevel || 0) >= 3 ||
+    effectiveDetectionLevel >= 3 ||
     detectionFlags.includes('RESPONDER_BLOCK') ||
     detectionFlags.includes('RESPONDER_REFUSAL')
   ) {
@@ -169,10 +186,10 @@ function getAutomatedSeverityBucket(log: any): SeverityBucket {
   ) {
     return 'policyViolation';
   }
-  if (Number(log.detectionLevel || 0) === 2) {
+  if (effectiveDetectionLevel === 2) {
     return 'suspicious';
   }
-  if (Number(log.detectionLevel || 0) === 1) {
+  if (effectiveDetectionLevel === 1) {
     return 'informational';
   }
   return 'clean';
@@ -183,6 +200,11 @@ function hasResponderIntervention(log: any): boolean {
   return detectionFlags.some((flag: string) => RESPONDER_INTERVENTION_FLAGS.includes(flag));
 }
 
+function hasCurrentEntropyThresholdHit(log: any, entropyThreshold: number): boolean {
+  const entropy = Number(log.entropy || 0);
+  return Number.isFinite(entropy) && entropy > entropyThreshold;
+}
+
 function hasPolicyViolationSignal(flags: string[] = []): boolean {
   return flags.includes('POLICY_VIOLATION') ||
     flags.includes('BLOCKED_KEYWORD') ||
@@ -190,19 +212,19 @@ function hasPolicyViolationSignal(flags: string[] = []): boolean {
     flags.includes('REGEX_MATCH');
 }
 
-function wasOriginallyReleased(log: any): boolean {
-  const automatedSeverity = getAutomatedSeverityBucket(log);
+function wasOriginallyReleased(log: any, entropyThreshold?: number): boolean {
+  const automatedSeverity = getAutomatedSeverityBucket(log, entropyThreshold);
   return automatedSeverity === 'clean' || automatedSeverity === 'informational';
 }
 
-function wasPreInferenceBlocked(log: any): boolean {
+function wasPreInferenceBlocked(log: any, entropyThreshold?: number): boolean {
   if (hasResponderIntervention(log)) return false;
   if (log.status === 'PENDING_REVIEW') return true;
   if (hasPolicyViolationSignal(Array.isArray(log.detectionFlags) ? log.detectionFlags : [])) return true;
-  return Number(log.detectionLevel || 0) >= 2;
+  return getEffectiveDetectionLevel(log, entropyThreshold) >= 2;
 }
 
-function isLikelyMaliciousPrompt(log: any): boolean {
+function isLikelyMaliciousPrompt(log: any, entropyThreshold?: number): boolean {
   if (typeof log.expectedVerdict === 'string') {
     return log.expectedVerdict === 'Suspicious' || log.expectedVerdict === 'Adversarial';
   }
@@ -210,25 +232,25 @@ function isLikelyMaliciousPrompt(log: any): boolean {
     return log.resultantSeverity === 'Suspicious' || log.resultantSeverity === 'Adversarial';
   }
   return (
-    wasPreInferenceBlocked(log) ||
+    wasPreInferenceBlocked(log, entropyThreshold) ||
     hasResponderIntervention(log) ||
-    getSeverityBucket(log) === 'policyViolation' ||
-    getSeverityBucket(log) === 'adversarial' ||
-    getSeverityBucket(log) === 'review' ||
-    getSeverityBucket(log) === 'suspicious'
+    getSeverityBucket(log, entropyThreshold) === 'policyViolation' ||
+    getSeverityBucket(log, entropyThreshold) === 'adversarial' ||
+    getSeverityBucket(log, entropyThreshold) === 'review' ||
+    getSeverityBucket(log, entropyThreshold) === 'suspicious'
   );
 }
 
-function calculateLayerMetrics(logs: any[]) {
+function calculateLayerMetrics(logs: any[], entropyThreshold?: number) {
   const totalLogs = logs.length;
-  const preInferenceBlockedCount = logs.filter(wasPreInferenceBlocked).length;
+  const preInferenceBlockedCount = logs.filter((log) => wasPreInferenceBlocked(log, entropyThreshold)).length;
   const reachedSafeguardCount = Math.max(totalLogs - preInferenceBlockedCount, 0);
-  const safeguardInterventionsCount = logs.filter((log) => !wasPreInferenceBlocked(log) && hasResponderIntervention(log)).length;
-  const likelyMaliciousLogs = logs.filter(isLikelyMaliciousPrompt);
+  const safeguardInterventionsCount = logs.filter((log) => !wasPreInferenceBlocked(log, entropyThreshold) && hasResponderIntervention(log)).length;
+  const likelyMaliciousLogs = logs.filter((log) => isLikelyMaliciousPrompt(log, entropyThreshold));
   const postModelEscapeCount = likelyMaliciousLogs.filter((log) =>
-    !wasPreInferenceBlocked(log) &&
+    !wasPreInferenceBlocked(log, entropyThreshold) &&
     !hasResponderIntervention(log) &&
-    wasOriginallyReleased(log)
+    wasOriginallyReleased(log, entropyThreshold)
   ).length;
 
   return {
@@ -274,14 +296,14 @@ export function ThreatDashboard({
   const [isHitlActive, setIsHitlActive] = useState(false); 
   // State to track if the Global System Pause is active
   const [isGlobalPause, setIsGlobalPause] = useState(false);
-  const [entropyThreshold, setEntropyThreshold] = useState(governanceConfig?.entropyThreshold ?? 4.0);
+  const [entropyThreshold, setEntropyThreshold] = useState(Math.max(governanceConfig?.entropyThreshold ?? 4.0, SUSPICIOUS_ENTROPY_THRESHOLD));
   const [syntacticThreshold, setSyntacticThreshold] = useState(governanceConfig?.syntacticThreshold ?? 65);
 
   useEffect(() => {
     if (!governanceConfig) return;
     setIsHitlActive(governanceConfig.isHitlActive);
     setIsGlobalPause(governanceConfig.isGlobalPause);
-    setEntropyThreshold(governanceConfig.entropyThreshold);
+    setEntropyThreshold(Math.max(governanceConfig.entropyThreshold, SUSPICIOUS_ENTROPY_THRESHOLD));
     setSyntacticThreshold(governanceConfig.syntacticThreshold);
   }, [governanceConfig]);
 
@@ -300,7 +322,7 @@ export function ThreatDashboard({
         // Update local state with fetched values, defaulting to false
         setIsHitlActive(data.isHitlActive || false);
         setIsGlobalPause(data.isGlobalPause || false);
-        setEntropyThreshold(typeof data.entropyThreshold === 'number' ? data.entropyThreshold : 4.0);
+        setEntropyThreshold(typeof data.entropyThreshold === 'number' ? Math.max(data.entropyThreshold, SUSPICIOUS_ENTROPY_THRESHOLD) : 4.0);
         setSyntacticThreshold(typeof data.syntacticThreshold === 'number' ? data.syntacticThreshold : 65);
       } else {
         // Initialize the document if it doesn't exist
@@ -397,10 +419,10 @@ export function ThreatDashboard({
           : logs.filter((log) => log.source === sourceFilter);
 
         const threatLogs: ThreatLog[] = filteredLogs
-          .filter(log => log.detectionLevel >= 2)
+          .filter((log) => getEffectiveDetectionLevel(log, entropyThreshold) >= 2)
           .map(log => ({
             userId: log.userId,
-            detectionLevel: log.detectionLevel,
+            detectionLevel: getEffectiveDetectionLevel(log, entropyThreshold),
             timestamp: log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp),
           }));
 
@@ -434,7 +456,7 @@ export function ThreatDashboard({
           const hour = stamp.getHours();
           const bucket = severityHourlyData[hour];
           if (!bucket) return;
-          bucket[getSeverityBucket(log)] += 1;
+          bucket[getSeverityBucket(log, entropyThreshold)] += 1;
         });
         const reorderedSeverityData = [];
         for (let i = 1; i <= 24; i++) {
@@ -508,11 +530,16 @@ export function ThreatDashboard({
         const averageSuspiciousChunks = filteredLogs.length > 0
           ? filteredLogs.reduce((sum, log) => sum + ((log.suspiciousChunks || []).length), 0) / filteredLogs.length
           : 0;
+        const entropyThresholdHitCount = filteredLogs.filter((log) => hasCurrentEntropyThresholdHit(log, entropyThreshold)).length;
+        const strongestEntropyHit = filteredLogs.reduce((maxEntropy, log) => {
+          const entropy = Number(log.entropy || 0);
+          return Number.isFinite(entropy) ? Math.max(maxEntropy, entropy) : maxEntropy;
+        }, 0);
         const alertCounts = filteredLogs.reduce<SeverityCounts>((counts, log) => {
-          counts[getSeverityBucket(log)] += 1;
+          counts[getSeverityBucket(log, entropyThreshold)] += 1;
           return counts;
         }, createEmptySeverityCounts());
-        const layerMetrics = calculateLayerMetrics(filteredLogs);
+        const layerMetrics = calculateLayerMetrics(filteredLogs, entropyThreshold);
 
         setOperationalMetrics({
           hitl: {
@@ -535,6 +562,12 @@ export function ThreatDashboard({
             averageLineCount: parseFloat(averageLineCount.toFixed(1)),
             averageEntropy: parseFloat(averageEntropy.toFixed(2)),
             averageSuspiciousChunks: parseFloat(averageSuspiciousChunks.toFixed(1)),
+          },
+          entropyPolicy: {
+            currentThreshold: parseFloat(entropyThreshold.toFixed(1)),
+            hitCount: entropyThresholdHitCount,
+            hitRate: parseFloat(((entropyThresholdHitCount / totalLogs) * 100).toFixed(1)),
+            strongestHit: parseFloat(strongestEntropyHit.toFixed(2)),
           },
           alertSeverity: alertCounts,
           layerDefense: layerMetrics,
@@ -614,10 +647,10 @@ export function ThreatDashboard({
 
         // Filter for threat logs (detectionLevel >= 2) for anomaly detection and chart
         const threatLogs: ThreatLog[] = filteredLogs
-          .filter(log => log.detectionLevel >= 2)
+          .filter((log) => getEffectiveDetectionLevel(log, entropyThreshold) >= 2)
           .map(log => ({
             userId: log.userId,
-            detectionLevel: log.detectionLevel,
+            detectionLevel: getEffectiveDetectionLevel(log, entropyThreshold),
             timestamp: log.timestamp
           }));
 
@@ -660,7 +693,7 @@ export function ThreatDashboard({
           const hour = log.timestamp.getHours();
           const bucket = severityHourlyData[hour];
           if (!bucket) return;
-          bucket[getSeverityBucket(log)] += 1;
+          bucket[getSeverityBucket(log, entropyThreshold)] += 1;
         });
         const reorderedSeverityData = [];
         for (let i = 1; i <= 24; i++) {
@@ -733,11 +766,16 @@ export function ThreatDashboard({
         const averageSuspiciousChunks = filteredLogs.length > 0
           ? filteredLogs.reduce((sum, log) => sum + ((log.suspiciousChunks || []).length), 0) / filteredLogs.length
           : 0;
+        const entropyThresholdHitCount = filteredLogs.filter((log) => hasCurrentEntropyThresholdHit(log, entropyThreshold)).length;
+        const strongestEntropyHit = filteredLogs.reduce((maxEntropy, log) => {
+          const entropy = Number(log.entropy || 0);
+          return Number.isFinite(entropy) ? Math.max(maxEntropy, entropy) : maxEntropy;
+        }, 0);
         const alertCounts = filteredLogs.reduce<SeverityCounts>((counts, log) => {
-          counts[getSeverityBucket(log)] += 1;
+          counts[getSeverityBucket(log, entropyThreshold)] += 1;
           return counts;
         }, createEmptySeverityCounts());
-        const layerMetrics = calculateLayerMetrics(filteredLogs);
+        const layerMetrics = calculateLayerMetrics(filteredLogs, entropyThreshold);
 
         setOperationalMetrics({
           hitl: {
@@ -760,6 +798,12 @@ export function ThreatDashboard({
             averageLineCount: parseFloat(averageLineCount.toFixed(1)),
             averageEntropy: parseFloat(averageEntropy.toFixed(2)),
             averageSuspiciousChunks: parseFloat(averageSuspiciousChunks.toFixed(1)),
+          },
+          entropyPolicy: {
+            currentThreshold: parseFloat(entropyThreshold.toFixed(1)),
+            hitCount: entropyThresholdHitCount,
+            hitRate: parseFloat(((entropyThresholdHitCount / totalLogs) * 100).toFixed(1)),
+            strongestHit: parseFloat(strongestEntropyHit.toFixed(2)),
           },
           alertSeverity: alertCounts,
           layerDefense: layerMetrics,
@@ -796,7 +840,7 @@ export function ThreatDashboard({
     
     // Execute the metrics loading function
     loadMetrics();
-  }, [localReviewMode, sourceFilter, localAuditLogs]);
+  }, [localReviewMode, sourceFilter, localAuditLogs, entropyThreshold]);
 
   // Render a loading state if metrics haven't loaded yet
   if (!metrics) {
@@ -935,9 +979,9 @@ export function ThreatDashboard({
             <div>
               <h3 className="flex items-center gap-2 font-bold text-lg">
                 <span>Entropy Threshold</span>
-                <HelpTooltip text="Lower values make entropy-based escalation more aggressive. Higher values reduce entropy-driven review pressure." />
+                <HelpTooltip text="Sets the maximum approved entropy before prompts become adversarial. Prompt entropy above 3.2 and up to this threshold is treated as suspicious." />
               </h3>
-              <p className="text-sm text-slate-400">Current threshold for suspicious entropy escalation.</p>
+              <p className="text-sm text-slate-400">Current adversarial cutoff for prompt entropy.</p>
             </div>
             <div className="rounded-md border border-slate-700 bg-slate-950 px-3 py-1 font-mono text-sm text-slate-100">
               {entropyThreshold.toFixed(1)}
@@ -945,7 +989,7 @@ export function ThreatDashboard({
           </div>
           <input
             type="range"
-            min={3}
+            min={SUSPICIOUS_ENTROPY_THRESHOLD}
             max={4.6}
             step={0.1}
             value={entropyThreshold}
@@ -1372,6 +1416,36 @@ export function ThreatDashboard({
                 <span className="font-semibold text-emerald-300">{operationalMetrics.detectionSignals.spellingObfuscationHits}</span>
               </div>
               </CardContent>
+          </Card>
+
+          <Card className="bg-card border-border shadow-sm overflow-visible">
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                <span>Current Entropy Policy</span>
+                <HelpTooltip text="Shows how the current entropy policy bands classify the stored prompt entropy values in this dataset, using the same threshold model the sanitizer and Metrics severity views now follow." />
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2 text-sm">
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Threshold</span>
+                <span className="font-semibold text-cyan-300">{operationalMetrics.entropyPolicy.currentThreshold}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Current Threshold Hits</span>
+                <span className="font-semibold text-amber-400">{operationalMetrics.entropyPolicy.hitCount}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Hit Rate</span>
+                <span className="font-semibold text-slate-100">{operationalMetrics.entropyPolicy.hitRate}%</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-1 text-muted-foreground">
+                  <span>Strongest Recorded Entropy</span>
+                  <HelpTooltip text="Highest stored entropy value in the current dataset, useful for comparing current policy headroom against historical prompt shape." />
+                </span>
+                <span className="font-semibold text-rose-400">{operationalMetrics.entropyPolicy.strongestHit}</span>
+              </div>
+            </CardContent>
           </Card>
 
           <Card className="bg-card border-border shadow-sm overflow-visible">

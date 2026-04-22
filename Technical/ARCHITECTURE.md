@@ -45,11 +45,30 @@ To defeat **Token Dilution**, the system utilizes a **Sliding Window Shannon Ent
 *   **Formula:** $H(X) = -\sum_{i=1}^{n} P(x_i) \log_2 P(x_i)$
 *   **Intent:** By isolating high-entropy spikes (e.g., Base64 shellcode) in 35-character windows, the system identifies obfuscated payloads that would otherwise be averaged out in a global entropy check.
 
+### 2.1.1 English-Likeness Heuristic
+To catch substitution-cipher gibberish that still looks like ordinary alphabetic prose, the frontend sanitizer also evaluates a bounded English-likeness heuristic.
+*   **Intent:** Detect long alphabetic token sequences with weak English trigram support, high token uniqueness, and prose-like spacing that would evade raw entropy checks.
+*   **Current Policy:** This heuristic is treated as an obfuscation-family signal, not a mild language warning. When it fires, the prompt is classified as `Adversarial`.
+
+### 2.1.2 Entropy Policy Bands
+Entropy is now evaluated with one shared policy across the live sanitizer, Audit Logs, and Metrics.
+*   **Allowed:** `<= 3.2`
+*   **Suspicious:** `> 3.2` and `<= configured Entropy Threshold`
+*   **Adversarial:** `> configured Entropy Threshold`
+*   **Intent:** Keep the governance slider focused on the operator-chosen adversarial ceiling while preserving a stable suspicious floor for concealment review.
+
 ### 2.2 Syntactic Complexity Scoring
 The analyzer uses a weighted heuristic to detect "Instruction Stacking":
 *   **Constraint Density (High Weight):** Frequency of imperative keywords.
 *   **Special Char Ratio (Medium Weight):** Inverse-match regex `/[a-zA-Z0-9\s]/g` to detect code-like syntax.
-*   **Thresholds:** Scores > 50 trigger `Suspicious` classification; scores > 90 trigger `Adversarial` classification.
+*   **Thresholds:** Scores > 50 contribute to `Suspicious` classification; scores > 90 independently trigger `Adversarial` classification.
+
+### 2.3 Obfuscation Severity Policy
+The current Beta now enforces a stricter plain-text-English-chatbot posture for concealment attempts.
+*   **Policy:** Any recognized obfuscation signal is classified as `Adversarial`, regardless of whether later recovery would have revealed otherwise benign content.
+*   **Covered families:** URL encoding, HTML entities, unicode escapes, compatibility glyphs, symbol substitution, leetspeak, ROT13, reverse text, NATO phonetic, Morse code, braille, regional indicators, recursive decode chains, chunking, variable expansion, vertical text, coordinate ciphers, and low-English-likeness alphabetic gibberish.
+*   **Reasoning:** Counter-Spy.ai now treats concealment itself as hostile behavior in the governed prompt path, rather than as a lower-severity curiosity that waits for a second content-based match.
+*   **Execution boundary:** Recognized obfuscation-family adversarial verdicts are terminal at the local shield layer. Those prompts should not proceed into the backend `/v1/intercept` path, and backend-availability fallback messages should only appear for prompts that were locally eligible for downstream inference.
 
 ---
 

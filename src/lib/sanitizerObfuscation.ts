@@ -77,6 +77,51 @@ const BRAILLE_TO_CHAR: Record<string, string> = {
   '⠽': 'y', '⠵': 'z',
 };
 
+const ENGLISH_SIGNAL_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'show', 'send', 'write', 'print',
+  'reveal', 'ignore', 'system', 'prompt', 'admin', 'token', 'secret', 'please', 'output', 'content',
+  'request', 'response', 'message', 'payload', 'user', 'developer', 'instructions',
+]);
+
+function getDictionaryHitRate(input: string): number {
+  const normalized = normalizeWithoutLeet(input)
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!normalized) return 0;
+
+  const tokens = normalized
+    .split(' ')
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
+
+  if (tokens.length === 0) return 0;
+
+  const hits = tokens.filter((token) => ENGLISH_SIGNAL_WORDS.has(token)).length;
+  return hits / tokens.length;
+}
+
+function shouldTreatAsRot13Candidate(input: string, transformed: string): boolean {
+  const lettersOnly = input.replace(/[^a-z]/gi, '');
+  if (lettersOnly.length < 8) return false;
+  if (!/\s/.test(input) && lettersOnly.length < 12) return false;
+
+  const originalHitRate = getDictionaryHitRate(input);
+  const transformedHitRate = getDictionaryHitRate(transformed);
+  return transformedHitRate >= 0.2 && transformedHitRate > originalHitRate;
+}
+
+function shouldTreatAsReverseTextCandidate(input: string, transformed: string): boolean {
+  const lettersOnly = input.replace(/[^a-z]/gi, '');
+  if (lettersOnly.length < 8) return false;
+  if (!/\s/.test(input) && !/[.:;,_\-\\/]/.test(input)) return false;
+
+  const originalHitRate = getDictionaryHitRate(input);
+  const transformedHitRate = getDictionaryHitRate(transformed);
+  return transformedHitRate >= 0.2 && transformedHitRate > originalHitRate;
+}
+
 // Decode one likely-Base64 segment when it looks long enough and mostly printable.
 function decodeBase64Segment(segment: string): string | null {
   if (segment.length % 4 !== 0 || segment.length < 24) return null;
@@ -406,13 +451,13 @@ export function extractTransformedSegments(input: string): { segments: string[];
 
   const rot13Value = input.replace(/[a-zA-Z]/g, (char) =>
     String.fromCharCode(char.charCodeAt(0) + (char.toLowerCase() < 'n' ? 13 : -13)));
-  if (rot13Value !== input) {
+  if (rot13Value !== input && shouldTreatAsRot13Candidate(input, rot13Value)) {
     segments.push(rot13Value);
     signals.push('ROT13');
   }
 
   const reversedValue = [...input].reverse().join('');
-  if (reversedValue !== input) {
+  if (reversedValue !== input && shouldTreatAsReverseTextCandidate(input, reversedValue)) {
     segments.push(reversedValue);
     signals.push('REVERSE_TEXT');
   }

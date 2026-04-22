@@ -91,7 +91,12 @@ function log(level: keyof typeof LOG_LEVELS, message: string, extra: Record<stri
 async function generateResponderOutput(
   prompt: string,
   systemPrompt?: string,
+  runtimeConfig?: {
+    baseUrl?: string;
+    modelId?: string;
+  },
 ): Promise<{
+  modelId: string;
   response: string;
   usage?: {
     promptTokens?: number;
@@ -99,20 +104,35 @@ async function generateResponderOutput(
     totalTokens?: number;
   };
 }> {
-  const baseUrl = env.LLM_API_BASE_URL;
+  const baseUrlOverride = runtimeConfig?.baseUrl?.trim();
+  const modelIdOverride = runtimeConfig?.modelId?.trim();
+  const parsedBaseUrlOverride = baseUrlOverride
+    ? z.string().url().safeParse(baseUrlOverride)
+    : null;
+  if (parsedBaseUrlOverride && !parsedBaseUrlOverride.success) {
+    throw new Error('Responder base URL override must be a valid URL.');
+  }
+
+  const baseUrl = parsedBaseUrlOverride?.success ? parsedBaseUrlOverride.data : env.LLM_API_BASE_URL;
   const apiKey = env.LLM_API_KEY;
-  const modelId = responderModelId;
+  const modelId = modelIdOverride || responderModelId;
 
   if (!baseUrl || !apiKey || !modelId) {
     return {
+      modelId,
       response: 'Counter-Spy.ai backend accepted this clean prompt. Configure LLM_API_BASE_URL, LLM_API_KEY, and LLM_MODEL_ID to enable live downstream inference.',
     };
   }
 
   const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
-  const endpoint = normalizedBaseUrl.endsWith('/chat/completions')
+  const usesResponsesApi = normalizedBaseUrl.endsWith('/responses') || normalizedBaseUrl.endsWith('/v1');
+  const endpoint = normalizedBaseUrl.endsWith('/responses')
     ? normalizedBaseUrl
-    : `${normalizedBaseUrl}/chat/completions`;
+    : usesResponsesApi
+      ? `${normalizedBaseUrl}/responses`
+      : normalizedBaseUrl.endsWith('/chat/completions')
+        ? normalizedBaseUrl
+        : `${normalizedBaseUrl}/chat/completions`;
 
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -120,14 +140,23 @@ async function generateResponderOutput(
       'content-type': 'application/json',
       authorization: `Bearer ${apiKey}`,
     },
-    body: JSON.stringify({
-      model: modelId,
-      messages: [
-        ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-        { role: 'user', content: prompt },
-      ],
-      temperature: 0,
-    }),
+    body: JSON.stringify(
+      endpoint.endsWith('/responses')
+        ? {
+            model: modelId,
+            input: prompt,
+            ...(systemPrompt ? { instructions: systemPrompt } : {}),
+            store: true,
+          }
+        : {
+            model: modelId,
+            messages: [
+              ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
+              { role: 'user', content: prompt },
+            ],
+            temperature: 0,
+          },
+    ),
   });
 
   if (!response.ok) {
@@ -141,16 +170,51 @@ async function generateResponderOutput(
   }
 
   const payload = await response.json() as {
+    output_text?: string;
+    output?: Array<{
+      content?: Array<{ type?: string; text?: string }>;
+    }>;
     choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }>;
     usage?: {
+      input_tokens?: number;
+      output_tokens?: number;
       prompt_tokens?: number;
       completion_tokens?: number;
       total_tokens?: number;
     };
   };
+  if (typeof payload.output_text === 'string' && payload.output_text.trim()) {
+    return {
+      modelId,
+      response: payload.output_text,
+      usage: {
+        promptTokens: payload.usage?.input_tokens ?? payload.usage?.prompt_tokens,
+        completionTokens: payload.usage?.output_tokens ?? payload.usage?.completion_tokens,
+        totalTokens: payload.usage?.total_tokens,
+      },
+    };
+  }
+  const outputText = payload.output
+    ?.flatMap((item) => item.content ?? [])
+    .filter((part) => part?.type === 'output_text' || typeof part?.text === 'string')
+    .map((part) => part?.text ?? '')
+    .join('')
+    .trim();
+  if (outputText) {
+    return {
+      modelId,
+      response: outputText,
+      usage: {
+        promptTokens: payload.usage?.input_tokens ?? payload.usage?.prompt_tokens,
+        completionTokens: payload.usage?.output_tokens ?? payload.usage?.completion_tokens,
+        totalTokens: payload.usage?.total_tokens,
+      },
+    };
+  }
   const content = payload.choices?.[0]?.message?.content;
   if (typeof content === 'string') {
     return {
+      modelId,
       response: content,
       usage: {
         promptTokens: payload.usage?.prompt_tokens,
@@ -161,6 +225,7 @@ async function generateResponderOutput(
   }
   if (Array.isArray(content)) {
     return {
+      modelId,
       response: content.map((part) => part?.text ?? '').join('').trim(),
       usage: {
         promptTokens: payload.usage?.prompt_tokens,
@@ -496,6 +561,16 @@ app.get('/healthz', (_req: Request, res: Response) => {
     ok: true,
     service: 'counter-spy-backend',
     environment: appEnv,
+    responder: {
+      configured: Boolean(env.LLM_API_BASE_URL && env.LLM_API_KEY && responderModelId),
+      modelId: responderModelId || null,
+      baseUrl: env.LLM_API_BASE_URL || null,
+    },
+    translation: {
+      provider: 'lara',
+      configured: Boolean(env.LARA_ACCESS_KEY_ID && env.LARA_ACCESS_KEY_SECRET && env.LARA_API_BASE_URL),
+      baseUrl: env.LARA_API_BASE_URL || null,
+    },
   });
 });
 
@@ -545,14 +620,18 @@ app.post('/v1/intercept', async (req: Request, res: Response<InterceptResponse |
 
   try {
     const responderResult = await generateResponderOutput(
-      input.prompt,
+      sanitization.sanitized,
       typeof input.metadata?.finalSystemPrompt === 'string' ? input.metadata.finalSystemPrompt : undefined,
+      {
+        baseUrl: typeof input.metadata?.responderBaseUrl === 'string' ? input.metadata.responderBaseUrl : undefined,
+        modelId: typeof input.metadata?.responderModelId === 'string' ? input.metadata.responderModelId : undefined,
+      },
     );
 
     const response: InterceptResponse = {
       ...baseResponse,
       responder: {
-        modelId: responderModelId,
+        modelId: responderResult.modelId,
         response: responderResult.response,
         ...(responderResult.usage ? { usage: responderResult.usage } : {}),
       },
@@ -564,7 +643,7 @@ app.post('/v1/intercept', async (req: Request, res: Response<InterceptResponse |
     log('warn', 'responder_failed', {
       requestId,
       error: message,
-      modelId: responderModelId,
+      modelId: typeof input.metadata?.responderModelId === 'string' ? input.metadata.responderModelId : responderModelId,
     });
     res.status(502).json({ error: message });
   }

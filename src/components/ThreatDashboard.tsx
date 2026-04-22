@@ -146,6 +146,38 @@ function getSeverityBucket(log: any): SeverityBucket {
   return 'clean';
 }
 
+function getAutomatedSeverityBucket(log: any): SeverityBucket {
+  const detectionFlags = Array.isArray(log.detectionFlags) ? log.detectionFlags : [];
+  const upperResponse = typeof log.response === 'string' ? log.response.toUpperCase() : '';
+
+  if (log.status === 'PENDING_REVIEW' || detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW')) {
+    return 'review';
+  }
+  if (
+    Number(log.detectionLevel || 0) >= 3 ||
+    detectionFlags.includes('RESPONDER_BLOCK') ||
+    detectionFlags.includes('RESPONDER_REFUSAL')
+  ) {
+    return 'adversarial';
+  }
+  if (
+    detectionFlags.includes('POLICY_VIOLATION') ||
+    detectionFlags.includes('BLOCKED_KEYWORD') ||
+    detectionFlags.includes('FORBIDDEN_TOPIC') ||
+    detectionFlags.includes('REGEX_MATCH') ||
+    upperResponse.startsWith('POLICY VIOLATION DETECTED')
+  ) {
+    return 'policyViolation';
+  }
+  if (Number(log.detectionLevel || 0) === 2) {
+    return 'suspicious';
+  }
+  if (Number(log.detectionLevel || 0) === 1) {
+    return 'informational';
+  }
+  return 'clean';
+}
+
 function hasResponderIntervention(log: any): boolean {
   const detectionFlags = Array.isArray(log.detectionFlags) ? log.detectionFlags : [];
   return detectionFlags.some((flag: string) => RESPONDER_INTERVENTION_FLAGS.includes(flag));
@@ -158,12 +190,9 @@ function hasPolicyViolationSignal(flags: string[] = []): boolean {
     flags.includes('REGEX_MATCH');
 }
 
-function isFinalClean(log: any): boolean {
-  if (log.status === 'PENDING_REVIEW') return false;
-  if (log.reviewed === true && typeof log.resultantSeverity === 'string') {
-    return log.resultantSeverity === 'Clean' || log.resultantSeverity === 'Informational';
-  }
-  return getSeverityBucket(log) === 'clean' || getSeverityBucket(log) === 'informational';
+function wasOriginallyReleased(log: any): boolean {
+  const automatedSeverity = getAutomatedSeverityBucket(log);
+  return automatedSeverity === 'clean' || automatedSeverity === 'informational';
 }
 
 function wasPreInferenceBlocked(log: any): boolean {
@@ -199,7 +228,7 @@ function calculateLayerMetrics(logs: any[]) {
   const postModelEscapeCount = likelyMaliciousLogs.filter((log) =>
     !wasPreInferenceBlocked(log) &&
     !hasResponderIntervention(log) &&
-    isFinalClean(log)
+    wasOriginallyReleased(log)
   ).length;
 
   return {
@@ -976,7 +1005,7 @@ export function ThreatDashboard({
       <div className="grid grid-cols-2 gap-4">
         {/* Metric Cards */}
         {/* Current Threat Rate Card */}
-        <Card className="bg-card border-border shadow-sm">
+        <Card className="bg-card border-border shadow-sm overflow-visible">
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <span>Current Threat Rate (Last 1h)</span>
@@ -989,7 +1018,7 @@ export function ThreatDashboard({
         </Card>
         
         {/* Baseline Threat Rate Card */}
-        <Card className="bg-card border-border shadow-sm">
+        <Card className="bg-card border-border shadow-sm overflow-visible">
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <span>Baseline Threat Rate (24h Avg)</span>
@@ -1006,7 +1035,7 @@ export function ThreatDashboard({
       {fprMetrics && (
         <div className="grid grid-cols-2 gap-4">
           {/* False Positive Rate Card */}
-          <Card className="bg-card border-border shadow-sm">
+          <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
             <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <span>False Positive Rate</span>
@@ -1023,7 +1052,7 @@ export function ThreatDashboard({
           </Card>
 
           {/* False Negative Rate Card */}
-          <Card className="bg-card border-border shadow-sm">
+          <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
             <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <span>False Negative Rate</span>
@@ -1042,7 +1071,7 @@ export function ThreatDashboard({
       )}
 
       {/* Time-Series Chart */}
-      <Card className="bg-card border-border shadow-sm">
+      <Card className="bg-card border-border shadow-sm overflow-visible">
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <span>24-Hour Threat Velocity</span>
@@ -1091,7 +1120,7 @@ export function ThreatDashboard({
         </CardContent>
       </Card>
 
-      <Card className="bg-card border-border shadow-sm">
+      <Card className="bg-card border-border shadow-sm overflow-visible">
         <CardHeader className="pb-2">
           <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
             <span>24-Hour Alert Severity Trend</span>
@@ -1134,7 +1163,7 @@ export function ThreatDashboard({
 
       {operationalMetrics && (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          <Card className="bg-card border-border shadow-sm">
+          <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <span>HITL Queue</span>
@@ -1160,7 +1189,7 @@ export function ThreatDashboard({
             </CardContent>
           </Card>
 
-          <Card className="bg-card border-border shadow-sm">
+          <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <span>Latency Profile</span>
@@ -1189,7 +1218,7 @@ export function ThreatDashboard({
             </CardContent>
           </Card>
 
-          <Card className="bg-card border-border shadow-sm">
+          <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <span>Resilience Signals</span>
@@ -1218,7 +1247,7 @@ export function ThreatDashboard({
             </CardContent>
           </Card>
 
-          <Card className="bg-card border-border shadow-sm">
+          <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <span>Alert (By Severity)</span>
@@ -1253,7 +1282,7 @@ export function ThreatDashboard({
             </CardContent>
           </Card>
 
-          <Card className="bg-card border-border shadow-sm">
+          <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <span>Defense Funnel</span>
@@ -1302,7 +1331,7 @@ export function ThreatDashboard({
             </CardContent>
           </Card>
 
-          <Card className="bg-card border-border shadow-sm">
+          <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <span>Detection Signals</span>
@@ -1345,7 +1374,7 @@ export function ThreatDashboard({
               </CardContent>
           </Card>
 
-          <Card className="bg-card border-border shadow-sm">
+          <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <span>Prompt Shape</span>
@@ -1375,7 +1404,7 @@ export function ThreatDashboard({
       )}
 
       {operationalMetrics && (
-        <Card className="bg-card border-border shadow-sm">
+        <Card className="bg-card border-border shadow-sm overflow-visible">
           <CardHeader className="pb-2">
             <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <span>MITRE ATLAS Technique Heat Map</span>

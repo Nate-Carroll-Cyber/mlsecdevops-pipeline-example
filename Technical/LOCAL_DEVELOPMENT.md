@@ -40,11 +40,11 @@ VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev
 
 Open `http://localhost:3000/`.
 
-Clean prompts are routed to the backend gateway. The backend currently reports the configured safeguards model as `gpt-oss-safeguards20B`, while the downstream responder now uses backend-managed environment settings only. The admin gear in the frontend is limited to optional responder telemetry such as max context window.
+Clean prompts are routed to the backend gateway. The backend currently reports the configured safeguards model as `gpt-oss-safeguards20B`, while the configured backend responder uses backend-managed credentials plus optional browser-local Base URL and Model ID overrides from the admin gear in Analyst Chat. In the current runtime, that configured LLM is guided by the active firewall prompt, the active guardrails policy, optional forbidden-topics guidance, and relevant Knowledge Base policy context. Max context window is now a browser-local submission limit used by Analyst Chat and the Prompt Playground before dispatch.
 
 ### Optional: Live Downstream LLM Testing
 
-If you want clean Analyst Chat prompts to continue into a real OpenAI-compatible `/chat/completions` endpoint, configure the backend env vars and restart the backend.
+If you want clean Analyst Chat prompts to continue into a real downstream model, configure the backend env vars and restart the backend.
 
 Backend env option:
 
@@ -52,7 +52,15 @@ Backend env option:
 - `LLM_API_KEY`
 - `LLM_MODEL_ID`
 
-Then, if the provider returns token usage metadata, Audit Log details will show prompt tokens, completion tokens, total tokens, and estimated context utilization. You can optionally set **Max Context Window** from the admin gear under **System Status** to estimate remaining headroom in the UI.
+Then, if the provider returns token usage metadata, Audit Log details will show prompt tokens, completion tokens, total tokens, and estimated context utilization. You can optionally set **Max Context Window** from the admin gear under **System Status** to block over-limit requests before send and to compute post-run utilization in the UI.
+
+Purpose of the UI fields under **Responder Telemetry Settings**:
+
+- **LLM Base URL**: Browser-local override for the downstream responder endpoint. For OpenAI, set this to `https://api.openai.com/v1`; the backend will call the `responses` API under that root.
+- **Model ID**: Browser-local override for the downstream responder model used by Analyst Chat clean traffic.
+- **Max Context Window**: Browser-local max request budget. Analyst Chat and the Prompt Playground estimate the full forwarded request footprint, including runtime system prompt scaffolding and Knowledge Base context, and block submissions that exceed this value.
+
+These overrides are sent with each Analyst Chat intercept request from that browser only. They do not store or override API credentials in the frontend. The Prompt Playground uses the same estimator so its warning state and submit gate align with Analyst Chat.
 
 ### Optional: Lara Translate API Translation
 
@@ -143,7 +151,7 @@ If your ingest run includes `expectedVerdict` labels, the escape-rate math will 
 
 Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`.
 
-Note: in the current demo build, Sam Spade clean turns still use deterministic noir reply logic inside the Sam Spade service after guardrail approval. They do not yet call the same live downstream responder used by Analyst Chat.
+Note: in the current demo build, Sam Spade clean turns still use deterministic noir reply logic inside the Sam Spade service after guardrail approval. They do not yet call the same live downstream responder used by Analyst Chat. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.
 
 ## Backend Smoke Tests
 

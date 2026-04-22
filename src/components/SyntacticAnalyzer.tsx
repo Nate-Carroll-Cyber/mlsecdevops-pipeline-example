@@ -78,6 +78,8 @@ interface SyntacticAnalyzerProps {
   onSubmitPrompt?: (prompt: string) => Promise<void>;
   // Optional flag showing the shared send pipeline is already busy
   isSubmitting?: boolean;
+  maxContextWindow?: number;
+  estimatePromptTokens?: (prompt: string) => number;
 }
 
 interface LanguagePipelineResult {
@@ -88,7 +90,15 @@ interface LanguagePipelineResult {
 }
 
 // Export the SyntacticAnalyzer functional component
-export function SyntacticAnalyzer({ systemConfig, activeGuardrails, governanceConfig, onSubmitPrompt, isSubmitting = false }: SyntacticAnalyzerProps) {
+export function SyntacticAnalyzer({
+  systemConfig,
+  activeGuardrails,
+  governanceConfig,
+  onSubmitPrompt,
+  isSubmitting = false,
+  maxContextWindow,
+  estimatePromptTokens,
+}: SyntacticAnalyzerProps) {
   // State to hold the current text input by the user
   const [promptText, setPromptText] = useState('');
   const [researchEntries, setResearchEntries] = useState<PlaygroundMetricEntry[]>([]);
@@ -251,6 +261,15 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, governanceCo
     : undefined;
   const availableObfuscationTechniques = getObfuscationTechniques(obfuscationCategory);
   const canRunSanitization = Boolean(systemConfig && activeGuardrails);
+  const estimatedPromptTokens = estimatePromptTokens && promptText.trim()
+    ? estimatePromptTokens(promptText)
+    : null;
+  const exceedsContextWindow = Boolean(
+    estimatedPromptTokens !== null &&
+    Number.isFinite(maxContextWindow) &&
+    (maxContextWindow ?? 0) > 0 &&
+    estimatedPromptTokens > (maxContextWindow ?? 0),
+  );
   const backendApiBaseUrl = getBackendApiBaseUrl();
   const translationModeLabel = translationMode === 'recover_to_english'
     ? 'Recover to English'
@@ -624,6 +643,10 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, governanceCo
   // Route the current prompt through the shared live firewall pipeline.
   const submitToPipeline = async () => {
     if (!promptText.trim() || !onSubmitPrompt || isSubmitting) return;
+    if (exceedsContextWindow && estimatedPromptTokens !== null && maxContextWindow) {
+      setSubmitError(`Estimated forwarded prompt footprint ${estimatedPromptTokens} tokens exceeds the configured max context window of ${maxContextWindow}.`);
+      return;
+    }
 
     setSubmitError(null);
     try {
@@ -692,7 +715,7 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, governanceCo
             type="button"
             className="bg-indigo-600 text-white hover:bg-indigo-500"
             onClick={() => { void submitToPipeline(); }}
-            disabled={!promptText.trim() || !analysis.fullSanitization || !onSubmitPrompt || isSubmitting}
+            disabled={!promptText.trim() || !analysis.fullSanitization || !onSubmitPrompt || isSubmitting || exceedsContextWindow}
           >
             <Send className="w-4 h-4 mr-2" />
             {isSubmitting ? 'Submitting...' : 'Submit to Firewall'}
@@ -753,6 +776,22 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, governanceCo
         <Badge variant="outline" className="border-slate-700 text-slate-300">
           Browser-local research store
         </Badge>
+        {estimatedPromptTokens !== null && (
+          <Badge
+            variant="outline"
+            className={exceedsContextWindow ? 'border-rose-500 text-rose-300' : 'border-slate-700 text-slate-300'}
+          >
+            Estimated Prompt Tokens: {estimatedPromptTokens}
+          </Badge>
+        )}
+        {Number.isFinite(maxContextWindow) && (maxContextWindow ?? 0) > 0 && (
+          <Badge
+            variant="outline"
+            className={exceedsContextWindow ? 'border-rose-500 text-rose-300' : 'border-slate-700 text-slate-300'}
+          >
+            Max Context Window: {maxContextWindow}
+          </Badge>
+        )}
       </div>
 
       {submitError && (
@@ -760,6 +799,12 @@ export function SyntacticAnalyzer({ systemConfig, activeGuardrails, governanceCo
           {submitError}
         </div>
       )}
+
+      {exceedsContextWindow && estimatedPromptTokens !== null && maxContextWindow ? (
+        <div className="rounded-lg border border-amber-500/40 bg-amber-950/30 px-4 py-3 text-sm text-amber-100">
+          This prompt is estimated at {estimatedPromptTokens} tokens after the forwarded firewall envelope, which exceeds the configured max context window of {maxContextWindow}. Raise the limit in the Analyst Chat settings dialog before submitting.
+        </div>
+      ) : null}
 
       {/* Input Area for the prompt */}
       <textarea

@@ -65,6 +65,9 @@ const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:bro
 const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
 const SUSPICIOUS_ENTROPY_THRESHOLD = 4.0;
 const ADVERSARIAL_ENTROPY_THRESHOLD = 4.8;
+const SCRIPT_TAG_REGEX = /<script\b[^>]*(?:>[\s\S]*?<\/script>|\s*\/?>)/gi;
+const URL_WITH_SCHEME_REGEX = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/gi;
+const JAVASCRIPT_URI_REGEX = /\bjavascript:[^\s<>"']*/gi;
 
 // Enum defining the severity levels of detected threats
 export enum DetectionLevel {
@@ -128,6 +131,52 @@ function calculateEntropy(str: string): number {
     return sum - p * Math.log2(p);
   // Start the sum at 0
   }, 0);
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function redactPolicyMatchedContent(
+  input: string,
+  blockedKeywordsList: string[],
+  options: {
+    containsBlockedKeyword: boolean;
+    externalCallDetected: boolean;
+  },
+): string {
+  let next = input;
+
+  if (options.containsBlockedKeyword || options.externalCallDetected) {
+    next = next.replace(SCRIPT_TAG_REGEX, '[REDACTED_SCRIPT_TAG]');
+  }
+
+  const normalizedKeywords = blockedKeywordsList
+    .map((keyword) => keyword.trim().toLowerCase())
+    .filter(Boolean);
+  const shouldRedactUrls = options.externalCallDetected || normalizedKeywords.includes('://');
+  const shouldRedactJavascriptUris = normalizedKeywords.includes('javascript:');
+
+  if (shouldRedactUrls) {
+    next = next.replace(URL_WITH_SCHEME_REGEX, '[REDACTED_URL]');
+  }
+
+  if (shouldRedactJavascriptUris) {
+    next = next.replace(JAVASCRIPT_URI_REGEX, '[REDACTED_JAVASCRIPT_URI]');
+  }
+
+  if (options.containsBlockedKeyword) {
+    for (const keyword of blockedKeywordsList) {
+      const normalizedKeyword = keyword.trim();
+      if (!normalizedKeyword) continue;
+      next = next.replace(
+        new RegExp(escapeRegExp(normalizedKeyword), 'gi'),
+        '[REDACTED_BLOCKED_KEYWORD]',
+      );
+    }
+  }
+
+  return next;
 }
 
 // Shannon entropy alone underestimates many symbol-substitution attacks because
@@ -440,6 +489,7 @@ export function sanitizeInput(
   let transformedSignalsUsed: ObfuscationSignal[] = [];
   let normalizedTransformedSegments: string[] = [];
   let decodeTelemetry = obfuscationAnalysis.decodeTelemetry;
+  let keywordsToCheck: string[] = [];
 
   // Policy matching stage: blocked keywords.
   // We check the original normalized text, spelling-recovered text, translated
@@ -447,7 +497,7 @@ export function sanitizeInput(
   if (guardrails.blockedKeywords) {
     // Default hardcoded keywords if none provided, otherwise use provided
     // Determine which list of keywords to check against
-    const keywordsToCheck = blockedKeywordsList.length > 0 
+    keywordsToCheck = blockedKeywordsList.length > 0 
       ? blockedKeywordsList 
       : [
           'ignore all previous instructions',
@@ -584,6 +634,11 @@ export function sanitizeInput(
     if (!redactions.includes('COORDINATE_CIPHER')) redactions.push('COORDINATE_CIPHER');
   }
 
+  sanitized = redactPolicyMatchedContent(sanitized, keywordsToCheck, {
+    containsBlockedKeyword,
+    externalCallDetected,
+  });
+
   // Policy matching stage: custom regex rules from system configuration.
   let containsRegexMatch = false;
   // If the regex rules guardrail is enabled
@@ -715,7 +770,7 @@ export function sanitizeInput(
 export interface OutputSanitizationResult {
   // The sanitized output string
   sanitized: string;
-  // Flag indicating if the output triggered an escalation (e.g., blocked keyword found)
+  // Flag indicating if the output triggered an escalation beyond passive redaction.
   triggeredEscalation: boolean;
   // Array of redaction types applied
   redactions: string[];
@@ -851,11 +906,11 @@ export function sanitizeOutput(
       }
 
       if (directHit || normalizedTransformedSegments.length > 0) {
-        // Set the escalation flag to true
-        triggeredEscalation = true;
         // Reset regex lastIndex just in case, though replace with global flag handles it
         regex.lastIndex = 0; 
-        // Replace all occurrences of the blocked term with a redaction placeholder
+        // Redact blocked terms in model output, but do not let that alone raise
+        // the audit severity. Responder-decision logic remains responsible for
+        // true policy escalation.
         sanitized = sanitized.replace(regex, '[REDACTED_KEYWORD]');
         if (obfuscationAnalysis.usedObfuscation && !redactions.includes('OBFUSCATED_INSTRUCTION')) {
           redactions.push('OBFUSCATED_INSTRUCTION');

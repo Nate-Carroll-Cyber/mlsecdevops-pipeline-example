@@ -3,6 +3,7 @@
 | Version | Date | Description |
 | :--- | :--- | :--- |
 | v1.0 | 2026-04-18 | Initial integration specification for the Sam Spade conversational CTF inside Counter-Spy.ai. |
+| v1.1 | 2026-04-21 | Runtime sync: provenance normalized to `ctf_chat`, and every submission now mirrors into the shared governed review path even though clean gameplay replies remain deterministic. |
 
 ---
 
@@ -190,9 +191,9 @@ Counter-Spy.ai should treat the Sam Spade game as another governed input source.
 
 ### 7.1 New Provenance Source
 
-Add a new audit provenance source:
+Use the current audit provenance source:
 
-- `ctf_sam_spade`
+- `ctf_chat`
 
 This allows:
 - filtering game traffic separately from Analyst Chat and Bulk Ingest
@@ -205,6 +206,7 @@ This allows:
 - detect obfuscation, injection, exfiltration, and non-plain-text garbage
 - decide whether to block, queue, or forward
 - persist the authoritative audit event
+- mirror each submission into the same governed Analyst Chat review path used by other intake surfaces
 - preserve request and response lineage for analyst review
 
 ### 7.3 Desired Policy Posture
@@ -273,7 +275,7 @@ The backend should maintain per-session state, for example:
 type SamSpadeSessionState = {
   sessionId: string;
   userId: string;
-  source: 'ctf_sam_spade';
+  source: 'ctf_chat';
   trustScore: number;
   pressureScore: number;
   suspicionScore: number;
@@ -432,7 +434,7 @@ The first integration does not need to be large.
 
 - finalize scenario fields and win conditions
 - define request/response contracts
-- add `ctf_sam_spade` provenance
+- standardize on `ctf_chat` provenance
 - define session state model
 
 ### Phase 2: Minimal Game Frontend

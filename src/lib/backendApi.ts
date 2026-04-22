@@ -44,6 +44,16 @@ const BackendHealthResponseSchema = z.object({
   ok: z.boolean(),
   service: z.string(),
   environment: z.string(),
+  responder: z.object({
+    configured: z.boolean(),
+    modelId: z.string().nullable(),
+    baseUrl: z.string().nullable(),
+  }).optional(),
+  translation: z.object({
+    provider: z.literal('lara'),
+    configured: z.boolean(),
+    baseUrl: z.string().nullable(),
+  }).optional(),
 });
 
 const SamSpadeMessageSchema = z.object({
@@ -139,6 +149,16 @@ export interface BackendHealthResponse {
   ok: boolean;
   service: string;
   environment: string;
+  responder?: {
+    configured: boolean;
+    modelId: string | null;
+    baseUrl: string | null;
+  };
+  translation?: {
+    provider: 'lara';
+    configured: boolean;
+    baseUrl: string | null;
+  };
 }
 
 export interface SamSpadeMessage {

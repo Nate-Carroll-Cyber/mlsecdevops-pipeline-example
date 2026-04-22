@@ -13,7 +13,7 @@ Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure La
 ### 1.1 Logical Flow
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
-2.  **The Sword (Backend-Mediated Inference):** The downstream responder receives only the "cleansed" and governed payload through the backend gateway, with endpoint selection and credentials managed server-side rather than in the browser.
+2.  **The Sword (Backend-Mediated Inference):** The downstream responder receives only the governed payload through the backend gateway, with credentials managed server-side and optional browser-local Base URL / Model ID overrides available for clean traffic.
 
 ### 1.2 System Resilience & Fallback Policies
 The Beta implementation adheres to a **Fail-Secure** philosophy across all critical components:
@@ -21,8 +21,8 @@ The Beta implementation adheres to a **Fail-Secure** philosophy across all criti
 | Component | Failure Scenario | Policy | Outcome |
 | :--- | :--- | :--- | :--- |
 | **Shield Engine** | Timeout / 5xx Error | **Fail-Secure** | Request is blocked; user receives a 503 Service Unavailable. |
-| **Governance Sync** | Database Connection Loss | **Fail-Secure** | System defaults to `isGlobalPause: true` until state is verified. |
-| **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | Execution halts; payload is discarded and logged as `Adversarial`. |
+| **Governance Sync** | Database Connection Loss | **Best-Effort Sync** | The app keeps its current in-memory/default governance state. It does not automatically force `isGlobalPause: true` on startup or sync failure. |
+| **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | If sanitization latency exceeds 100ms, the triggering request is blocked before inference, logged as `Adversarial` with `ReDoS_ATTEMPT_DETECTED`, and automatic Global System Pause is activated for subsequent traffic. |
 
 ---
 
@@ -45,7 +45,7 @@ The analyzer uses a weighted heuristic to detect "Instruction Stacking":
 
 ### 3.1 Global Pause (HOTL) Persistence
 The governance state is persisted in Firestore (`config/governance`). 
-*   **Container Restart Behavior:** Upon initialization, the system defaults to a **Fail-Secure (Paused)** state. It remains in this state until a successful handshake with the database confirms the current `isGlobalPause` value. This prevents "Fail-Open" windows during container scaling or recovery events.
+*   **Current runtime behavior:** The frontend initializes `isGlobalPause` to `false` and then overlays Firestore state when the governance document arrives. In local review mode the same state remains in memory only. Startup should not be treated as implicitly paused.
 
 ### 3.2 Audit Log Retention
 *   **Policy:** By default, logs are intended to be permanent for forensic auditability.
@@ -61,7 +61,7 @@ The governance state is persisted in Firestore (`config/governance`).
 ### 4.1 Anti-ReDoS Circuit Breaker
 *   **Logic:** Every `sanitizeInput` execution is wrapped in a high-resolution timing block (`performance.now()`).
 *   **Threshold:** 100ms.
-*   **Policy:** Any payload causing execution to exceed 100ms is treated as a potential ReDoS attack. The process is killed, and the event is logged as `Adversarial` with the `REDOS_ATTEMPT` flag.
+*   **Policy:** Any sanitization pass completing above 100ms is treated as a potential ReDoS event. The triggering request is blocked before inference, logged as `Adversarial` with the `ReDoS_ATTEMPT_DETECTED` flag, and contributes to both the `ReDoS Trips` resilience metric and the Defense Funnel's pre-inference blocked count.
 
 ---
 
@@ -75,6 +75,7 @@ External services must authenticate with the Counter-Spy gateway using **Bearer 
     *   **Claims:** Validation requires `sub` (subject), `aud` (audience), and `exp` (expiration).
     *   **Policy:** Tokens are validated per-request; no local caching of validation state is performed in the Beta to ensure immediate revocation propagation.
     *   **TTL:** Token lifespan and refresh cycles are governed by the Identity Provider's policy.
+*   **Current Beta Note:** In dev, the backend can run without a bearer token. Outside dev, `INTERCEPT_BEARER_TOKEN` can be required before the gateway serves `/v1/intercept`.
 *   **Future Support:** Integration with **AWS IAM SigV4** is planned for service-to-service communication within VPC environments.
 
 ### 5.2 Endpoint Specification
@@ -97,14 +98,16 @@ External services must authenticate with the Counter-Spy gateway using **Bearer 
 | `403` | `INTERCEPTED` | Shield blocked payload (Adversarial/Suspicious). |
 | `503` | `SHIELD_ERROR` | Fail-Secure block due to Shield Engine timeout/failure. |
 
+Downstream responder outcomes such as `ALLOW_AND_FORWARD`, `BLOCK`, `FAIL_SECURE`, and `QUEUE_FOR_REVIEW` are normalized back into Counter-Spy.ai audit severity and review state before they land in the audit trail.
+
 ---
 
 ## 6. Operational Controls: Telemetry Isolation
 
-### 6.1 The `isSimulation` Flag
-The `isSimulation` flag isolates test/demonstration traffic from production metrics.
-*   **Metrics Isolation:** The `ThreatDashboard` filters Firestore queries to exclude logs where `isSimulation == true`.
-*   **DPO Labeling:** Simulated logs carry `batchId` and `expectedVerdict` metadata, allowing analysts to perform "False Negative" audits without skewing the real-world threat velocity baseline.
+### 6.1 The `source` Field
+The `source` field preserves provenance without hiding traffic from the primary analyst views.
+*   **Metrics Isolation:** Records can distinguish `analyst_chat`, `playground`, `bulk_ingest`, and `ctf_chat` traffic while still remaining visible in the same operational surfaces.
+*   **DPO Labeling:** Bulk-ingest records carry `batchId` and `expectedVerdict` metadata, allowing analysts to perform false-negative audits without losing the surrounding production-like context.
 
 ### 6.2 Metrics Architecture
 The platform utilizes a real-time anomaly detection engine to monitor threat velocity.

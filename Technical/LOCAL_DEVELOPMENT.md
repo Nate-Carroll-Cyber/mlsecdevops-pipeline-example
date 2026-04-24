@@ -139,7 +139,7 @@ The frontend uses Vite's proxy layer inside the container to reach the backend c
 
 If you want Lara translation available in that Docker demo, make sure `.env.demo.local` exists before you bring the stack up.
 
-Bulk ingest note: every new ingest run now clears the browser-local Playground research log before recording the incoming batch, so the Research Log sample count reflects the current uploaded set instead of accumulating older local runs.
+Bulk ingest note: every new ingest run now clears the browser-local Playground research log before recording the incoming batch, so the Research Log sample count reflects the current uploaded set instead of accumulating older local runs. The uploader currently accepts one-line prompts, explicit `===PROMPT===` / `===END===` blocks, blank-line-separated multi-line prompts, and common numbered-entry layouts, and the UI reports the parsed count and parser mode at ingest start.
 
 Metrics note: the Security Operations view now includes a **Defense Funnel** card that summarizes three layered rates from the current log set:
 

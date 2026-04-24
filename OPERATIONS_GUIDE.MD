@@ -9,7 +9,7 @@
 
 ## 1. Operational Overview
 
-Counter-Spy.ai is an **Adversary-Aware Security Gateway**. It sits between untrusted user input and Large Language Models (LLMs) to provide a deterministic security layer. Unlike traditional firewalls, it does not simply block known bad patterns — it analyzes the **intent, complexity, and randomness** of incoming traffic to identify zero-day prompt injections and model reverse-engineering attempts.
+Counter-Spy.ai is an **Adversary-Aware Security Gateway**. It sits between untrusted user input and Large Language Models (LLMs) to provide a deterministic security layer. Unlike traditional firewalls, it does not simply block known bad patterns — it analyzes the **intent, complexity, and randomness** of incoming traffic to identify zero-day prompt injections and model reverse-engineering attempts. In the current Beta, deterministic enforcement and model guidance are both present: exact policy hits remain phrase-based, while the saved firewall prompt also steers the decision model across the operator-managed forbidden categories.
 
 As an Analyst or Administrator, you are the final decision-maker in the **Human-in-the-Loop (HITL)** cycle. Your primary goal is to maintain the balance between **System Resilience** (blocking attacks) and **User Experience** (minimizing false positives).
 
@@ -80,6 +80,8 @@ $$H(X) = -\sum_{i=1}^{n} P(x_i) \log_b P(x_i)$$
 | **Syntactic Complexity** | 50 | 90 | Catching instruction stacking |
 
 Operator note: entropy now has two roles. First, it contributes a direct verdict band: above `3.2` is `Suspicious`, and above the configured threshold is `Adversarial`. Second, it still acts as supporting concealment telemetry in Prompt Details and Metrics. Recognized obfuscation families remain adversarial by policy even when the entropy score alone would not cross the configured ceiling.
+
+Operator note: `Blocked Topics` metrics currently count normalized phrase-family hits, not a separate semantic topic classifier. If a request is semantically close to a forbidden category but does not literally match one of the configured topic phrases after supported recovery or normalization, it may still be influenced by the firewall prompt without incrementing `Topic Hits`.
 
 ---
 
@@ -190,3 +192,4 @@ Counter-Spy.ai currently operates as a plain-text English chatbot control plane.
 - Analysts should not expect leetspeak, ROT13, symbol substitution, coordinate ciphers, recursive decode chains, or similar concealment patterns to remain merely `Suspicious`.
 - Alphabetic substitution gibberish that scores as low-English-likeness under the local trigram / bounded Caesar-shift heuristic is also treated as an obfuscation-family adversarial signal, even if it contains only letters and spaces.
 - If a prompt is already carrying a local obfuscation-family `Adversarial` verdict, the user-facing response should be a local detection banner, not `Backend Error`. Treat any backend-availability message on a clearly obfuscated prompt as a routing bug worth investigation.
+- Position-style or indexed vertical text layouts may still under-detect compared with simpler one-character-per-line vertical text. Treat those misses as detector-coverage gaps rather than as evidence that the obfuscation policy itself is disabled.

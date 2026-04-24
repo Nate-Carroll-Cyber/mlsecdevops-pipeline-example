@@ -18,6 +18,7 @@ The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
 2.  **The Sword (Backend-Mediated Inference):** The downstream responder receives only the governed payload through the backend `/v1/intercept` route. Credentials remain backend-owned, while the UI can provide browser-local Base URL and Model ID overrides for clean traffic without exposing provider secrets in the browser.
     *   **Current prompt-contract note:** The active decision model is guided by the visible firewall prompt, the active guardrails policy, optional forbidden-topics guidance, and relevant Knowledge Base policy context. The separate downstream responder prompt remains reserved for a later multi-stage responder architecture.
+    *   **Current forbidden-category note:** The saved firewall prompt now explicitly instructs the decision model to treat the configured high-level forbidden categories semantically, including indirect, paraphrased, translated, obfuscated, or substantially equivalent forms, while storytelling remains non-exempt if used to smuggle one of those categories.
     *   **Current telemetry and gating note:** When the provider returns usage metadata, the gateway surfaces prompt/completion/total token counts. The browser can also apply an operator-supplied max context window as a pre-submit gate in Analyst Chat and the Prompt Playground, then reuse that same value to compute post-run context utilization for audit review.
 *   **Manual Translation Gateway (`/v1/translate`)**:
     *   Owns backend-only Lara Translate access for the Playground.
@@ -69,6 +70,7 @@ The current Beta now enforces a stricter plain-text-English-chatbot posture for 
 *   **Covered families:** URL encoding, HTML entities, unicode escapes, compatibility glyphs, symbol substitution, leetspeak, ROT13, reverse text, NATO phonetic, Morse code, braille, regional indicators, recursive decode chains, chunking, variable expansion, vertical text, coordinate ciphers, and low-English-likeness alphabetic gibberish.
 *   **Reasoning:** Counter-Spy.ai now treats concealment itself as hostile behavior in the governed prompt path, rather than as a lower-severity curiosity that waits for a second content-based match.
 *   **Execution boundary:** Recognized obfuscation-family adversarial verdicts are terminal at the local shield layer. Those prompts should not proceed into the backend `/v1/intercept` path, and backend-availability fallback messages should only appear for prompts that were locally eligible for downstream inference.
+*   **Known coverage gap:** The current vertical-text detector is strongest on narrow one-character-per-line layouts. Position-indexed or more structured vertical layouts may still bypass this family detector until coverage is broadened.
 
 ---
 

@@ -14,6 +14,7 @@ Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure La
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
 2.  **The Sword (Backend-Mediated Inference):** The downstream responder receives only the governed payload through the backend gateway, with credentials managed server-side and optional browser-local Base URL / Model ID overrides available for clean traffic.
+    *   **Current forbidden-category note:** The saved firewall prompt now tells the decision model to treat the configured high-level forbidden categories semantically, including indirect, paraphrased, translated, obfuscated, or substantially equivalent requests, while storytelling remains non-exempt if used to smuggle one of those categories.
 
 ### 1.2 System Resilience & Fallback Policies
 The Beta implementation adheres to a **Fail-Secure** philosophy across all critical components:
@@ -57,6 +58,7 @@ Counter-Spy.ai now treats prompt concealment itself as a hostile act in the gove
 *   **Policy:** Any recognized obfuscation signal is classified as `Adversarial`, even if the concealed content would otherwise decode into something benign.
 *   **Covered families:** URL encoding, HTML entities, unicode escapes, compatibility glyphs, symbol substitution, leetspeak, ROT13, reverse text, NATO phonetic, Morse code, braille, regional indicators, recursive decode chains, coordinate ciphers, structural wrappers, and low-English-likeness alphabetic gibberish.
 *   **Routing rule:** Once the frontend sanitizer classifies a prompt as obfuscation-family `Adversarial` or otherwise locally `Suspicious`/`Adversarial`, that prompt should terminate before backend inference. Backend error messaging is reserved for prompts that were actually allowed to attempt `/v1/intercept`.
+*   **Known coverage gap:** The present `VERTICAL_TEXT` family is still narrow and can miss some position-indexed or structured vertical layouts even though the overall policy treats such concealment as adversarial when recognized.
 
 ---
 
@@ -127,6 +129,7 @@ Downstream responder outcomes such as `ALLOW_AND_FORWARD`, `BLOCK`, `FAIL_SECURE
 The `source` field preserves provenance without hiding traffic from the primary analyst views.
 *   **Metrics Isolation:** Records can distinguish `analyst_chat`, `playground`, `bulk_ingest`, and `ctf_chat` traffic while still remaining visible in the same operational surfaces.
 *   **DPO Labeling:** Bulk-ingest records carry `batchId` and `expectedVerdict` metadata, allowing analysts to perform false-negative audits without losing the surrounding production-like context.
+*   **Local Review Note:** In local review mode, Metrics now use the full in-memory audit set instead of truncating counts to the newest 50 records.
 
 ### 6.2 Metrics Architecture
 The platform utilizes a real-time anomaly detection engine to monitor threat velocity.

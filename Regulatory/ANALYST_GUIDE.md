@@ -93,11 +93,11 @@ Thresholds can be adjusted in the **Knowledge Base -> System Configuration** sec
 ### 5.1 Recommended Baselines
 | Guardrail | Suspicious Threshold | Adversarial Threshold | Description |
 | :--- | :--- | :--- | :--- |
-| **Entropy** | 4.5 | 5.5 | Detects obfuscated payloads (Base64, Hex). |
+| **Entropy** | > 3.6 | Configured Entropy Threshold | Detects obfuscated payloads and borderline high-entropy prompts. |
 | **Syntactic Complexity** | 50 | 90 | Detects instruction stacking and probing. |
 
 > [!NOTE]
-> If you notice a high False Positive Rate (FPR), consider raising the Suspicious Entropy threshold to 4.8. If you are missing "jailbreak" attempts, lower the Syntactic Complexity threshold to 40.
+> If you notice a high False Positive Rate (FPR), consider raising the configured Entropy Threshold. If you are missing "jailbreak" attempts, lower the Syntactic Complexity threshold to 40.
 
 ---
 

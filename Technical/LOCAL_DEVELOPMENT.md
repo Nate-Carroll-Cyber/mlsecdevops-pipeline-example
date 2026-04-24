@@ -40,27 +40,48 @@ VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev
 
 Open `http://localhost:3000/`.
 
-Clean prompts are routed to the backend gateway. The backend currently reports the configured safeguards model as `gpt-oss-safeguards20B`, while the configured backend responder uses backend-managed credentials plus optional browser-local Base URL and Model ID overrides from the admin gear in Analyst Chat. In the current runtime, that configured LLM is guided by the active firewall prompt, the active guardrails policy, optional forbidden-topics guidance, and relevant Knowledge Base policy context. Max context window is now a browser-local submission limit used by Analyst Chat and the Prompt Playground before dispatch.
+Clean prompts are routed to the backend gateway. The gateway runs local prechecks first, calls a separately configured OpenAI-compatible safeguard judge, and forwards to the downstream responder only after the safeguard judge returns `CLEAN`. Analyst Chat safeguard configuration remains separate from the responder provider, Base URL, Model ID, API key, and context-window controls in the **Responder** tab. In the current runtime, clean responder calls are guided by the active Downstream Responder Prompt and relevant Knowledge Base policy context. Max context window is now a browser-local submission limit used by Analyst Chat and the Prompt Playground before dispatch.
 
-### Optional: Live Downstream LLM Testing
+### Optional: Live Safeguard LLM Testing
 
-If you want clean Analyst Chat prompts to continue into a real downstream model, configure the backend env vars and restart the backend.
+If you want Analyst Chat to use a real OpenAI-compatible safeguard judge before responder forwarding, configure the backend env vars and restart the backend.
 
 Backend env option:
 
-- `LLM_API_BASE_URL`
-- `LLM_API_KEY`
-- `LLM_MODEL_ID`
+- `SAFEGUARDS_API_BASE_URL`
+- `SAFEGUARDS_API_KEY`
+- `SAFEGUARDS_MODEL_ID`
 
-Then, if the provider returns token usage metadata, Audit Log details will show prompt tokens, completion tokens, total tokens, and estimated context utilization. You can optionally set **Max Context Window** from the admin gear under **System Status** to block over-limit requests before send and to compute post-run utilization in the UI.
+Purpose of the UI fields under Analyst Chat **System Status** settings:
 
-Purpose of the UI fields under **Responder Telemetry Settings**:
+- **Safeguard Base URL**: Browser-local OpenAI-compatible endpoint override for the firewall judge.
+- **Safeguard Model ID**: Browser-local model override for the firewall judge.
+- **Safeguard API Key**: Browser-memory-only key override sent to the local backend with Analyst Chat intercept requests. It is not written to localStorage.
 
-- **LLM Base URL**: Browser-local override for the downstream responder endpoint. For OpenAI, set this to `https://api.openai.com/v1`; the backend will call the `responses` API under that root.
-- **Model ID**: Browser-local override for the downstream responder model used by Analyst Chat clean traffic.
+The safeguard judge must return a structured JSON verdict. The backend also normalizes legacy `ALLOW_AND_FORWARD`, `QUEUE_FOR_REVIEW`, `BLOCK`, and `FAIL_SECURE` decisions into `CLEAN`, `SUSPICIOUS`, or `ADVERSARIAL` so older firewall contracts remain compatible. If the safeguard judge is unavailable or rejects the request, `/v1/intercept` fails closed and does not call the downstream responder.
+
+### Optional: Live Downstream LLM Testing
+
+If you want prompts that clear the safeguard judge to continue into a real downstream model, configure the backend env vars and restart the backend.
+
+Backend env option:
+
+- `RESPONDER_PROVIDER`
+- `RESPONDER_API_BASE_URL`
+- `RESPONDER_API_KEY`
+- `RESPONDER_MODEL_ID`
+
+Then, if the provider returns token usage metadata, Audit Log details will show prompt tokens, completion tokens, total tokens, and estimated context utilization. You can optionally set **Max Context Window** from the **Responder** tab to block over-limit requests before send and to compute post-run utilization in the UI.
+
+Purpose of the UI fields under the **Responder** tab:
+
+- **Responder Provider**: Browser-local override for the downstream responder provider. Use Gemini to demonstrate Counter-Spy.ai brokering between separate frontier models.
+- **Responder Base URL**: Browser-local override for the downstream responder endpoint. For OpenAI-compatible providers, set this to `https://api.openai.com/v1`; for Gemini, leave it blank to use `https://generativelanguage.googleapis.com/v1beta`.
+- **Responder Model ID**: Browser-local override for the downstream responder model used by Analyst Chat clean traffic. Gemini uses `gemini-2.5-flash` when this field is blank.
+- **Responder API Key**: Browser-memory-only key override sent to the local backend with clean responder requests. It is not written to localStorage.
 - **Max Context Window**: Browser-local max request budget. Analyst Chat and the Prompt Playground estimate the full forwarded request footprint, including runtime system prompt scaffolding and Knowledge Base context, and block submissions that exceed this value.
 
-These overrides are sent with each Analyst Chat intercept request from that browser only. They do not store or override API credentials in the frontend. The Prompt Playground uses the same estimator so its warning state and submit gate align with Analyst Chat.
+These overrides are sent with each Analyst Chat intercept request from that browser only. Persisted browser settings exclude the responder API key; backend environment credentials remain the preferred operational path. The Prompt Playground uses the same estimator so its warning state and submit gate align with Analyst Chat. The active Downstream Responder Prompt from System Configuration is sent as the responder instruction when clean traffic is forwarded.
 
 ### Optional: Lara Translate API Translation
 

@@ -46,10 +46,14 @@ counter-spy.ai/
 │   ├── 🧠 lib/                           # Core Logic & Security Engines
 │   │   ├── anomalyDetector.ts            # Statistical engine (Z-Score, rolling baselines)
 │   │   ├── firebase.ts                   # Firestore & Auth initialization
-│   │   ├── gemini.ts                     # ⚔️  Sword — Gemini 3 Flash inference integration
+│   │   ├── backendApi.ts                 # Backend gateway client for intercept, responder, CTF, and translation APIs
+│   │   ├── gemini.ts                     # Legacy deterministic fallback helpers retained for local/demo paths
 │   │   ├── metrics.ts                    # Telemetry aggregation & filtering logic
 │   │   ├── policies.ts                   # Knowledge Base (MITRE ATLAS, System Config)
-│   │   ├── sanitizer.ts                  # 🛡️  Shield — PII, Entropy, Regex & ReDoS engine
+│   │   ├── sanitizer.ts                  # 🛡️  Shield — PII, entropy, regex, forbidden phrase & ReDoS engine
+│   │   ├── sanitizerLanguage.ts          # Local language/translation policy helpers
+│   │   ├── sanitizerNormalization.ts     # Shared normalization and canonicalization helpers
+│   │   ├── sanitizerObfuscation.ts       # Obfuscation-family detection helpers
 │   │   ├── syntacticAnalyzer.ts          # Heuristic complexity scoring logic
 │   │   └── utils.ts                      # Tailwind merging & shared helpers
 │   │
@@ -78,7 +82,7 @@ counter-spy.ai/
 | Nickname | File | Role |
 | :--- | :--- | :--- |
 | 🛡️ **The Shield** | `src/lib/sanitizer.ts` | Local sanitization engine — intercepts all adversarial payloads before any external API call is initiated. |
-| ⚔️ **The Sword** | `src/lib/gemini.ts` | Primary inference engine — receives only the cleansed, governed payload from the Shield. |
+| ⚔️ **The Sword** | `backend/src/server.ts` + `src/lib/backendApi.ts` | Backend-mediated inference path — local sanitizer, OpenAI-compatible safeguard judge, then downstream responder. |
 | 📡 **The Radar** | `src/lib/anomalyDetector.ts` | Statistical anomaly engine — calculates real-time Z-Scores to detect coordinated automated attacks. |
 | 🔒 **The Vault** | `firestore.rules` | Database-layer enforcement — ensures data integrity and PII privacy even if the client layer is compromised. |
 | 📚 **The Manual** | `Technical/` + `Regulatory/` | Operational and assurance documentation — provides context for implementers, analysts, and compliance review. |

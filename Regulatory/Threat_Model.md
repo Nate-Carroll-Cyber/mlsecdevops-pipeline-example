@@ -17,7 +17,7 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 - **MITRE ATLAS Mapping:** `AML.TA0003` (Initial Access) / `AML.T0043` (Craft Adversarial Data)  
 - **Target Component:** Human‑in‑the‑Loop (HITL) Queue / API Gateway  
 - **Description:** Attackers may spoof IPs or rotate ephemeral authenticated sessions to make automated traffic appear organic and bypass rate limits.  
-- **Proposed Mitigation:** Implement behavioral fingerprinting (typing cadence, interaction speed) and require CAPTCHA/challenge responses for sessions that trigger the `Suspicious` entropy band (`Entropy >= 4.5 && Entropy < 5.5`) before entering HITL.
+- **Proposed Mitigation:** Implement behavioral fingerprinting (typing cadence, interaction speed) and require CAPTCHA/challenge responses for sessions that trigger the `Suspicious` entropy band (`Entropy > 3.6` and at or below the configured adversarial cutoff) before entering HITL.
 
 ---
 
@@ -62,7 +62,7 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 #### 6. Elevation of Privilege (Unauthorized Capabilities)
 - **Threat:** **System Prompt Override (Persona Hijacking / Jailbreak)**  
 - **MITRE ATLAS Mapping:** `AML.TA0004` (Execution) / `AML.T0051` (Prompt Injection) / `AML.T0042` (Jailbreak) / `AML.T0053` (LLM Manipulation)  
-- **Target Component:** AI Inference Engine (Gemini 3 Flash)  
+- **Target Component:** Backend `/v1/intercept` gateway, OpenAI-compatible safeguard judge, and downstream responder
 - **Description:** Attackers attempt to override the model persona using jailbreak patterns to bypass forbidden‑topic constraints.  
 - **Proposed Mitigation:** Do not rely solely on the primary model. Use prompt wrapping (re‑assert constraints at the end of the prompt) and route outputs through a secondary evaluator model that classifies whether the primary model violated guardrails.
 
@@ -95,22 +95,22 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 #### 9. Repudiation (The "Forensic Gap")**
 * **Threat:** **Evading Audit via TTL Mismatches**
 * **MITRE ATLAS Mapping:** **AML.TA0005 (Defense Evasion)**
-* **Description:** The spec explicitly notes a "Forensic Gap Awareness." Google Gemini retains API abuse logs for 55 days. If the organization configures their Firestore TTL (Time-to-Live) to purge logs after 30 days to save costs, an attacker could launch a subtle attack, wait 31 days, and their local Audit Log will be permanently deleted while Google still holds the downstream inference record. 
-* **Mitigation:** The organization must mandate that the Firestore TTL strictly equals or exceeds the foundational model provider's retention policy (e.g., minimum 60 days).
+* **Description:** The spec explicitly notes a "Forensic Gap Awareness." Firestore audit logs and provider-side safeguard/responder logs may have different retention windows. If local TTL is shorter than the provider retention window, investigators can lose the local prompt lineage before provider records expire.
+* **Mitigation:** The organization must mandate that Firestore TTL equals or exceeds the longest relevant safeguard or downstream responder provider retention window used in production.
 
 ---
 
 #### 10. Denial of Service (The "Fail-Secure" Weaponization)**
 * **Threat:** **Self-Inflicted DoS via Database Severance**
 * **MITRE ATLAS Mapping:** **AML.T0029 (Denial of ML Service)**
-* **Description:** Because the system prioritizes security over availability (Fail-Secure), an attacker doesn't need to bypass the sanitization engine to take the AI offline. If they can execute a network-level DoS attack specifically against the connection between the Shield Engine and the Firestore config database, the system will instantly default to `isGlobalPause: true`, cutting off all legitimate business access to the LLM. 
-* **Mitigation:** Ensure highly redundant, internal-only VPC peering between the application containers and the database to prevent external network disruption of the governance sync.
+* **Description:** Because the gateway fails closed when the safeguard judge or downstream responder cannot complete, an attacker can target provider egress or backend connectivity to prevent eligible clean prompts from being forwarded. Governance sync failures retain the current in-memory/default governance state rather than automatically forcing `isGlobalPause: true`.
+* **Mitigation:** Ensure redundant provider egress, backend health monitoring, clear operator alerts, and documented manual pause/resume procedures for outages.
 
 ---
 
 ### Appendix — Key Operational Thresholds and Controls
-- **Entropy bands:** `Normal < 4.5`, `Suspicious 4.5–5.5`, `Adversarial > 5.5`  
-- **Sanitization order:** `Normalize (NFKC)` → `Strip non‑printables` → `Entropy scan` → `Regex detection` → `Output filter`  
+- **Entropy bands:** `Allowed <= 3.6`, `Suspicious > 3.6 and <= configured Entropy Threshold`, `Adversarial > configured Entropy Threshold`
+- **Sanitization order:** `Normalize (NFKC)` → `Strip non-printables` → `Local sanitizer/entropy/regex checks` → `OpenAI-compatible safeguard judge` → `Downstream responder` → `Output filter`
 - **Audit logging:** Dual records (escaped raw + normalized ASCII) with immutable metadata and RBAC for access
 
 ---

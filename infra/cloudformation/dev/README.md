@@ -18,7 +18,7 @@ The backend stack starts with `DesiredCount=0` so the infrastructure can be crea
 ## Manual Prerequisites
 
 - AWS CLI credentials for the target dev account.
-- Bedrock model access for `gpt-oss-safeguards20B` and `amazon.nova-micro-v1:0`.
+- Provider access for the OpenAI-compatible safeguard judge and the configured downstream responder, including final model IDs and secret sources.
 - Squarespace NS delegation to the name servers output by `01-network-dns.yml`.
 - Google OAuth client ID and secret when enabling Workspace federation.
 

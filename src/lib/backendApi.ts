@@ -21,7 +21,10 @@ const BackendInterceptResponseSchema = z.object({
     latencyMs: z.number(),
   }),
   responder: z.object({
+    provider: z.enum(['openai_compatible', 'gemini']).optional(),
     modelId: z.string(),
+    status: z.literal('COMPLETED'),
+    latencyMs: z.number(),
     response: z.string(),
     usage: z.object({
       promptTokens: z.number().optional(),
@@ -44,7 +47,14 @@ const BackendHealthResponseSchema = z.object({
   ok: z.boolean(),
   service: z.string(),
   environment: z.string(),
+  safeguards: z.object({
+    provider: z.literal('openai_compatible'),
+    configured: z.boolean(),
+    modelId: z.string().nullable(),
+    baseUrl: z.string().nullable(),
+  }).optional(),
   responder: z.object({
+    provider: z.enum(['openai_compatible', 'gemini']).optional(),
     configured: z.boolean(),
     modelId: z.string().nullable(),
     baseUrl: z.string().nullable(),
@@ -126,7 +136,10 @@ export interface BackendInterceptResponse {
     latencyMs: number;
   };
   responder?: {
+    provider?: 'openai_compatible' | 'gemini';
     modelId: string;
+    status: 'COMPLETED';
+    latencyMs: number;
     response: string;
     usage?: {
       promptTokens?: number;
@@ -149,7 +162,14 @@ export interface BackendHealthResponse {
   ok: boolean;
   service: string;
   environment: string;
+  safeguards?: {
+    provider: 'openai_compatible';
+    configured: boolean;
+    modelId: string | null;
+    baseUrl: string | null;
+  };
   responder?: {
+    provider?: 'openai_compatible' | 'gemini';
     configured: boolean;
     modelId: string | null;
     baseUrl: string | null;

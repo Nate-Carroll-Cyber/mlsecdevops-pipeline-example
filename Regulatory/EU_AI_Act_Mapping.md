@@ -4,14 +4,14 @@
 
 
 ### **Executive Summary for the Compliance Officer**
-If an enterprise deploys an LLM (like Gemini 3 Flash) without an intermediary gateway, they bear the full brunt of EU AI Act compliance directly on the model itself—which is notoriously difficult to guarantee.
+If an enterprise deploys an LLM or downstream responder API without an intermediary gateway, they bear the full brunt of EU AI Act compliance directly on the model itself—which is notoriously difficult to guarantee.
 
 **Counter-Spy.ai acts as a "Compliance Wrapper."** By placing Counter-Spy between the user and the LLM, the organization instantly gains the **Human Oversight (Art. 14)**, **Cybersecurity Robustness (Art. 15)**, and **Record-Keeping (Art. 12)** capabilities legally required to operate an enterprise generative AI system within the European Union.
 
 #### **1. Article 14: Human Oversight**
 *The EU AI Act mandates that high-risk AI systems must be designed in a way that allows them to be effectively overseen by natural persons, including the ability to intervene, disregard, or completely halt the system.*
-* **Human-in-the-Loop (HITL) Mode:** Counter-Spy automatically intercepts borderline traffic (e.g., suspicious entropy >4.5) and routes it to a `PENDING_REVIEW` queue, fulfilling the mandate that humans must be able to review and intervene before an automated action executes.
-* **Global System Pause (DEFCON 1):** The Act specifically requires a "stop button" or equivalent mechanism to safely halt operations. Counter-Spy’s DEFCON 1 toggle instantly halts 100% of automated inference and routes everything to manual review during an attack, perfectly satisfying this requirement.
+* **Human-in-the-Loop (HITL) Mode:** Counter-Spy automatically intercepts borderline traffic, including prompts above the suspicious entropy floor of `3.6` but not above the configured adversarial cutoff, and routes it to a `PENDING_REVIEW` queue, fulfilling the mandate that humans must be able to review and intervene before an automated action executes.
+* **Global System Pause (DEFCON 1):** The Act specifically requires a "stop button" or equivalent mechanism to safely halt operations. Counter-Spy’s DEFCON 1 toggle halts automated forwarding, routes new Analyst Chat prompts to manual review during an attack, and stops active Bulk Ingest replay.
 * **Analyst Review Workflow:** Allows authorized personnel to override the system, update the `resultantSeverity` of logs, and actively manage the AI's boundaries.
 
 #### **2. Article 15: Accuracy, Robustness, and Cybersecurity**
@@ -34,7 +34,7 @@ If an enterprise deploys an LLM (like Gemini 3 Flash) without an intermediary ga
 
 #### **5. Article 9: Risk Management System**
 *Deployers must establish a continuous iterative process to identify, estimate, and evaluate risks that the AI system may pose to health, safety, or fundamental rights.*
-* **Dynamic Guardrails:** Administrators can toggle security features (Blocked Keywords, Forbidden Phrases) on the fly. This allows the organization to dynamically adjust the AI’s risk posture as new threats are identified.
-* **Forbidden Phrases Enforcement:** By strictly prohibiting configured phrase patterns tied to restricted subjects (e.g., specific political or financial requests), the organization mitigates the risk of the AI violating fundamental rights or generating harmful misinformation.
+* **Dynamic Guardrails:** Administrators can toggle security features such as Blocked Keywords, Forbidden Phrases, entropy filtering, obfuscation detection, regex rules, and safeguard LLM enforcement on the fly. This allows the organization to dynamically adjust the AI’s risk posture as new threats are identified.
+* **Forbidden Phrases and Policy Category Enforcement:** Operator-managed forbidden phrases are enforced locally, while the visible Firewall Prompt carries baseline category and gibberish/obfuscation guidance for the OpenAI-compatible safeguard judge. This mitigates the risk of the downstream responder violating fundamental rights or generating harmful misinformation.
 
 ---

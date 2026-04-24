@@ -33,15 +33,15 @@ The codebase is bifurcated into two distinct security layers:
 - `src/lib/sanitizer.ts` — Do not lower entropy thresholds, remove detection patterns, or add pass-throughs.
 - `src/lib/syntacticAnalyzer.ts` — Thresholds: Suspicious > 50, Adversarial > 90. Do not raise these without documented rationale.
 - `firestore.rules` — RBAC rules. Do not broaden read/write permissions.
-- `src/lib/gemini.ts` — System prompt governs model persona. Do not modify the system instruction to relax security constraints.
+- `src/lib/policies.ts` and `backend/src/server.ts` — System Configuration prompts and backend verdict contracts govern firewall/responder behavior. Do not modify these instructions to relax security constraints.
 
 **Entropy thresholds (do not modify without review):**
 
 | Level | Threshold |
 | :--- | :--- |
-| Normal | < 4.5 |
-| Suspicious | 4.5 – 5.5 |
-| Adversarial | > 5.5 |
+| Allowed | <= 3.6 |
+| Suspicious | > 3.6 and <= configured Entropy Threshold |
+| Adversarial | > configured Entropy Threshold |
 
 ---
 

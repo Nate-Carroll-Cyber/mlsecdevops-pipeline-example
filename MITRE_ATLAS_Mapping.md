@@ -3,7 +3,7 @@
 This mapping demonstrates how the platform's features align with mitigating specific adversarial tactics and techniques defined in the MITRE ATLAS matrix.
 
 #### 1. Initial Access & Execution (Mitigating the Payload)
-These features are designed to stop an attacker from successfully delivering a malicious payload to the underlying Gemini 3 Flash model.
+These features are designed to stop an attacker from successfully delivering a malicious payload to the OpenAI-compatible safeguard judge or the downstream responder model.
 
 | Counter‑Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
 | :--- | :--- | :--- |
@@ -12,6 +12,7 @@ These features are designed to stop an attacker from successfully delivering a m
 | **Curated Default Blocklist** | Intercepts known roleplay‑based injection templates and jailbreak corpora. | **AML.T0042** |
 | **Anti‑ReDoS Circuit Breaker** | Prevents CPU lockup from catastrophic backtracking payloads via the chat interface. | **AML.T0029** |
 | **Global System Pause (DEFCON 1)** | A "kill switch" to instantly halt inference during a coordinated, automated attack, routing traffic to manual review. | **AML.TA0008** |
+| **OpenAI-Compatible Safeguard Judge** | Requires a structured firewall verdict before any clean prompt can be forwarded to the downstream responder. | **AML.T0053** |
 
 #### 2. Defense Evasion (Mitigating Obfuscation)
 Attackers frequently try to hide their payloads from security filters. Counter‑Spy.ai has specific countermeasures for these evasion tactics.
@@ -28,7 +29,7 @@ If an attacker successfully manipulates the model, these features prevent the mo
 | :--- | :--- | :--- |
 | **PII & Secret Redaction (Input)** | Strips API keys, passwords, and PII from the user's prompt before it reaches the LLM, preventing accidental exposure in the model's context window. | **AML.T0024** |
 | **Output Sanitization Layer (PII & Keyword Redaction)** | Scans the LLM's response and masks sensitive data or blocked keywords (e.g., `[REDACTED_KEYWORD]`), preventing the model from returning stolen data. | **AML.T0024** |
-| **Forbidden Topics Enforcement (Semantic Guardrail)** | Instructs the model to refuse and flag (`[VIOLATION]`) discussions on restricted topics, preventing the LLM from being manipulated into generating unauthorized content. | **AML.T0053** |
+| **Forbidden Phrases and Policy Category Enforcement** | Enforces operator-managed forbidden phrases locally and uses the visible Firewall Prompt's category/gibberish guidance during safeguard judging, preventing unauthorized content from reaching or being produced by the responder. | **AML.T0053** |
 | **System Prompt Persona Constraints** | A strict system prompt forbids the model from revealing its internal configurations or system instructions. | **AML.T0054** |
 
 #### 4. Reconnaissance & Discovery (Mitigating System Probing)
@@ -55,12 +56,12 @@ Supplementary controls that further harden the platform.
 | Counter‑Spy Feature | MITRE ATLAS Threat Mitigated | Tactic / Technique ID |
 | :--- | :--- | :--- |
 | **JWT Authorization & Endpoint Validation** | Prevents attackers from spoofing identities and flooding the API by enforcing strict per‑request validation of Bearer tokens (sub, aud, exp) and rejecting reused or malformed tokens. | **AML.TA0003**; **AML.T0012** |
-| **Fail‑Secure State Persistence** | Mitigates fail‑open vulnerabilities during container scaling or restarts by defaulting to a paused state and refusing to route traffic if critical handshakes fail, preventing un‑sanitized payloads from bypassing the firewall. | **AML.TA0004**; **AML.T0051** |
+| **Fail‑Closed Gateway Enforcement** | Prevents fail-open behavior by refusing to forward eligible clean prompts when the safeguard judge or downstream responder cannot complete. Governance sync failures retain the current in-memory/default state rather than silently bypassing the firewall. | **AML.TA0004**; **AML.T0051** |
 | **Telemetry Anomaly Escalation** | Reduces operational DoS (alert fatigue) by mapping high Z‑Score telemetry thresholds (e.g., Z > 5.0) to automated incident escalation (PagerDuty/Slack) so the SOC is alerted to coordinated attacks exploiting borderline entropy scores. | **AML.TA0008**; **AML.T0029** |
 
 ---
 
 ## Appendix — Key Operational Thresholds and Controls
-- **Entropy bands:** `Normal < 4.5`, `Suspicious 4.5–5.5`, `Adversarial > 5.5`  
-- **Sanitization order:** `Normalize (NFKC)` → `Strip non‑printables` → `Entropy scan` → `Regex detection` → `Output filter`  
+- **Entropy bands:** `Allowed <= 3.6`, `Suspicious > 3.6 and <= configured Entropy Threshold`, `Adversarial > configured Entropy Threshold`
+- **Sanitization order:** `Normalize (NFKC)` → `Strip non-printables` → `Local sanitizer/entropy/regex checks` → `OpenAI-compatible safeguard judge` → `Downstream responder` → `Output filter`
 - **Audit logging:** Dual records (escaped raw + normalized ASCII) with immutable metadata and RBAC for access

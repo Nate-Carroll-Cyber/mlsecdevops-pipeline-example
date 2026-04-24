@@ -35,8 +35,8 @@ Use this checklist once AWS credentials are available. The current target region
 
 | Input | Current Target | Notes |
 | :--- | :--- | :--- |
-| Safeguards model | `gpt-oss-safeguards20B` | Confirm Bedrock model access and final model ID. |
-| Responder model | `amazon.nova-micro-v1:0` | Confirm Bedrock model access. |
+| Safeguards model | OpenAI-compatible safeguard judge | Confirm final provider, base URL, model ID, and secret source. |
+| Responder model | OpenAI-compatible or Gemini downstream responder | Confirm final provider, base URL, model ID, and secret source. |
 | Failure behavior | Fail secure | Backend must block on safeguards/model errors. |
 
 ## Stack Order

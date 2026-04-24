@@ -16,9 +16,9 @@ The current Beta is a React/Vite/Firebase application with a TypeScript/Express 
 ### 1.1 Logical Flow
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
-2.  **The Sword (Backend-Mediated Inference):** The downstream responder receives only the governed payload through the backend `/v1/intercept` route. Credentials remain backend-owned, while the UI can provide browser-local Base URL and Model ID overrides for clean traffic without exposing provider secrets in the browser.
-    *   **Current prompt-contract note:** The active decision model is guided by the visible firewall prompt, the active guardrails policy, optional forbidden-topics guidance, and relevant Knowledge Base policy context. The separate downstream responder prompt remains reserved for a later multi-stage responder architecture.
-    *   **Current forbidden-category note:** The saved firewall prompt now explicitly instructs the decision model to treat the configured high-level forbidden categories semantically, including indirect, paraphrased, translated, obfuscated, or substantially equivalent forms, while storytelling remains non-exempt if used to smuggle one of those categories.
+2.  **The Sword (Backend-Mediated Inference):** The backend `/v1/intercept` route calls an OpenAI-compatible safeguard judge before any downstream responder receives a prompt. Analyst Chat safeguard configuration remains separate from responder configuration, allowing Counter-Spy.ai to sit between different frontier model providers. Credentials can remain backend-owned, while the UI can provide browser-local Base URL, Model ID, and memory-only API key overrides for the safeguard judge and separate provider settings for clean responder traffic.
+    *   **Current prompt-contract note:** The firewall stage is guided by the visible firewall prompt, the active guardrails policy, optional forbidden-phrase guidance, and relevant Knowledge Base policy context. The recommended visible Firewall Prompt includes baseline forbidden-category and gibberish/obfuscation guidance; the backend appends its JSON verdict contract outside the user-visible System Configuration prompt and normalizes legacy firewall decisions when needed. Only prompts the safeguard judge returns as `CLEAN` are forwarded to the responder model with the active Downstream Responder Prompt as its instruction.
+    *   **Current forbidden-category note:** Operator-managed forbidden phrases are enforced locally and can supplement safeguard context, while the visible recommended Firewall Prompt remains the reviewable source for baseline category and gibberish guidance.
     *   **Current telemetry and gating note:** When the provider returns usage metadata, the gateway surfaces prompt/completion/total token counts. The browser can also apply an operator-supplied max context window as a pre-submit gate in Analyst Chat and the Prompt Playground, then reuse that same value to compute post-run context utilization for audit review.
 *   **Manual Translation Gateway (`/v1/translate`)**:
     *   Owns backend-only Lara Translate access for the Playground.
@@ -122,18 +122,19 @@ Future external services would authenticate with the Counter-Spy gateway using *
 | `prompt` | `string` | The raw input string to be sanitized. |
 | `userId` | `string` | The unique identifier for the requesting user. |
 | `sessionId` | `string` | The identifier for the current interaction session. |
-| `metadata` | `object` | Optional key-value pairs for additional context. |
+| `metadata` | `object` | Optional key-value pairs, including browser-local safeguard Base URL, safeguard Model ID, memory-only safeguard API key override, responder provider, responder Base URL, responder Model ID, memory-only responder API key override, and the active downstream responder prompt. |
 
 **Response Definitions:**
 | Code | Status | Description |
 | :--- | :--- | :--- |
-| `200` | `CLEAN` | Payload passed all guardrails. |
+| `200` | `CLEAN` | Payload passed local prechecks and the safeguard judge, and, when configured, includes downstream responder output plus responder telemetry. |
 | `202` | `QUEUED` | Payload intercepted for HITL/HOTL review. |
 | `401` | `UNAUTHORIZED` | Missing or invalid Bearer Token. |
-| `403` | `INTERCEPTED` | Shield blocked payload (Adversarial/Suspicious). |
+| `403` | `INTERCEPTED` | Local precheck or safeguard judge blocked payload (Adversarial/Suspicious). |
+| `502` | `SAFEGUARD_OR_RESPONDER_ERROR` | Fail-closed block because the safeguard judge or downstream responder could not complete. |
 | `503` | `SHIELD_ERROR` | Fail-Secure block due to Shield Engine timeout/failure. |
 
-Downstream responder outcomes such as `BLOCK`, `FAIL_SECURE`, `QUEUE_FOR_REVIEW`, and explicit policy-violation messages are normalized back into Counter-Spy.ai severity/status labels before they land in the audit trail.
+Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, token usage, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records.
 
 ---
 

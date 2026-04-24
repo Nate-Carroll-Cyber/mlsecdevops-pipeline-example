@@ -13,8 +13,9 @@ Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure La
 ### 1.1 Logical Flow
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
-2.  **The Sword (Backend-Mediated Inference):** The downstream responder receives only the governed payload through the backend gateway, with credentials managed server-side and optional browser-local Base URL / Model ID overrides available for clean traffic.
-    *   **Current forbidden-category note:** The saved firewall prompt now tells the decision model to treat the configured high-level forbidden categories semantically, including indirect, paraphrased, translated, obfuscated, or substantially equivalent requests, while storytelling remains non-exempt if used to smuggle one of those categories.
+2.  **The Sword (Backend-Mediated Inference):** The backend gateway first calls an OpenAI-compatible safeguard judge, then forwards only `CLEAN` payloads to the downstream responder. Safeguard runtime configuration is separate from responder runtime configuration; each can use backend-managed credentials plus optional browser-local Base URL, Model ID, and memory-only API key overrides.
+    *   **Current prompt-contract note:** The firewall prompt and guardrails policy are sent to the safeguard judge for inspection and forwarding decisions. The recommended visible Firewall Prompt includes baseline forbidden-category and gibberish/obfuscation guidance. The backend appends the JSON verdict contract outside the user-visible System Configuration prompt, and normalizes legacy firewall decisions when needed. The Downstream Responder Prompt from System Configuration is sent as the responder instruction only after clean traffic clears the safeguard judge.
+    *   **Current forbidden-category note:** Operator-managed forbidden phrases are enforced locally and can supplement safeguard context, while the visible recommended Firewall Prompt remains the reviewable source for baseline category and gibberish guidance.
 
 ### 1.2 System Resilience & Fallback Policies
 The Beta implementation adheres to a **Fail-Secure** philosophy across all critical components:
@@ -108,18 +109,19 @@ External services must authenticate with the Counter-Spy gateway using **Bearer 
 | `prompt` | `string` | The raw input string to be sanitized. |
 | `userId` | `string` | The unique identifier for the requesting user. |
 | `sessionId` | `string` | The identifier for the current interaction session. |
-| `metadata` | `object` | Optional key-value pairs for additional context. |
+| `metadata` | `object` | Optional key-value pairs, including browser-local safeguard Base URL, safeguard Model ID, memory-only safeguard API key override, responder provider, responder Base URL, responder Model ID, memory-only responder API key override, and the active downstream responder prompt. |
 
 **Response Definitions:**
 | Code | Status | Description |
 | :--- | :--- | :--- |
-| `200` | `CLEAN` | Payload passed all guardrails. |
+| `200` | `CLEAN` | Payload passed local prechecks and the safeguard judge, and, when configured, includes downstream responder output plus responder telemetry. |
 | `202` | `QUEUED` | Payload intercepted for HITL/HOTL review. |
 | `401` | `UNAUTHORIZED` | Missing or invalid Bearer Token. |
-| `403` | `INTERCEPTED` | Shield blocked payload (Adversarial/Suspicious). |
+| `403` | `INTERCEPTED` | Local precheck or safeguard judge blocked payload (Adversarial/Suspicious). |
+| `502` | `SAFEGUARD_OR_RESPONDER_ERROR` | Fail-closed block because the safeguard judge or downstream responder could not complete. |
 | `503` | `SHIELD_ERROR` | Fail-Secure block due to Shield Engine timeout/failure. |
 
-Downstream responder outcomes such as `ALLOW_AND_FORWARD`, `BLOCK`, `FAIL_SECURE`, and `QUEUE_FOR_REVIEW` are normalized back into Counter-Spy.ai audit severity and review state before they land in the audit trail.
+Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, token usage, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records.
 
 ---
 

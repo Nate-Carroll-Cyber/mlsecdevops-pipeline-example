@@ -46,7 +46,7 @@ counter-spy.ai/
 │   ├── 🧠 lib/                           # Core Logic & Security Engines
 │   │   ├── anomalyDetector.ts            # Statistical engine (Z-Score, rolling baselines)
 │   │   ├── firebase.ts                   # Firestore & Auth initialization
-│   │   ├── backendApi.ts                 # Backend gateway client for intercept, responder, CTF, and translation APIs
+│   │   ├── backendApi.ts                 # Backend gateway client for intercept, responder, CTF, translation, and governed 403 result handling
 │   │   ├── gemini.ts                     # Legacy deterministic fallback helpers retained for local/demo paths
 │   │   ├── metrics.ts                    # Telemetry aggregation & filtering logic
 │   │   ├── policies.ts                   # Knowledge Base (MITRE ATLAS, System Config)
@@ -82,7 +82,7 @@ counter-spy.ai/
 | Nickname | File | Role |
 | :--- | :--- | :--- |
 | 🛡️ **The Shield** | `src/lib/sanitizer.ts` | Local sanitization engine — intercepts all adversarial payloads before any external API call is initiated. |
-| ⚔️ **The Sword** | `backend/src/server.ts` + `src/lib/backendApi.ts` | Backend-mediated inference path — local sanitizer, OpenAI-compatible safeguard judge, then downstream responder. |
+| ⚔️ **The Sword** | `backend/src/server.ts` + `src/lib/backendApi.ts` | Backend-mediated inference path — local sanitizer, OpenAI-compatible safeguard judge, downstream responder, Sam Spade CTF persona/scenario handoff, and governed intercept result handling. |
 | 📡 **The Radar** | `src/lib/anomalyDetector.ts` | Statistical anomaly engine — calculates real-time Z-Scores to detect coordinated automated attacks. |
 | 🔒 **The Vault** | `firestore.rules` | Database-layer enforcement — ensures data integrity and PII privacy even if the client layer is compromised. |
 | 📚 **The Manual** | `Technical/` + `Regulatory/` | Operational and assurance documentation — provides context for implementers, analysts, and compliance review. |

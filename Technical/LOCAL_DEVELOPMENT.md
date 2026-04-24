@@ -174,7 +174,9 @@ Sanitizer note: the current runtime now treats any recognized obfuscation signal
 
 Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`.
 
-Note: in the current demo build, Sam Spade clean turns still use deterministic noir reply logic inside the Sam Spade service after guardrail approval. They do not yet call the same live downstream responder used by Analyst Chat. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.
+Note: in the current demo build, Sam Spade clean turns use the same live downstream responder path as Analyst Chat after local sanitizer and safeguard approval. The backend assembles the active Downstream Responder Prompt with admin-managed Sam Spade persona and scenario prompts before calling the responder. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.
+
+Bulk Ingest note: `403` responses from `/v1/intercept` are governed firewall/safeguard intercepts and should be treated as processed review outcomes, not transport failures. Provider `429` responses stop the ingest run, while transient `502`, `503`, and `521` responder/gateway failures use the UI's retry and backoff controls before the run is stopped.
 
 ## Backend Smoke Tests
 

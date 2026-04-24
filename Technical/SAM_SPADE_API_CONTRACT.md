@@ -15,8 +15,8 @@ This document defines the current local API boundary for the Sam Spade CTF surfa
 2. Player submits a message or a case-solving theory
 3. Backend sanitizes and evaluates the input
 4. If the turn is blocked, backend marks it for review before gameplay continues
-5. If the turn is clean, backend currently produces a deterministic noir reply inside the Sam Spade service
-6. Backend updates Sam Spade session state and emits a review artifact
+5. If the turn is clean, backend calls the safeguard judge and then forwards the sanitized turn to the configured downstream responder
+6. Backend updates Sam Spade session state with the responder-backed noir reply and emits a review artifact
 7. Frontend mirrors that artifact into Analyst Chat and Audit Logs
 
 ## Endpoints
@@ -67,8 +67,9 @@ Submit a normal interrogation prompt.
 Current behavior note:
 
 - blocked turns are intercepted before gameplay
-- clean turns currently receive a deterministic Sam Spade reply from the service itself
-- clean turns do **not** yet call the live downstream LLM responder used by Analyst Chat
+- clean turns call the live downstream responder after local sanitizer and safeguard judge approval
+- the responder receives the active Downstream Responder Prompt plus Sam Spade persona/scenario prompts from System Configuration
+- review artifacts may include responder prompt profile, provider, model, status, and latency telemetry
 
 Request:
 
@@ -101,7 +102,12 @@ Response:
     "analystReasoning": "Sam Spade CTF intake cleared the guardrails and produced an NPC response.",
     "latencyMs": 8,
     "decodeTelemetry": "plain_text",
-    "status": "REVIEWED"
+    "status": "REVIEWED",
+    "responderPromptProfile": "sam_spade_ctf",
+    "responderProvider": "gemini",
+    "responderModel": "gemini-2.5-flash",
+    "responderStatus": "COMPLETED",
+    "responderLatencyMs": 1200
   }
 }
 ```

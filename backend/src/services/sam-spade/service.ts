@@ -4,6 +4,7 @@
  * logic, solve evaluation, and review artifact construction.
  */
 import { sanitizePrompt, type BackendSanitizationResult } from '../../security/sanitizer.js';
+import type { FirewallVerdict } from '../../security/sanitizer.js';
 import { samSpadeConfig } from './config.js';
 import { getStoredSession, saveStoredSession } from './store.js';
 import type { SamSpadeReviewArtifact, SamSpadeSessionMessage, SamSpadeSessionRecord } from './types.js';
@@ -18,37 +19,6 @@ function toDetectionLevel(sanitization: BackendSanitizationResult): SamSpadeRevi
   if (sanitization.verdict === 'SUSPICIOUS') return 'Suspicious';
   if (sanitization.redactions.length > 0) return 'Informational';
   return 'Clean';
-}
-
-// Lightweight deterministic NPC responses used until a richer game engine exists.
-function inferNpcReply(prompt: string, turnCount: number): string {
-  const lowerPrompt = prompt.toLowerCase();
-
-  if (/(name|who (was|is) she|woman|girl|witness)/.test(lowerPrompt)) {
-    return "You’re asking about the dame already? Slow down. People in this town wear aliases like overcoats, and neither keeps you warm for long.";
-  }
-
-  if (/(ledger|book|records|evidence|documents|proof)/.test(lowerPrompt)) {
-    return "Everybody wants the paper trail. Funny thing about ledgers: they never stay where amateurs expect to find them.";
-  }
-
-  if (/(where|location|address|hotel|room|office|safe)/.test(lowerPrompt)) {
-    return "If I handed out addresses that easy, I’d be out of business by lunch. Ask better and maybe I’ll tell you what kind of room matters.";
-  }
-
-  if (/(why|motive|risk|afraid|danger|threat)/.test(lowerPrompt)) {
-    return "Now you’re getting somewhere. Fear makes people sloppy, but only after you’ve named what they’re afraid of losing.";
-  }
-
-  if (/(contradiction|doesn'?t add up|lie|lying|story)/.test(lowerPrompt)) {
-    return "Everybody lies. The trick is spotting which lie costs them the most to keep telling.";
-  }
-
-  if (turnCount <= 1) {
-    return "You came to a detective with questions and no angle. Start with motive, risk, or what somebody stood to lose.";
-  }
-
-  return "You’re circling it. Follow the witness, the ledger, and the lie that keeps both in motion.";
 }
 
 // Start a fresh case session with the opening noir line already on the timeline.
@@ -85,6 +55,16 @@ export function getSamSpadeSession(sessionId: string): SamSpadeSessionRecord | n
 export function submitSamSpadeMessage(args: {
   sessionId: string;
   prompt: string;
+  npcResponse?: string;
+  externalVerdict?: FirewallVerdict;
+  externalReasoning?: string;
+  responderTelemetry?: {
+    promptProfile: 'sam_spade_ctf';
+    provider: 'openai_compatible' | 'gemini';
+    modelId: string;
+    status: string;
+    latencyMs: number;
+  };
   tuning?: {
     entropyThreshold?: number;
     syntacticThreshold?: number;
@@ -98,7 +78,8 @@ export function submitSamSpadeMessage(args: {
   const requestId = crypto.randomUUID();
   const submittedAt = nowIso();
   const sanitization = sanitizePrompt(args.prompt, args.tuning);
-  const intercepted = sanitization.verdict !== 'CLEAN';
+  const effectiveVerdict = args.externalVerdict ?? sanitization.verdict;
+  const intercepted = sanitization.verdict !== 'CLEAN' || effectiveVerdict !== 'CLEAN';
   // Record the player turn using the sanitized text that downstream review sees.
   const reviewDisposition: SamSpadeSessionMessage['reviewDisposition'] = intercepted ? 'intercepted' : 'clean';
   const playerMessage: SamSpadeSessionMessage = {
@@ -109,7 +90,7 @@ export function submitSamSpadeMessage(args: {
     reviewDisposition,
   };
 
-  let npcResponse = inferNpcReply(sanitization.sanitized, session.messages.filter((message) => message.role === 'player').length + 1);
+  let npcResponse = args.npcResponse?.trim() || 'Sam Spade has no answer on the wire yet.';
   let reviewStatus: SamSpadeReviewArtifact['status'] = 'REVIEWED';
   let analystReasoning = sanitization.analystReasoning;
 
@@ -117,10 +98,10 @@ export function submitSamSpadeMessage(args: {
     // If the firewall blocks the turn, gameplay pauses and review takes over.
     session.status = 'INTERCEPTED';
     reviewStatus = 'PENDING_REVIEW';
-    npcResponse = sanitization.verdict === 'ADVERSARIAL'
+    npcResponse = effectiveVerdict === 'ADVERSARIAL'
       ? "You’re leaning too hard on the wrong words. Come back when your questions sound less like a break-in."
       : "That line of questioning’s too blunt. Dress it up, work the edges, and try again.";
-    analystReasoning = `${sanitization.analystReasoning} Sam Spade CTF intake was intercepted before downstream gameplay.`;
+    analystReasoning = `${args.externalReasoning || sanitization.analystReasoning} Sam Spade CTF intake was intercepted before downstream gameplay.`;
   } else {
     session.status = 'ACTIVE';
     analystReasoning = `${sanitization.analystReasoning} Sam Spade CTF intake cleared the guardrails and produced an NPC response.`;
@@ -146,17 +127,30 @@ export function submitSamSpadeMessage(args: {
     action: 'message',
     timestamp: npcMessage.createdAt,
     sanitizedPrompt: sanitization.sanitized,
-    detectionFlags: sanitization.detectionFlags,
+    detectionFlags: effectiveVerdict === sanitization.verdict
+      ? sanitization.detectionFlags
+      : Array.from(new Set([...sanitization.detectionFlags, `SAFEGUARD_${effectiveVerdict}`])),
     entropy: sanitization.entropy,
     globalEntropy: sanitization.globalEntropy,
     suspiciousChunks: sanitization.suspiciousChunks,
-    detectionLevel: toDetectionLevel(sanitization),
+    detectionLevel: effectiveVerdict === sanitization.verdict
+      ? toDetectionLevel(sanitization)
+      : effectiveVerdict === 'ADVERSARIAL'
+        ? 'Adversarial'
+        : 'Suspicious',
     escalationRecommended: intercepted,
     response: npcResponse,
     analystReasoning,
     latencyMs: sanitization.latencyMs,
     decodeTelemetry: sanitization.decodeTelemetry,
     status: reviewStatus,
+    ...(args.responderTelemetry && !intercepted ? {
+      responderPromptProfile: args.responderTelemetry.promptProfile,
+      responderProvider: args.responderTelemetry.provider,
+      responderModel: args.responderTelemetry.modelId,
+      responderStatus: args.responderTelemetry.status,
+      responderLatencyMs: args.responderTelemetry.latencyMs,
+    } : {}),
   };
 
   session.lastReview = review;

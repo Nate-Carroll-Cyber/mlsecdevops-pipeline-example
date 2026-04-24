@@ -11,7 +11,7 @@ The system is model-neutral. It does not assume a fixed Gemini, OpenAI, or open-
 - **Local sanitizer:** TypeScript policy engine that runs before external inference and enforces PII/secret redaction, entropy thresholds, regex rules, blocked keywords, forbidden phrases, language recovery, and obfuscation detection.
 - **Safeguard judge:** OpenAI-compatible API endpoint called by the backend `/v1/intercept` gateway. It receives the visible Firewall Prompt, guardrails policy, relevant Knowledge Base context, and a backend-owned structured JSON verdict contract.
 - **Downstream responder:** Separate responder model called only after local checks and the safeguard judge return a clean forwarding decision. It receives the Downstream Responder Prompt as its instruction.
-- **Sam Spade CTF:** Governed by the shared review/audit path, but clean gameplay replies still use deterministic in-service noir response logic rather than the live downstream responder.
+- **Sam Spade CTF:** Governed by the shared review/audit path. Clean gameplay replies now use the live downstream responder after local sanitizer and safeguard approval, with admin-managed Sam Spade persona and scenario prompts appended to the responder instruction.
 
 ## 3. Runtime Configuration
 
@@ -41,4 +41,4 @@ For compliance review, maintain the following alongside this card:
 - Current System Configuration hash and recommended baseline hash.
 - Active environment variable inventory for backend-managed credentials.
 - Audit retention policy for Firestore and any provider-side logs.
-- Known limitations, including deterministic Sam Spade replies and local-review/demo behavior.
+- Known limitations, including local-review/demo behavior and the need to validate active provider model cards for the configured safeguard judge and responder.

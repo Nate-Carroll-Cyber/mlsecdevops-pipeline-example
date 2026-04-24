@@ -92,6 +92,11 @@ const SamSpadeReviewArtifactSchema = z.object({
   latencyMs: z.number(),
   decodeTelemetry: z.enum(['plain_text', 'single_hop_decode', 'recursive_decode']),
   status: z.enum(['REVIEWED', 'PENDING_REVIEW']),
+  responderPromptProfile: z.literal('sam_spade_ctf').optional(),
+  responderProvider: z.enum(['openai_compatible', 'gemini']).optional(),
+  responderModel: z.string().optional(),
+  responderStatus: z.string().optional(),
+  responderLatencyMs: z.number().optional(),
 });
 
 const SamSpadeSessionSchema = z.object({
@@ -207,6 +212,11 @@ export interface SamSpadeReviewArtifact {
   latencyMs: number;
   decodeTelemetry: 'plain_text' | 'single_hop_decode' | 'recursive_decode';
   status: 'REVIEWED' | 'PENDING_REVIEW';
+  responderPromptProfile?: 'sam_spade_ctf';
+  responderProvider?: 'openai_compatible' | 'gemini';
+  responderModel?: string;
+  responderStatus?: string;
+  responderLatencyMs?: number;
 }
 
 export interface SamSpadeSession {
@@ -277,8 +287,21 @@ export async function interceptPrompt(input: {
   const payload: unknown = await response.json();
 
   if (!response.ok) {
-    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
-    throw new Error(errorPayload.success ? errorPayload.data.error : 'Backend intercept request failed.');
+    const interceptPayload = BackendInterceptResponseSchema.safeParse(payload);
+    if (response.status === 403 && interceptPayload.success) {
+      return interceptPayload.data;
+    }
+
+    const errorPayload = z.object({
+      error: z.string(),
+      upstreamStatus: z.number().optional(),
+    }).safeParse(payload);
+    const statusLabel = errorPayload.success && errorPayload.data.upstreamStatus
+      ? `upstream ${errorPayload.data.upstreamStatus}`
+      : `HTTP ${response.status}`;
+    throw new Error(errorPayload.success
+      ? `${errorPayload.data.error} (${statusLabel})`
+      : `Backend intercept request failed (${statusLabel}).`);
   }
 
   return BackendInterceptResponseSchema.parse(payload);
@@ -354,6 +377,7 @@ export async function getSamSpadeSession(sessionId: string): Promise<SamSpadeSes
 export async function sendSamSpadeMessage(input: {
   sessionId: string;
   prompt: string;
+  metadata?: Record<string, unknown>;
   tuning?: {
     entropyThreshold?: number;
     syntacticThreshold?: number;

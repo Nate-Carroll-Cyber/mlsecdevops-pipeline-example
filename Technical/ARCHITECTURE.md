@@ -122,7 +122,7 @@ Future external services would authenticate with the Counter-Spy gateway using *
 | `prompt` | `string` | The raw input string to be sanitized. |
 | `userId` | `string` | The unique identifier for the requesting user. |
 | `sessionId` | `string` | The identifier for the current interaction session. |
-| `metadata` | `object` | Optional key-value pairs, including browser-local safeguard Base URL, safeguard Model ID, memory-only safeguard API key override, responder provider, responder Base URL, responder Model ID, memory-only responder API key override, and the active downstream responder prompt. |
+| `metadata` | `object` | Optional key-value pairs, including browser-local safeguard Base URL, safeguard Model ID, memory-only safeguard API key override, responder provider, responder Base URL, responder Model ID, memory-only responder API key override, the active downstream responder prompt, and Sam Spade responder persona/scenario prompts for `ctf_chat` traffic. |
 
 **Response Definitions:**
 | Code | Status | Description |
@@ -130,11 +130,11 @@ Future external services would authenticate with the Counter-Spy gateway using *
 | `200` | `CLEAN` | Payload passed local prechecks and the safeguard judge, and, when configured, includes downstream responder output plus responder telemetry. |
 | `202` | `QUEUED` | Payload intercepted for HITL/HOTL review. |
 | `401` | `UNAUTHORIZED` | Missing or invalid Bearer Token. |
-| `403` | `INTERCEPTED` | Local precheck or safeguard judge blocked payload (Adversarial/Suspicious). |
+| `403` | `INTERCEPTED` | Local precheck or safeguard judge blocked payload (Adversarial/Suspicious). This is a governed result with a structured intercept payload, not a backend transport failure. |
 | `502` | `SAFEGUARD_OR_RESPONDER_ERROR` | Fail-closed block because the safeguard judge or downstream responder could not complete. |
 | `503` | `SHIELD_ERROR` | Fail-Secure block due to Shield Engine timeout/failure. |
 
-Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, token usage, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records.
+Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records.
 
 ---
 

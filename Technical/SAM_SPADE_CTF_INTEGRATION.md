@@ -3,7 +3,8 @@
 | Version | Date | Description |
 | :--- | :--- | :--- |
 | v1.0 | 2026-04-18 | Initial integration specification for the Sam Spade conversational CTF inside Counter-Spy.ai. |
-| v1.1 | 2026-04-21 | Runtime sync: provenance normalized to `ctf_chat`, and every submission now mirrors into the shared governed review path even though clean gameplay replies remain deterministic. |
+| v1.1 | 2026-04-21 | Runtime sync: provenance normalized to `ctf_chat`, and every submission mirrors into the shared governed review path. |
+| v1.2 | 2026-04-24 | Runtime sync: clean Sam Spade turns now use the downstream responder after local and safeguard approval, with admin-managed persona/scenario prompts assembled backend-side. |
 
 ---
 
@@ -422,8 +423,8 @@ The first integration does not need to be large.
 
 - Counter-Spy endpoint receives player message
 - Counter-Spy sanitizes / governs / logs
-- approved prompts are forwarded internally to Sam Spade orchestration
-- orchestration returns response + state deltas
+- approved prompts are forwarded internally to Sam Spade orchestration and the configured downstream responder
+- orchestration returns responder-backed Sam Spade response + state deltas
 - Counter-Spy returns a stable frontend response contract
 
 ---
@@ -454,6 +455,14 @@ The first integration does not need to be large.
 - deepen trust / pressure behavior
 - improve stateful clue progression
 - tune victory evaluation
+
+### Implemented Runtime Notes
+
+- Sam Spade message traffic uses the dedicated `/v1/ctf/sam-spade/message` route.
+- Clean turns pass through local sanitizer and the safeguard judge before reaching the downstream responder.
+- The backend assembles the Downstream Responder Prompt, Sam Spade persona prompt, and active scenario prompt before responder inference.
+- The frontend mirrors CTF review artifacts into Analyst Chat and Audit Logs without re-running responder inference.
+- Review artifacts may carry a `sam_spade_ctf` responder prompt profile plus responder provider/model/status/latency telemetry.
 
 ---
 

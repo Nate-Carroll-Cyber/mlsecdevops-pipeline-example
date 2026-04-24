@@ -36,6 +36,11 @@ export interface SamSpadeReviewArtifact {
   latencyMs: number;
   decodeTelemetry: BackendSanitizationResult['decodeTelemetry'];
   status: 'REVIEWED' | 'PENDING_REVIEW';
+  responderPromptProfile?: 'sam_spade_ctf';
+  responderProvider?: 'openai_compatible' | 'gemini';
+  responderModel?: string;
+  responderStatus?: string;
+  responderLatencyMs?: number;
 }
 
 // Full persisted session state for the CTF experience.

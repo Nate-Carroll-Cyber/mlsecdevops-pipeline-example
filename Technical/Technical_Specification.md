@@ -1,6 +1,6 @@
 # Technical Reference & Architecture Specification: Counter-Spy.ai
 
-**Version:** v2.0  
+**Version:** v2.1  
 **Status:** Beta / Promotion to Beta  
 **Classification:** Proprietary / AppSec Engineering  
 
@@ -42,8 +42,8 @@ To catch alphabetic substitution gibberish that still resembles plain prose, the
 
 ### 2.1.2 Entropy Policy Bands
 The current Beta uses one shared entropy policy across the submit-time firewall, Audit Logs, and Metrics.
-*   **Allowed:** prompt entropy `<= 3.2`
-*   **Suspicious:** prompt entropy `> 3.2` and `<= configured Entropy Threshold`
+*   **Allowed:** prompt entropy `<= 3.6`
+*   **Suspicious:** prompt entropy `> 3.6` and `<= configured Entropy Threshold`
 *   **Adversarial:** prompt entropy `> configured Entropy Threshold`
 *   **Operator Meaning:** the governance slider now sets the maximum approved entropy before a prompt becomes adversarial; it no longer acts as the suspicious floor.
 

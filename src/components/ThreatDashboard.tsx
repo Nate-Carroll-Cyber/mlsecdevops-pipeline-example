@@ -429,7 +429,14 @@ export function ThreatDashboard({
         const analysis = detectThreatSpikes(threatLogs);
         setMetrics(analysis);
 
-        const fprAnalysis = calculateFalsePositiveMetrics(filteredLogs);
+        // FPR/FNR use the same effective severity model as the rest of Metrics,
+        // including live entropy-threshold interpretation, before analyst
+        // review outcomes are treated as ground truth.
+        const logsForReviewMetrics = filteredLogs.map((log) => ({
+          ...log,
+          detectionLevel: getEffectiveDetectionLevel(log, entropyThreshold),
+        }));
+        const fprAnalysis = calculateFalsePositiveMetrics(logsForReviewMetrics);
         setFprMetrics(fprAnalysis);
 
         const hourlyData = Array(24).fill(0).map((_, i) => ({ hour: i, threats: 0 }));
@@ -658,8 +665,13 @@ export function ThreatDashboard({
         const analysis = detectThreatSpikes(threatLogs);
         setMetrics(analysis);
 
-        // Calculate FPR metrics from all logs
-        const fprAnalysis = calculateFalsePositiveMetrics(filteredLogs);
+        // Calculate reviewed-outcome FPR/FNR from all logs after applying the
+        // current effective severity model used by the dashboard.
+        const logsForReviewMetrics = filteredLogs.map((log) => ({
+          ...log,
+          detectionLevel: getEffectiveDetectionLevel(log, entropyThreshold),
+        }));
+        const fprAnalysis = calculateFalsePositiveMetrics(logsForReviewMetrics);
         setFprMetrics(fprAnalysis);
 
         // Group threat logs by hour for the chart
@@ -979,7 +991,7 @@ export function ThreatDashboard({
             <div>
               <h3 className="flex items-center gap-2 font-bold text-lg">
                 <span>Entropy Threshold</span>
-                <HelpTooltip text="Sets the maximum approved entropy before prompts become adversarial. Prompt entropy above 3.2 and up to this threshold is treated as suspicious." />
+                <HelpTooltip text={`Sets the maximum approved entropy before prompts become adversarial. Prompt entropy above ${SUSPICIOUS_ENTROPY_THRESHOLD.toFixed(1)} and up to this threshold is treated as suspicious.`} />
               </h3>
               <p className="text-sm text-slate-400">Current adversarial cutoff for prompt entropy.</p>
             </div>
@@ -1083,14 +1095,14 @@ export function ThreatDashboard({
             <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
             <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <span>False Positive Rate</span>
-              <HelpTooltip text="Percentage of clean prompts wrongly classified by the firewall." />
+              <HelpTooltip text="Percentage of analyst-clean prompts wrongly blocked or threat-classified by the firewall." />
             </CardTitle>
               <UserCheck className="w-4 h-4 text-orange-500" />
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-orange-500">{fprMetrics.strictFPR}%</div>
               <p className="text-[10px] text-muted-foreground mt-1">
-                Percentage of clean prompts wrongly classified.
+                Percentage of analyst-clean prompts wrongly blocked.
               </p>
             </CardContent>
           </Card>
@@ -1100,14 +1112,14 @@ export function ThreatDashboard({
             <CardHeader className="pb-2 flex flex-row items-center justify-between space-y-0">
             <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
               <span>False Negative Rate</span>
-              <HelpTooltip text="Percentage of blocked prompts that analysts upgraded to a higher severity." />
+              <HelpTooltip text="Percentage of analyst-malicious prompts initially allowed by the firewall." />
             </CardTitle>
               <ShieldX className="w-4 h-4 text-rose-500" />
             </CardHeader>
             <CardContent>
               <div className="text-3xl font-bold text-rose-500">{fprMetrics.falseNegativeRate}%</div>
               <p className="text-[10px] text-muted-foreground mt-1">
-                Percentage of system blocks upgraded by analysts.
+                Percentage of analyst-malicious prompts initially missed.
               </p>
             </CardContent>
           </Card>
@@ -1379,7 +1391,7 @@ export function ThreatDashboard({
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <span>Detection Signals</span>
-                <HelpTooltip text="Counts of the main detection types seen in the current dataset, such as PII, regex hits, topic hits, and obfuscation." />
+                <HelpTooltip text="Counts of the main detection types seen in the current dataset, such as PII, regex hits, forbidden phrase hits, and obfuscation." />
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
@@ -1400,7 +1412,7 @@ export function ThreatDashboard({
                 <span className="font-semibold text-rose-500">{operationalMetrics.detectionSignals.keywordHits}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Topic Hits</span>
+                <span className="text-muted-foreground">Forbidden Phrase Hits</span>
                 <span className="font-semibold text-violet-400">{operationalMetrics.detectionSignals.topicHits}</span>
               </div>
               <div className="flex items-center justify-between">

@@ -63,7 +63,7 @@ const SENSITIVE_PATTERNS = [
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
 const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
-export const SUSPICIOUS_ENTROPY_THRESHOLD = 3.2;
+export const SUSPICIOUS_ENTROPY_THRESHOLD = 3.6;
 const SCRIPT_TAG_REGEX = /<script\b[^>]*(?:>[\s\S]*?<\/script>|\s*\/?>)/gi;
 const URL_WITH_SCHEME_REGEX = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/gi;
 const JAVASCRIPT_URI_REGEX = /\bjavascript:[^\s<>"']*/gi;
@@ -312,7 +312,7 @@ function hasLowNaturalLanguageLikelihood(input: string): boolean {
 // Entropy should measure concealment pressure, not reward predictable wrapper
 // shells like `[INSTRUCTION: ...]` or `<SYSTEM_MESSAGE_STYLE>`. We normalize
 // those structured headers out before scoring so templated clean prompts land
-// closer to their actual prose content before the shared 3.2 / configurable
+// closer to their actual prose content before the shared 3.6 / configurable
 // threshold policy bands are applied.
 function normalizeForEntropy(str: string): string {
   const unescaped = str
@@ -335,8 +335,8 @@ function normalizeForEntropy(str: string): string {
 
 // This helper still shapes the displayed max-window entropy by dampening obvious
 // plain-prose inputs, but it no longer decides whether entropy can escalate on
-// its own. The actual verdict policy now uses fixed bands: <= 3.2 allowed on
-// entropy grounds, > 3.2 suspicious, and > configured threshold adversarial.
+// its own. The actual verdict policy now uses fixed bands: <= 3.6 allowed on
+// entropy grounds, > 3.6 suspicious, and > configured threshold adversarial.
 function hasEntropyEscalationContext(str: string): boolean {
   const meaningfulChars = [...str].filter((char) => !/\s/.test(char));
   if (meaningfulChars.length < 6) return false;
@@ -784,7 +784,7 @@ export function sanitizeInput(
   const syntacticAnalysis = analyzeSyntacticComplexity(input, suspiciousSyntacticThreshold);
 
   // High-level escalation heuristic used for the rest of the app UI and logging.
-  // Entropy alone now participates directly: > 3.2 is suspicious, and above the
+  // Entropy alone now participates directly: > 3.6 is suspicious, and above the
   // configured entropy threshold is adversarial.
   const isPotentiallyAdversarial = 
     // Check if entropy filter is on and entropy exceeds the suspicious floor

@@ -24,84 +24,67 @@ function severityToScore(severity?: 'Clean' | 'Informational' | 'Suspicious' | '
   }
 }
 
-// Function to calculate false positive and analyst-upgrade metrics
+// Calculate reviewed-outcome performance metrics using analyst decisions as the
+// ground-truth source. The confusion matrix is:
+// - FP: automated firewall blocked/threat-classified, analyst marked clean/info.
+// - TN: automated firewall allowed, analyst marked clean/info.
+// - FN: automated firewall allowed, analyst marked suspicious/adversarial.
+// - TP: automated firewall blocked/threat-classified, analyst confirmed threat.
 export function calculateFalsePositiveMetrics(logs: AuditLogMetrics[]) {
-  // To get an accurate metric, we should ideally only calculate this 
-  // on logs that an analyst has actually reviewed.
-  // Filter the input logs to include only those that have been reviewed
+  // Metrics intentionally use only reviewed logs because analyst review is the
+  // source of truth for false-positive and false-negative accounting.
   const reviewedLogs = logs.filter(log => log.reviewed === true);
 
-  // Initialize counter for False Positives (System Blocked, Analyst said "Clean")
-  let falsePositives = 0; // System Blocked, Analyst said "Clean"
-  // Initialize counter for True Negatives (System Allowed, Analyst said "Clean")
-  let trueNegatives = 0;  // System Allowed, Analyst said "Clean"
-  // Initialize counter for the total number of logs blocked by the system
-  let totalBlockedBySystem = 0; // System Blocked (Suspicious + Adversarial)
-  // Initialize counter for analyst upgrades on already-blocked traffic
-  let analystUpgrades = 0;
+  let falsePositives = 0;
+  let trueNegatives = 0;
+  let falseNegatives = 0;
+  let truePositives = 0;
 
-  // Iterate over each reviewed log to calculate metrics
   reviewedLogs.forEach(log => {
-    // Determine the System's Verdict (Did the firewall trigger?)
-    // In our system, Suspicious (2) and Adversarial (3) are "Blocked"
-    // Check if the system detection level is 2 or higher
+    // Suspicious (2) and Adversarial (3) are treated as automated blocks or
+    // threat classifications for review-metric accounting.
     const systemBlocked = log.detectionLevel >= 2; 
-    
-    // Determine the Ground Truth (What did the human decide?)
-    // Consider the log "Clean" if the analyst marked it as Clean or Informational
     const isActuallyClean = log.resultantSeverity === 'Clean' || log.resultantSeverity === 'Informational';
+    const analystScore = severityToScore(log.resultantSeverity);
+    const isActuallyThreat = analystScore >= 2;
 
-    // Tally for the formulas
-    // If the system blocked the request, increment the total blocked counter
-    if (systemBlocked) {
-      totalBlockedBySystem++;
-      const analystScore = severityToScore(log.resultantSeverity);
-      if (analystScore > log.detectionLevel) {
-        analystUpgrades++;
-      }
-    }
-
-    // If the system blocked it BUT the analyst said it was clean
     if (systemBlocked && isActuallyClean) {
-      // Increment the false positive counter
-      falsePositives++; // The firewall made a mistake (False Positive)
-    // If the system allowed it AND the analyst agreed it was clean
+      falsePositives++;
+    } else if (systemBlocked && isActuallyThreat) {
+      truePositives++;
     } else if (!systemBlocked && isActuallyClean) {
-      // Increment the true negative counter
-      trueNegatives++; // The firewall was right to let it through (True Negative)
+      trueNegatives++;
+    } else if (!systemBlocked && isActuallyThreat) {
+      falseNegatives++;
     }
   });
 
-  // --- Formula 1: Strict Mathematical FPR ---
+  // --- Formula 1: False Positive Rate ---
   // FPR = FP / (FP + TN)
-  // Meaning: "Out of all the ACTUALLY CLEAN prompts, what percentage did we accidentally block?"
-  // Calculate the total number of actually clean prompts
+  // Meaning: out of all prompts analysts judged clean/info, what percentage did
+  // the system initially block or classify as threat traffic?
   const totalActualClean = falsePositives + trueNegatives;
-  // Calculate the strict False Positive Rate as a percentage
   const strictFPR = totalActualClean > 0 
-    // Divide false positives by total actual clean and multiply by 100
     ? (falsePositives / totalActualClean) * 100 
-    // Default to 0 if there are no actually clean prompts
     : 0;
 
-  // --- Formula 2: Analyst Upgrade Rate on System Blocks ---
-  // Rate = Analyst Upgrades / Total System Blocks
-  // Meaning: "Out of everything the system already blocked, how often did analysts elevate severity further?"
-  const falseNegativeRate = totalBlockedBySystem > 0 
-    ? (analystUpgrades / totalBlockedBySystem) * 100 
+  // --- Formula 2: False Negative Rate ---
+  // FNR = FN / (FN + TP)
+  // Meaning: out of all prompts analysts judged suspicious/adversarial, what
+  // percentage did the system initially allow?
+  const totalActualThreats = falseNegatives + truePositives;
+  const falseNegativeRate = totalActualThreats > 0 
+    ? (falseNegatives / totalActualThreats) * 100 
     : 0;
 
-  // Return the calculated metrics
   return {
-    // The strict FPR formatted to 1 decimal place (e.g., "4.2")
-    strictFPR: strictFPR.toFixed(1), // e.g., "4.2"
-    // The analyst-upgrade rate formatted to 1 decimal place
+    // Percent values are formatted to one decimal place for stable dashboard display.
+    strictFPR: strictFPR.toFixed(1),
     falseNegativeRate: falseNegativeRate.toFixed(1),
-    // The raw count of false positives
+    // Raw counts remain available for future drill-downs or export surfaces.
     falsePositivesCount: falsePositives,
-    // The raw count of analyst upgrades on blocked traffic
-    analystUpgradeCount: analystUpgrades,
-    // The total number of reviewed logs used in the calculation
+    falseNegativesCount: falseNegatives,
+    truePositivesCount: truePositives,
     totalReviewed: reviewedLogs.length
   };
 }

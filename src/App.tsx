@@ -1238,6 +1238,10 @@ export default function App() {
   const [auditObfuscationFilter, setAuditObfuscationFilter] = useState<string>('all');
   // Ref for the hidden file input used for uploading policies
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // Ref for the hidden file input used by Bulk Ingest. The visible control is
+  // app-rendered so the browser's native "No file chosen" text does not compete
+  // with the persistent selected-filename display.
+  const bulkFileInputRef = useRef<HTMLInputElement>(null);
   // State to store the log currently being promoted to the Golden Set
   const [promotingLog, setPromotingLog] = useState<AuditLog | null>(null);
   // State to store the reason for rejecting a log (used in DPO)
@@ -1290,10 +1294,16 @@ export default function App() {
   const [bulkBatchId, setBulkBatchId] = useState('');
   // State to store the expected verdict for the current bulk ingest
   const [bulkExpectedVerdict, setBulkExpectedVerdict] = useState<'Adversarial' | 'Suspicious' | 'Informational' | 'Clean' | ''>('');
+  // Operator-visible filename retained for ingest traceability. The native file
+  // input is reset after parsing so the same file can be selected again later.
+  const [bulkUploadFileName, setBulkUploadFileName] = useState('');
   // Ref to allow interrupting the bulk ingest process
   const processingRef = useRef(false);
   const bulkDelayTimeoutRef = useRef<number | null>(null);
   const isProcessingRef = useRef(false);
+  // Ref mirrors live governance state so long-running Bulk Ingest loops and
+  // prompt submission logic see kill-switch changes without waiting for a new closure.
+  const governanceConfigRef = useRef(governanceConfig);
 
   // Ref for the chat scroll area to auto-scroll to the bottom
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -1371,6 +1381,10 @@ export default function App() {
   useEffect(() => {
     isProcessingRef.current = isProcessing;
   }, [isProcessing]);
+
+  useEffect(() => {
+    governanceConfigRef.current = governanceConfig;
+  }, [governanceConfig]);
 
   useEffect(() => {
     if (activeTab === 'policies' && !canViewKnowledgeBase) {
@@ -1577,9 +1591,19 @@ export default function App() {
     }
   };
 
+  const stopBulkIngestForGlobalPause = () => {
+    stopBulkIngest();
+    toast.error('Bulk ingest stopped by Global System Pause.');
+  };
+
   // Bulk ingest reuses the same send pipeline as live prompts, but paces entries so
   // audit trails, review surfaces, and rate-sensitive upstream services stay readable.
   const runBulkIngest = async (prompts: string[]) => {
+    if (governanceConfigRef.current.isGlobalPause) {
+      stopBulkIngestForGlobalPause();
+      return;
+    }
+
     clearPlaygroundMetrics();
     setIsBulkProcessing(true);
     processingRef.current = true;
@@ -1603,6 +1627,10 @@ export default function App() {
     for (let i = 0; i < prompts.length; i++) {
       // Check if the process was interrupted
       if (!processingRef.current) break;
+      if (governanceConfigRef.current.isGlobalPause) {
+        stopBulkIngestForGlobalPause();
+        break;
+      }
 
       const currentPrompt = prompts[i];
       // Skip empty prompts
@@ -1617,6 +1645,10 @@ export default function App() {
         });
         await waitForProcessingToSettle();
         if (!processingRef.current) break;
+        if (governanceConfigRef.current.isGlobalPause) {
+          stopBulkIngestForGlobalPause();
+          break;
+        }
 
         // Update progress
         setBulkProgress(i + 1);
@@ -1625,6 +1657,10 @@ export default function App() {
         const jitter = Math.floor(Math.random() * 7000) + 3000;
         await delay(jitter);
         if (!processingRef.current) break;
+        if (governanceConfigRef.current.isGlobalPause) {
+          stopBulkIngestForGlobalPause();
+          break;
+        }
 
       } catch (error) {
         console.error(`Error processing prompt ${i}:`, error);
@@ -2750,9 +2786,10 @@ export default function App() {
       // 3. Generate Advice
       let responseText = "";
       const startTime = performance.now();
+      const currentGovernanceConfig = governanceConfigRef.current;
       
       // Check for Global Pause
-      if (governanceConfig.isGlobalPause) {
+      if (currentGovernanceConfig.isGlobalPause) {
         responseText = "SYSTEM HALTED: All automated inference is currently paused. Your request has been routed to the manual review queue.";
         setLatency(null);
         if (auditLogId) {
@@ -2767,10 +2804,10 @@ export default function App() {
         }
       // Check for Human-in-the-Loop (HITL) trigger conditions
       } else if (
-        governanceConfig.isHitlActive &&
+        currentGovernanceConfig.isHitlActive &&
         (
           sanitization.detectionLevel >= DetectionLevel.SUSPICIOUS ||
-          sanitization.syntacticScore >= governanceConfig.syntacticThreshold ||
+          sanitization.syntacticScore >= currentGovernanceConfig.syntacticThreshold ||
           sanitization.isPotentiallyAdversarial
         )
       ) {
@@ -3173,7 +3210,7 @@ export default function App() {
                 className="w-16 h-16 object-contain"
               />
               <CardTitle className="text-xl font-sans font-semibold tracking-tight flex items-baseline gap-0.5">
-                Counter-Spy<span className="text-primary">.ai</span> <span className="text-[10px] opacity-50 ml-2 font-mono">v2.0</span>
+                Counter-Spy<span className="text-primary">.ai</span> <span className="text-[10px] opacity-50 ml-2 font-mono">v2.1</span>
               </CardTitle>
             </div>
             <CardDescription className="text-sm font-semibold text-slate-200">
@@ -4049,14 +4086,14 @@ export default function App() {
                               />
                             )}
                           </li>
-                          {/* Blocked Topics Toggle */}
+                          {/* Forbidden Phrases Toggle */}
                           <li className="flex items-center justify-between">
                             <div className="flex items-center gap-2.5">
                               <ShieldCheck className={`w-3.5 h-3.5 ${activeGuardrails.blockedTopics ? 'text-green-500' : 'text-muted-foreground'}`} /> 
                               <span className={!activeGuardrails.blockedTopics ? 'text-muted-foreground line-through' : ''}>
-                                Blocked Topics
+                                Forbidden Phrases
                               </span>
-                              <HelpTooltip text="Flags or blocks prompts that fall into governed subject areas defined by policy." />
+                              <HelpTooltip text="Flags or blocks prompts that contain governed phrase patterns defined by policy." />
                             </div>
                             {profile?.role === 'admin' && (
                               <Switch 
@@ -4514,10 +4551,11 @@ Still the same prompt
 ${BULK_PROMPT_END_MARKER}`}</pre>
                     </div>
                     <input
+                      ref={bulkFileInputRef}
                       type="file"
                       accept=".txt,text/plain"
                       disabled={isBulkProcessing}
-                      className="block h-11 w-full rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground file:mr-3 file:h-9 file:rounded-md file:border-0 file:bg-muted file:px-4 file:text-sm file:font-medium file:leading-none file:text-foreground file:align-middle file:inline-flex file:items-center file:justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+                      className="hidden"
                       onClick={(e) => {
                         e.currentTarget.value = '';
                       }}
@@ -4525,6 +4563,9 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                         const inputEl = e.currentTarget;
                         const file = inputEl.files?.[0];
                         if (!file) return;
+                        // Preserve the selected filename in app state before the
+                        // native file input is cleared for same-file re-selection.
+                        setBulkUploadFileName(file.name);
                         const reader = new FileReader();
                         reader.onload = async (event) => {
                           const text = typeof event.target?.result === 'string' ? event.target.result : '';
@@ -4548,6 +4589,18 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                         reader.readAsText(file);
                       }}
                     />
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={isBulkProcessing}
+                      className="h-10 rounded-lg font-medium text-sm"
+                      onClick={() => bulkFileInputRef.current?.click()}
+                    >
+                      Choose File
+                    </Button>
+                    <p className="text-[11px] text-muted-foreground">
+                      {bulkUploadFileName ? `Selected file: ${bulkUploadFileName}` : 'Selected file: None'}
+                    </p>
                   </div>
 
                   {/* Progress Bar for Bulk Processing */}
@@ -4784,11 +4837,11 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                               </div>
                             )}
                           </div>
-                          {/* Forbidden Topics Section */}
+                          {/* Forbidden Phrases Section */}
                           <div>
                             <label className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                              <span>Forbidden Topics (One per line)</span>
-                              <HelpTooltip text="Topic areas that should be flagged, escalated, or refused under active policy." />
+                              <span>Forbidden Phrases (One per line)</span>
+                              <HelpTooltip text="Phrase patterns that should be flagged, escalated, or refused under active policy." />
                             </label>
                             {isEditingConfig ? (
                               <textarea 

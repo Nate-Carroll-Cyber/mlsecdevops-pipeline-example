@@ -34,7 +34,7 @@ If an enterprise deploys an LLM (like Gemini 3 Flash) without an intermediary ga
 
 #### **5. Article 9: Risk Management System**
 *Deployers must establish a continuous iterative process to identify, estimate, and evaluate risks that the AI system may pose to health, safety, or fundamental rights.*
-* **Dynamic Guardrails:** Administrators can toggle security features (Blocked Keywords, Forbidden Topics) on the fly. This allows the organization to dynamically adjust the AI’s risk posture as new threats are identified.
-* **Forbidden Topics Enforcement:** By strictly prohibiting the model from discussing restricted subjects (e.g., specific political or financial topics), the organization mitigates the risk of the AI violating fundamental rights or generating harmful misinformation.
+* **Dynamic Guardrails:** Administrators can toggle security features (Blocked Keywords, Forbidden Phrases) on the fly. This allows the organization to dynamically adjust the AI’s risk posture as new threats are identified.
+* **Forbidden Phrases Enforcement:** By strictly prohibiting configured phrase patterns tied to restricted subjects (e.g., specific political or financial requests), the organization mitigates the risk of the AI violating fundamental rights or generating harmful misinformation.
 
 ---

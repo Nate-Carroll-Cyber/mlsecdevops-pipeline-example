@@ -39,6 +39,35 @@ Use this checklist once AWS credentials are available. The current target region
 | Responder model | OpenAI-compatible or Gemini downstream responder | Confirm final provider, base URL, model ID, and secret source. |
 | Failure behavior | Fail secure | Backend must block on safeguards/model errors. |
 
+## Backend API Surface
+
+| Route | Current Local Runtime | Deployment Note |
+| :--- | :--- | :--- |
+| `GET /healthz` | Backend health check | Keep public or low-risk depending on environment policy. |
+| `POST /v1/intercept` | Analyst Chat, Playground, Bulk Ingest safeguard gateway | Requires auth and model secret configuration. |
+| `POST /v1/translate` | Manual Playground Lara translation | Add API Gateway route if hosted Playground translation is in scope. |
+| `POST /v1/ctf/sam-spade/session` | Create CTF session | Add API Gateway route if hosted Sam Spade is in scope. |
+| `GET /v1/ctf/sam-spade/session/:sessionId` | Resume CTF session | Add API Gateway route if hosted Sam Spade is in scope. |
+| `POST /v1/ctf/sam-spade/message` | Governed CTF question turn | Add API Gateway route if hosted Sam Spade is in scope. |
+| `POST /v1/ctf/sam-spade/solve` | Governed CTF solve attempt | Add API Gateway route if hosted Sam Spade is in scope. |
+
+## Auth Alignment
+
+The local UI can run with Firebase Auth or local-review mode. The dev CloudFormation API target uses Cognito JWT authorization for protected API routes. Before deployment, choose one hosted frontend identity flow and make sure the React app sends the matching `Authorization` header for protected backend calls.
+
+## Backend Secrets
+
+| Secret / Env | Required For | Notes |
+| :--- | :--- | :--- |
+| `SAFEGUARDS_API_BASE_URL` | Backend safeguard judge | Required for clean prompts to reach the judge. |
+| `SAFEGUARDS_API_KEY` | Backend safeguard judge | Store in Secrets Manager or another approved secret source. |
+| `SAFEGUARDS_MODEL_ID` | Backend safeguard judge | Defaults locally, but should be explicit in dev. |
+| `RESPONDER_PROVIDER` | Downstream responder | `openai_compatible` or `gemini`. |
+| `RESPONDER_API_BASE_URL` | Downstream responder | Provider API root. |
+| `RESPONDER_API_KEY` | Downstream responder | Store in Secrets Manager or another approved secret source. |
+| `RESPONDER_MODEL_ID` | Downstream responder | Confirm final model ID. |
+| `LARA_ACCESS_KEY_ID` / `LARA_ACCESS_KEY_SECRET` | Playground translation | Needed only if hosted translation is enabled. |
+
 ## Stack Order
 
 1. `01-network-dns.yml`

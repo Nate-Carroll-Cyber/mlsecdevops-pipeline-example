@@ -5,6 +5,7 @@
 export {
   createSamSpadeSession,
   getSamSpadeSession,
+  shouldInterceptSamSpadeIntake,
   solveSamSpadeCase,
   submitSamSpadeMessage,
 } from './service.js';

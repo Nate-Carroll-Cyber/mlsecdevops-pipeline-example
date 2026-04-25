@@ -49,6 +49,7 @@ counter-spy.ai/
 │   │   ├── backendApi.ts                 # Backend gateway client for intercept, responder, CTF, translation, and governed 403 result handling
 │   │   ├── gemini.ts                     # Legacy deterministic fallback helpers retained for local/demo paths
 │   │   ├── metrics.ts                    # Telemetry aggregation & filtering logic
+│   │   ├── playgroundMetrics.ts          # Browser-local Playground/Bulk metric records, including backend safeguard attribution fields
 │   │   ├── policies.ts                   # Knowledge Base (MITRE ATLAS, System Config)
 │   │   ├── sanitizer.ts                  # 🛡️  Shield — PII, entropy, regex, forbidden phrase & ReDoS engine
 │   │   ├── sanitizerLanguage.ts          # Local language/translation policy helpers
@@ -83,6 +84,7 @@ counter-spy.ai/
 | :--- | :--- | :--- |
 | 🛡️ **The Shield** | `src/lib/sanitizer.ts` | Local sanitization engine — intercepts all adversarial payloads before any external API call is initiated. |
 | ⚔️ **The Sword** | `backend/src/server.ts` + `src/lib/backendApi.ts` | Backend-mediated inference path — local sanitizer, OpenAI-compatible safeguard judge, downstream responder, Sam Spade CTF persona/scenario handoff, and governed intercept result handling. |
+| 🕵️ **The Case File** | `backend/src/services/sam-spade/` | Sam Spade CTF session, review, and gameplay gatekeeping — clean turns reach the responder, while sensitive/adversarial turns are masked as `Bad content.` and routed to audit review. |
 | 📡 **The Radar** | `src/lib/anomalyDetector.ts` | Statistical anomaly engine — calculates real-time Z-Scores to detect coordinated automated attacks. |
 | 🔒 **The Vault** | `firestore.rules` | Database-layer enforcement — ensures data integrity and PII privacy even if the client layer is compromised. |
 | 📚 **The Manual** | `Technical/` + `Regulatory/` | Operational and assurance documentation — provides context for implementers, analysts, and compliance review. |

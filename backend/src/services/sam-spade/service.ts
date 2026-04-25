@@ -9,6 +9,24 @@ import { samSpadeConfig } from './config.js';
 import { getStoredSession, saveStoredSession } from './store.js';
 import type { SamSpadeReviewArtifact, SamSpadeSessionMessage, SamSpadeSessionRecord } from './types.js';
 
+const SAM_SPADE_BLOCKED_RESPONSE = 'Bad content.';
+const SAM_SPADE_SENSITIVE_REDACTIONS = new Set([
+  'EMAIL',
+  'PHONE',
+  'ADDRESS',
+  'ZIPCODE',
+  'MAC_ADDRESS',
+  'IP_ADDRESS',
+  'CREDIT_CARD',
+  'SSN',
+  'AWS_KEY',
+  'PRIVATE_KEY',
+  'API_KEY',
+  'JWT',
+  'CANARY_TOKEN',
+  'SECRET_KEY',
+]);
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -19,6 +37,48 @@ function toDetectionLevel(sanitization: BackendSanitizationResult): SamSpadeRevi
   if (sanitization.verdict === 'SUSPICIOUS') return 'Suspicious';
   if (sanitization.redactions.length > 0) return 'Informational';
   return 'Clean';
+}
+
+function hasSensitiveGameplayExposure(sanitization: BackendSanitizationResult): boolean {
+  return sanitization.redactions.some((redaction) => SAM_SPADE_SENSITIVE_REDACTIONS.has(redaction));
+}
+
+export function shouldInterceptSamSpadeIntake(
+  sanitization: BackendSanitizationResult,
+  externalVerdict?: FirewallVerdict,
+): boolean {
+  return sanitization.verdict !== 'CLEAN' ||
+    (externalVerdict !== undefined && externalVerdict !== 'CLEAN') ||
+    hasSensitiveGameplayExposure(sanitization);
+}
+
+function getReviewDetectionFlags(
+  sanitization: BackendSanitizationResult,
+  effectiveVerdict: FirewallVerdict,
+  sensitiveGameplayExposure: boolean,
+): string[] {
+  const flags = new Set(sanitization.detectionFlags);
+  if (effectiveVerdict !== sanitization.verdict) {
+    flags.add(`SAFEGUARD_${effectiveVerdict}`);
+  }
+  if (sensitiveGameplayExposure) {
+    flags.add('SENSITIVE_DATA_EXPOSURE');
+  }
+  return [...flags];
+}
+
+function getReviewDetectionLevel(
+  sanitization: BackendSanitizationResult,
+  effectiveVerdict: FirewallVerdict,
+  sensitiveGameplayExposure: boolean,
+): SamSpadeReviewArtifact['detectionLevel'] {
+  if (effectiveVerdict !== sanitization.verdict) {
+    return effectiveVerdict === 'ADVERSARIAL' ? 'Adversarial' : 'Suspicious';
+  }
+  if (sensitiveGameplayExposure) {
+    return 'Suspicious';
+  }
+  return toDetectionLevel(sanitization);
 }
 
 // Start a fresh case session with the opening noir line already on the timeline.
@@ -79,7 +139,8 @@ export function submitSamSpadeMessage(args: {
   const submittedAt = nowIso();
   const sanitization = sanitizePrompt(args.prompt, args.tuning);
   const effectiveVerdict = args.externalVerdict ?? sanitization.verdict;
-  const intercepted = sanitization.verdict !== 'CLEAN' || effectiveVerdict !== 'CLEAN';
+  const sensitiveGameplayExposure = hasSensitiveGameplayExposure(sanitization);
+  const intercepted = shouldInterceptSamSpadeIntake(sanitization, args.externalVerdict);
   // Record the player turn using the sanitized text that downstream review sees.
   const reviewDisposition: SamSpadeSessionMessage['reviewDisposition'] = intercepted ? 'intercepted' : 'clean';
   const playerMessage: SamSpadeSessionMessage = {
@@ -98,10 +159,12 @@ export function submitSamSpadeMessage(args: {
     // If the firewall blocks the turn, gameplay pauses and review takes over.
     session.status = 'INTERCEPTED';
     reviewStatus = 'PENDING_REVIEW';
-    npcResponse = effectiveVerdict === 'ADVERSARIAL'
-      ? "You’re leaning too hard on the wrong words. Come back when your questions sound less like a break-in."
-      : "That line of questioning’s too blunt. Dress it up, work the edges, and try again.";
-    analystReasoning = `${args.externalReasoning || sanitization.analystReasoning} Sam Spade CTF intake was intercepted before downstream gameplay.`;
+    npcResponse = SAM_SPADE_BLOCKED_RESPONSE;
+    analystReasoning = [
+      args.externalReasoning || sanitization.analystReasoning,
+      sensitiveGameplayExposure ? 'Sensitive data exposure was blocked before Sam Spade gameplay.' : '',
+      'Sam Spade CTF intake was intercepted before downstream gameplay.',
+    ].filter(Boolean).join(' ');
   } else {
     session.status = 'ACTIVE';
     analystReasoning = `${sanitization.analystReasoning} Sam Spade CTF intake cleared the guardrails and produced an NPC response.`;
@@ -127,17 +190,11 @@ export function submitSamSpadeMessage(args: {
     action: 'message',
     timestamp: npcMessage.createdAt,
     sanitizedPrompt: sanitization.sanitized,
-    detectionFlags: effectiveVerdict === sanitization.verdict
-      ? sanitization.detectionFlags
-      : Array.from(new Set([...sanitization.detectionFlags, `SAFEGUARD_${effectiveVerdict}`])),
+    detectionFlags: getReviewDetectionFlags(sanitization, effectiveVerdict, sensitiveGameplayExposure),
     entropy: sanitization.entropy,
     globalEntropy: sanitization.globalEntropy,
     suspiciousChunks: sanitization.suspiciousChunks,
-    detectionLevel: effectiveVerdict === sanitization.verdict
-      ? toDetectionLevel(sanitization)
-      : effectiveVerdict === 'ADVERSARIAL'
-        ? 'Adversarial'
-        : 'Suspicious',
+    detectionLevel: getReviewDetectionLevel(sanitization, effectiveVerdict, sensitiveGameplayExposure),
     escalationRecommended: intercepted,
     response: npcResponse,
     analystReasoning,
@@ -175,7 +232,8 @@ export function solveSamSpadeCase(args: {
   const submittedAt = nowIso();
   const requestId = crypto.randomUUID();
   const sanitization = sanitizePrompt(args.theory, args.tuning);
-  const intercepted = sanitization.verdict !== 'CLEAN';
+  const sensitiveGameplayExposure = hasSensitiveGameplayExposure(sanitization);
+  const intercepted = shouldInterceptSamSpadeIntake(sanitization);
   const theoryMessage: SamSpadeSessionMessage = {
     id: crypto.randomUUID(),
     role: 'player',
@@ -198,11 +256,13 @@ export function solveSamSpadeCase(args: {
   let reviewStatus: SamSpadeReviewArtifact['status'] = 'REVIEWED';
   let analystReasoning = `${sanitization.analystReasoning} Sam Spade theory submission was evaluated against the case outcome logic.`;
   if (intercepted) {
-    evaluation = sanitization.verdict === 'ADVERSARIAL'
-      ? 'Theory submission intercepted before case evaluation. Try again without adversarial framing.'
-      : 'Theory submission queued for review before case evaluation. Tighten the language and try again.';
+    evaluation = SAM_SPADE_BLOCKED_RESPONSE;
     reviewStatus = 'PENDING_REVIEW';
-    analystReasoning = `${sanitization.analystReasoning} Sam Spade theory submission was intercepted before solve evaluation.`;
+    analystReasoning = [
+      sanitization.analystReasoning,
+      sensitiveGameplayExposure ? 'Sensitive data exposure was blocked before Sam Spade solve evaluation.' : '',
+      'Sam Spade theory submission was intercepted before solve evaluation.',
+    ].filter(Boolean).join(' ');
   }
 
   session.status = intercepted ? 'INTERCEPTED' : solved ? 'SOLVED' : session.status;
@@ -233,12 +293,12 @@ export function solveSamSpadeCase(args: {
     action: 'solve',
     timestamp: session.updatedAt,
     sanitizedPrompt: sanitization.sanitized,
-    detectionFlags: sanitization.detectionFlags,
+    detectionFlags: getReviewDetectionFlags(sanitization, sanitization.verdict, sensitiveGameplayExposure),
     entropy: sanitization.entropy,
     globalEntropy: sanitization.globalEntropy,
     suspiciousChunks: sanitization.suspiciousChunks,
     detectionLevel: intercepted
-      ? toDetectionLevel(sanitization)
+      ? getReviewDetectionLevel(sanitization, sanitization.verdict, sensitiveGameplayExposure)
       : solved
         ? 'Informational'
         : 'Clean',

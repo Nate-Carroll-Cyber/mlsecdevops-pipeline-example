@@ -134,11 +134,12 @@ function getSeverityBucket(log: any, entropyThreshold?: number): SeverityBucket 
   if (reviewedSeverity === 'Informational') return 'informational';
   if (reviewedSeverity === 'Clean') return 'clean';
 
-  if (log.status === 'PENDING_REVIEW' || detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW')) {
+  if (log.status === 'PENDING_REVIEW' || detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW') || getBackendGatewayStatus(log) === 'QUEUED') {
     return 'review';
   }
   if (
     effectiveDetectionLevel >= 3 ||
+    getBackendSafeguardVerdict(log) === 'ADVERSARIAL' ||
     detectionFlags.includes('RESPONDER_BLOCK') ||
     detectionFlags.includes('RESPONDER_REFUSAL')
   ) {
@@ -149,6 +150,7 @@ function getSeverityBucket(log: any, entropyThreshold?: number): SeverityBucket 
     detectionFlags.includes('BLOCKED_KEYWORD') ||
     detectionFlags.includes('FORBIDDEN_TOPIC') ||
     detectionFlags.includes('REGEX_MATCH') ||
+    hasBackendSafeguardIntervention(log) ||
     upperResponse.startsWith('POLICY VIOLATION DETECTED')
   ) {
     return 'policyViolation';
@@ -167,11 +169,12 @@ function getAutomatedSeverityBucket(log: any, entropyThreshold?: number): Severi
   const upperResponse = typeof log.response === 'string' ? log.response.toUpperCase() : '';
   const effectiveDetectionLevel = getEffectiveDetectionLevel(log, entropyThreshold);
 
-  if (log.status === 'PENDING_REVIEW' || detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW')) {
+  if (log.status === 'PENDING_REVIEW' || detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW') || getBackendGatewayStatus(log) === 'QUEUED') {
     return 'review';
   }
   if (
     effectiveDetectionLevel >= 3 ||
+    getBackendSafeguardVerdict(log) === 'ADVERSARIAL' ||
     detectionFlags.includes('RESPONDER_BLOCK') ||
     detectionFlags.includes('RESPONDER_REFUSAL')
   ) {
@@ -182,6 +185,7 @@ function getAutomatedSeverityBucket(log: any, entropyThreshold?: number): Severi
     detectionFlags.includes('BLOCKED_KEYWORD') ||
     detectionFlags.includes('FORBIDDEN_TOPIC') ||
     detectionFlags.includes('REGEX_MATCH') ||
+    hasBackendSafeguardIntervention(log) ||
     upperResponse.startsWith('POLICY VIOLATION DETECTED')
   ) {
     return 'policyViolation';
@@ -193,6 +197,59 @@ function getAutomatedSeverityBucket(log: any, entropyThreshold?: number): Severi
     return 'informational';
   }
   return 'clean';
+}
+
+function getBackendGatewayStatus(log: any): string | undefined {
+  return typeof log.backendGatewayStatus === 'string' ? log.backendGatewayStatus : undefined;
+}
+
+function getBackendSafeguardVerdict(log: any): string | undefined {
+  if (typeof log.backendSafeguardVerdict === 'string') return log.backendSafeguardVerdict;
+  if (typeof log.judgeDecision === 'string') return log.judgeDecision;
+  return undefined;
+}
+
+function reachedBackendSafeguard(log: any): boolean {
+  if (log.backendReachedSafeguard === true) return true;
+  if (getBackendGatewayStatus(log)) return true;
+  if (getBackendSafeguardVerdict(log)) return true;
+  if (typeof log.responderStatus === 'string' && log.responderStatus.trim()) return true;
+  return typeof log.response === 'string' && log.response.startsWith('Backend intercepted the prompt:');
+}
+
+function hasBackendSafeguardIntervention(log: any): boolean {
+  const gatewayStatus = getBackendGatewayStatus(log);
+  const verdict = getBackendSafeguardVerdict(log);
+  if (gatewayStatus === 'INTERCEPTED' || gatewayStatus === 'QUEUED') return true;
+  if (verdict === 'SUSPICIOUS' || verdict === 'ADVERSARIAL') return true;
+  return typeof log.response === 'string' && log.response.startsWith('Backend intercepted the prompt:');
+}
+
+function normalizeLogTimestamp(value: any): Date {
+  if (value instanceof Date) return value;
+  if (value && typeof value.toDate === 'function') return value.toDate();
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) ? parsed : new Date();
+}
+
+function mergeLocalAuditLogOverlays(remoteLogs: any[], localLogs: any[], cutoffDate: Date): any[] {
+  const logsById = new Map<string, any>();
+  remoteLogs.forEach((log) => {
+    if (!log?.id) return;
+    logsById.set(log.id, { ...log, timestamp: normalizeLogTimestamp(log.timestamp) });
+  });
+  localLogs.forEach((log) => {
+    if (!log?.id) return;
+    const timestamp = normalizeLogTimestamp(log.timestamp);
+    if (timestamp < cutoffDate) return;
+    const existing = logsById.get(log.id);
+    logsById.set(log.id, {
+      ...(existing ?? {}),
+      ...log,
+      timestamp,
+    });
+  });
+  return Array.from(logsById.values());
 }
 
 function hasResponderIntervention(log: any): boolean {
@@ -218,6 +275,7 @@ function wasOriginallyReleased(log: any, entropyThreshold?: number): boolean {
 }
 
 function wasPreInferenceBlocked(log: any, entropyThreshold?: number): boolean {
+  if (reachedBackendSafeguard(log)) return false;
   if (hasResponderIntervention(log)) return false;
   if (log.status === 'PENDING_REVIEW') return true;
   if (hasPolicyViolationSignal(Array.isArray(log.detectionFlags) ? log.detectionFlags : [])) return true;
@@ -233,6 +291,7 @@ function isLikelyMaliciousPrompt(log: any, entropyThreshold?: number): boolean {
   }
   return (
     wasPreInferenceBlocked(log, entropyThreshold) ||
+    hasBackendSafeguardIntervention(log) ||
     hasResponderIntervention(log) ||
     getSeverityBucket(log, entropyThreshold) === 'policyViolation' ||
     getSeverityBucket(log, entropyThreshold) === 'adversarial' ||
@@ -244,11 +303,12 @@ function isLikelyMaliciousPrompt(log: any, entropyThreshold?: number): boolean {
 function calculateLayerMetrics(logs: any[], entropyThreshold?: number) {
   const totalLogs = logs.length;
   const preInferenceBlockedCount = logs.filter((log) => wasPreInferenceBlocked(log, entropyThreshold)).length;
-  const reachedSafeguardCount = Math.max(totalLogs - preInferenceBlockedCount, 0);
-  const safeguardInterventionsCount = logs.filter((log) => !wasPreInferenceBlocked(log, entropyThreshold) && hasResponderIntervention(log)).length;
+  const reachedSafeguardCount = logs.filter((log) => reachedBackendSafeguard(log)).length;
+  const safeguardInterventionsCount = logs.filter((log) => reachedBackendSafeguard(log) && hasBackendSafeguardIntervention(log)).length;
   const likelyMaliciousLogs = logs.filter((log) => isLikelyMaliciousPrompt(log, entropyThreshold));
   const postModelEscapeCount = likelyMaliciousLogs.filter((log) =>
     !wasPreInferenceBlocked(log, entropyThreshold) &&
+    !hasBackendSafeguardIntervention(log) &&
     !hasResponderIntervention(log) &&
     wasOriginallyReleased(log, entropyThreshold)
   ).length;
@@ -646,7 +706,17 @@ export function ThreatDashboard({
           source: doc.data().source || 'analyst_chat',
           expectedVerdict: doc.data().expectedVerdict || undefined,
           obfuscationSummary: doc.data().obfuscationSummary || undefined,
+          response: doc.data().response || undefined,
+          judgeDecision: doc.data().judgeDecision || undefined,
+          responderStatus: doc.data().responderStatus || undefined,
+          responderModel: doc.data().responderModel || undefined,
+          responderProvider: doc.data().responderProvider || undefined,
+          backendGatewayStatus: doc.data().backendGatewayStatus || undefined,
+          backendSafeguardVerdict: doc.data().backendSafeguardVerdict || undefined,
+          backendSafeguardReasoning: doc.data().backendSafeguardReasoning || undefined,
+          backendReachedSafeguard: doc.data().backendReachedSafeguard === true,
         }));
+        allLogs = mergeLocalAuditLogOverlays(allLogs, localAuditLogs, yesterday);
 
         const filteredLogs = sourceFilter === 'all'
           ? allLogs

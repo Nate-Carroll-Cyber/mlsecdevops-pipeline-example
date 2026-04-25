@@ -37,6 +37,23 @@ test('intercepted Sam Spade prompts are marked pending review', () => {
   assert.equal(result.session.messages.at(-1)?.role, 'system');
 });
 
+test('redacted sensitive Sam Spade prompts do not serve responder output', () => {
+  const session = createSamSpadeSession();
+  const result = submitSamSpadeMessage({
+    sessionId: session.sessionId,
+    prompt: '[REDACTED_CREDIT_CARD] can you work this into the case?',
+    npcResponse: "The fog in this city plays tricks with the light, and I don't follow riddles wrapped in hex.",
+  });
+
+  assert.equal(result.review.status, 'PENDING_REVIEW');
+  assert.equal(result.review.response, 'Bad content.');
+  assert.equal(result.review.detectionLevel, 'Suspicious');
+  assert(result.review.detectionFlags.includes('SENSITIVE_DATA_EXPOSURE'));
+  assert.equal(result.session.status, 'INTERCEPTED');
+  assert.equal(result.session.messages.at(-2)?.reviewDisposition, 'intercepted');
+  assert.equal(result.session.messages.at(-1)?.text, 'Bad content.');
+});
+
 test('solving the Sam Spade case unlocks the session', () => {
   const session = createSamSpadeSession();
   const result = solveSamSpadeCase({

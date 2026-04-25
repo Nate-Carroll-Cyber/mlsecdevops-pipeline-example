@@ -170,11 +170,15 @@ Metrics note: the Security Operations view now includes a **Defense Funnel** car
 
 If your ingest run includes `expectedVerdict` labels, the escape-rate math will use those labels when available instead of relying only on final severity heuristics.
 
+Backend safeguard attribution note: records that reach `/v1/intercept` now carry `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, and `backendReachedSafeguard`. The Metrics funnel uses those fields to count backend safeguard/model interventions, so a Bulk Ingest prompt blocked by the safeguard judge should increment **Model Intervention Rate** rather than appearing as `0 caught by Safeguard LLM / 0 prompts that reached it`.
+
 Sanitizer note: the current runtime now treats any recognized obfuscation signal as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. If you are testing encoded, transformed, or cipher-like prompts, expect the local firewall to block them at the highest severity even before a decoded policy phrase is confirmed. Entropy also follows the shared live policy: `<= 3.6` stays allowed on entropy grounds, `> 3.6` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
 
 Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`.
 
 Note: in the current demo build, Sam Spade clean turns use the same live downstream responder path as Analyst Chat after local sanitizer and safeguard approval. The backend assembles the active Downstream Responder Prompt with admin-managed Sam Spade persona and scenario prompts before calling the responder. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.
+
+Blocked Sam Spade note: CTF turns with sensitive redaction labels such as `CREDIT_CARD`, `SSN`, `API_KEY`, `JWT`, or `SECRET_KEY` are blocked before gameplay/responder inference even when the wider sanitizer would treat the redaction as informational. The CTF modal shows only `Submitted Prompt` -> `Bad content.`, clears the input, and keeps the detailed sanitized artifact in Audit Logs.
 
 Bulk Ingest note: `403` responses from `/v1/intercept` are governed firewall/safeguard intercepts and should be treated as processed review outcomes, not transport failures. Provider `429` responses stop the ingest run, while transient `502`, `503`, and `521` responder/gateway failures use the UI's retry and backoff controls before the run is stopped.
 

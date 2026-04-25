@@ -5,6 +5,7 @@
 | v1.0 | 2026-04-18 | Initial integration specification for the Sam Spade conversational CTF inside Counter-Spy.ai. |
 | v1.1 | 2026-04-21 | Runtime sync: provenance normalized to `ctf_chat`, and every submission mirrors into the shared governed review path. |
 | v1.2 | 2026-04-24 | Runtime sync: clean Sam Spade turns now use the downstream responder after local and safeguard approval, with admin-managed persona/scenario prompts assembled backend-side. |
+| v1.3 | 2026-04-25 | Runtime sync: sensitive redaction placeholders are intercepted before gameplay/responder inference, and blocked CTF surfaces display only `Bad content.` while Audit Logs retain sanitized review artifacts. |
 
 ---
 
@@ -220,6 +221,7 @@ The game is intentionally adversarial, but that does not mean:
 Instead:
 - legitimate elicitation attempts should flow
 - obviously malicious or non-plain-text attacks should be filtered early
+- sensitive-data disclosures and already-redacted sensitive placeholders should be blocked before gameplay, even if the base sanitizer classifies them as informational elsewhere
 - suspicious but nontrivial attempts can be queued for review if needed
 
 ---
@@ -236,6 +238,7 @@ The Sam Spade backend should be a scenario engine, not a raw chat wrapper.
 - disclosure gating
 - backend-side victory evaluation
 - response construction strategy
+- sensitive-redaction gameplay blocking so PII/secret placeholders cannot be served back through the CTF chat
 
 ### 8.2 Backend Inputs
 
@@ -360,6 +363,19 @@ Analysts should be able to answer:
 - which obfuscation or recovery paths showed up in game traffic
 - whether the scenario engine leaked more than intended
 
+### 11.3 Blocked Gameplay Surface
+
+Blocked Sam Spade turns are review events, not gameplay turns. The runtime rules are:
+
+- intercepted player messages are stored with `reviewDisposition: "intercepted"`
+- blocked system replies are stored with `reviewDisposition: "queued"`
+- the visible noir transcript filters to `reviewDisposition: "clean"`
+- the modal shown to the player uses the generic text `Bad content.`
+- the raw submitted content is not reinserted into the CTF input and is not replayed in the CTF modal
+- Audit Logs retain the sanitized prompt, detection flags, detection level, and review reasoning for authorized analyst review
+
+This keeps the game surface from serving sensitive or adversarial payloads back to the player while preserving forensic usefulness in the review trail.
+
 ---
 
 ## 12. Metrics and Research Value
@@ -461,6 +477,7 @@ The first integration does not need to be large.
 - Sam Spade message traffic uses the dedicated `/v1/ctf/sam-spade/message` route.
 - Clean turns pass through local sanitizer and the safeguard judge before reaching the downstream responder.
 - The backend assembles the Downstream Responder Prompt, Sam Spade persona prompt, and active scenario prompt before responder inference.
+- CTF turns with sensitive redaction signals such as `CREDIT_CARD`, `SSN`, `API_KEY`, `SECRET_KEY`, or `JWT` are intercepted before responder inference and return `Bad content.` to the CTF surface.
 - The frontend mirrors CTF review artifacts into Analyst Chat and Audit Logs without re-running responder inference.
 - Review artifacts may carry a `sam_spade_ctf` responder prompt profile plus responder provider/model/status/latency telemetry.
 

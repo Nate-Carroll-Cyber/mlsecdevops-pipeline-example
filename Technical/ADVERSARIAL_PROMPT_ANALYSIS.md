@@ -18,6 +18,7 @@ This analysis should focus on prompts observed or generated in defensive testing
 - `analyst_chat`
 - `playground`
 - `bulk_ingest`
+- `ctf_chat`
 
 Whenever possible, raw prompt content should remain restricted to authorized reviewers. Published outputs should prefer hashes, summaries, pattern labels, and sanitized excerpts over full prompt redistribution.
 
@@ -94,7 +95,7 @@ The current audit log already captures much of what we need. For analysis, deriv
 | :--- | :--- | :--- |
 | `id` | `string` | Unique record ID |
 | `timestamp` | `datetime` | Event timestamp |
-| `source` | `enum` | `analyst_chat`, `playground`, `bulk_ingest` |
+| `source` | `enum` | `analyst_chat`, `playground`, `bulk_ingest`, `ctf_chat` |
 | `promptHash` | `string` | SHA-256 of raw or canonicalized prompt |
 | `sanitizedPrompt` | `string` | Restricted-use only |
 | `promptLength` | `number` | Character count |
@@ -110,6 +111,9 @@ The current audit log already captures much of what we need. For analysis, deriv
 | `resultantSeverity` | `enum?` | Analyst-reviewed severity when present |
 | `expectedVerdict` | `enum?` | Especially useful for `bulk_ingest` |
 | `batchId` | `string?` | Bulk ingest campaign grouping |
+| `backendGatewayStatus` | `enum?` | `/v1/intercept` outcome: `CLEAN`, `INTERCEPTED`, `QUEUED`, or `SHIELD_ERROR` |
+| `backendSafeguardVerdict` | `enum?` | Backend safeguard judge verdict when the prompt reached that layer |
+| `backendReachedSafeguard` | `boolean?` | True when the local layer allowed the prompt into the backend safeguard path |
 | `atlasTactic` | `string?` | Active MITRE ATLAS organizer shown in the UI |
 | `atlasTechniqueId` | `string?` | Canonical ATLAS organizer node ID |
 | `atlasTechniqueName` | `string?` | Canonical ATLAS organizer node label |
@@ -169,6 +173,7 @@ Promote representative samples into a smaller high-confidence set for:
 - entropy catch rate
 - syntactic catch rate
 - decode-assisted catch rate
+- backend safeguard/model-intervention catch rate
 - overall miss rate
 
 ### Review Metrics
@@ -198,7 +203,7 @@ Start simple. Two to five good charts are enough.
 
 2. **Detection Coverage by Control**
    - bar chart
-   - keyword / topic / regex / entropy / syntactic / decode-assisted / missed
+   - keyword / topic / regex / entropy / syntactic / decode-assisted / safeguard judge / missed
 
 3. **Entropy vs Attack Type**
    - box plot or grouped bar chart

@@ -52,6 +52,10 @@ export interface PlaygroundMetricEntry extends AtlasTaxonomyFields {
   translationTargetLang?: string;
   translationTargetLangName?: string;
   pipelineStageCount?: number;
+  backendGatewayStatus?: 'CLEAN' | 'INTERCEPTED' | 'QUEUED' | 'SHIELD_ERROR';
+  backendSafeguardVerdict?: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL';
+  backendSafeguardReasoning?: string;
+  backendReachedSafeguard?: boolean;
 }
 
 export interface PlaygroundMetricSummary {
@@ -99,6 +103,10 @@ const PlaygroundMetricEntrySchema = z.object({
   translationTargetLang: z.string().optional(),
   translationTargetLangName: z.string().optional(),
   pipelineStageCount: z.number().optional(),
+  backendGatewayStatus: z.enum(['CLEAN', 'INTERCEPTED', 'QUEUED', 'SHIELD_ERROR']).optional(),
+  backendSafeguardVerdict: z.enum(['CLEAN', 'SUSPICIOUS', 'ADVERSARIAL']).optional(),
+  backendSafeguardReasoning: z.string().optional(),
+  backendReachedSafeguard: z.boolean().optional(),
   atlasTactic: z.enum(ATLAS_TACTIC_VALUES).optional(),
   atlasTechniqueId: z.enum(ATLAS_TECHNIQUE_ID_VALUES).optional(),
   atlasTechniqueName: z.string().optional(),

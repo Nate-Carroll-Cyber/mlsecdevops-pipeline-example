@@ -174,6 +174,10 @@ interface AuditLog extends AtlasTaxonomyFields {
   contextWindowLimit?: number;
   contextWindowUtilization?: number;
   judgeDecision?: string;
+  backendGatewayStatus?: 'CLEAN' | 'INTERCEPTED' | 'QUEUED' | 'SHIELD_ERROR';
+  backendSafeguardVerdict?: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL';
+  backendSafeguardReasoning?: string;
+  backendReachedSafeguard?: boolean;
   forwardedPromptHash?: string;
   responderProvider?: 'openai_compatible' | 'gemini';
   responderModel?: string;
@@ -225,7 +229,13 @@ type ResponderRunTelemetry = {
   error?: string;
 };
 
+type BackendSafeguardExecution = Pick<
+  AuditLog,
+  'backendGatewayStatus' | 'backendSafeguardVerdict' | 'backendSafeguardReasoning' | 'backendReachedSafeguard'
+>;
+
 const PII_OR_SECRET_REDACTIONS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'AWS_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'SECRET_KEY'];
+const SAM_SPADE_BLOCKED_CONTENT_LABEL = 'Bad content.';
 
 interface WakeLockSentinelLike {
   release(): Promise<void>;
@@ -330,6 +340,10 @@ const AuditLogSchema = z.object({
   contextWindowLimit: z.number().optional(),
   contextWindowUtilization: z.number().optional(),
   judgeDecision: z.string().optional(),
+  backendGatewayStatus: z.enum(['CLEAN', 'INTERCEPTED', 'QUEUED', 'SHIELD_ERROR']).optional(),
+  backendSafeguardVerdict: z.enum(['CLEAN', 'SUSPICIOUS', 'ADVERSARIAL']).optional(),
+  backendSafeguardReasoning: z.string().optional(),
+  backendReachedSafeguard: z.boolean().optional(),
   forwardedPromptHash: z.string().optional(),
   responderProvider: z.enum(['openai_compatible', 'gemini']).optional(),
   responderModel: z.string().optional(),
@@ -1217,6 +1231,7 @@ async function buildPlaygroundMetricEntry(
   source: 'bulk_ingest' | 'playground',
   batchId?: string,
   expectedVerdict?: string,
+  backendOutcome?: Pick<AuditLog, 'backendGatewayStatus' | 'backendSafeguardVerdict' | 'backendSafeguardReasoning' | 'backendReachedSafeguard'>,
 ): Promise<PlaygroundMetricEntry> {
   const promptHash = await sha256Hex(prompt);
   return {
@@ -1238,10 +1253,33 @@ async function buildPlaygroundMetricEntry(
     suspiciousChunkHashes: await Promise.all(sanitization.suspiciousChunks.map((chunk) => sha256Hex(chunk))),
     suspiciousChunkCount: sanitization.suspiciousChunks.length,
     isPotentiallyAdversarial: sanitization.isPotentiallyAdversarial,
+    ...(backendOutcome?.backendGatewayStatus ? { backendGatewayStatus: backendOutcome.backendGatewayStatus } : {}),
+    ...(backendOutcome?.backendSafeguardVerdict ? { backendSafeguardVerdict: backendOutcome.backendSafeguardVerdict } : {}),
+    ...(backendOutcome?.backendSafeguardReasoning ? { backendSafeguardReasoning: backendOutcome.backendSafeguardReasoning } : {}),
+    ...(backendOutcome?.backendReachedSafeguard !== undefined ? { backendReachedSafeguard: backendOutcome.backendReachedSafeguard } : {}),
     taxonomyNotes: [`source=${source}`, batchId ? `batch=${batchId}` : null, expectedVerdict ? `expected=${expectedVerdict}` : null]
       .filter(Boolean)
       .join(' | '),
   };
+}
+
+function mapBackendSafeguardVerdictToDetectionLevel(verdict?: AuditLog['backendSafeguardVerdict']): DetectionLevel {
+  if (verdict === 'ADVERSARIAL') return DetectionLevel.ADVERSARIAL;
+  if (verdict === 'SUSPICIOUS') return DetectionLevel.SUSPICIOUS;
+  return DetectionLevel.CLEAN;
+}
+
+function isBackendSafeguardIntervention(patch: Pick<AuditLog, 'backendGatewayStatus' | 'backendSafeguardVerdict'>): boolean {
+  return (
+    patch.backendGatewayStatus === 'INTERCEPTED' ||
+    patch.backendGatewayStatus === 'QUEUED' ||
+    patch.backendSafeguardVerdict === 'SUSPICIOUS' ||
+    patch.backendSafeguardVerdict === 'ADVERSARIAL'
+  );
+}
+
+function getBackendGatewayStatusLabel(status?: AuditLog['backendGatewayStatus']): string {
+  return status ? status.replace(/_/g, ' ') : 'NOT REACHED';
 }
 
 function loadResponderTelemetryConfig(): ResponderTelemetryConfig {
@@ -1343,6 +1381,22 @@ function applyAuditLogPatch(logs: AuditLog[], logId: string, patch: Partial<Audi
   return logs.map((log) => (log.id === logId ? { ...log, ...patch } : log));
 }
 
+function applyAuditLogPatchOrInsert(
+  logs: AuditLog[],
+  logId: string,
+  patch: Partial<AuditLog>,
+  fallbackLog?: AuditLog | null,
+): AuditLog[] {
+  let found = false;
+  const patchedLogs = logs.map((log) => {
+    if (log.id !== logId) return log;
+    found = true;
+    return { ...log, ...patch };
+  });
+  if (found || !fallbackLog) return patchedLogs;
+  return [{ ...fallbackLog, id: logId, ...patch }, ...patchedLogs];
+}
+
 function getEffectiveBlockedKeywords(systemBlockedKeywords: string, policies: Policy[]): string[] {
   const configuredKeywords = systemBlockedKeywords
     .split('\n')
@@ -1376,13 +1430,14 @@ export default function App() {
   const [samSpadeSession, setSamSpadeSession] = useState<SamSpadeSession | null>(null);
   const [samSpadeStatus, setSamSpadeStatus] = useState<'idle' | 'connecting' | 'ready' | 'sending' | 'error'>('idle');
   const [samSpadeInputAlert, setSamSpadeInputAlert] = useState(false);
-  const [samSpadeUnapprovedNotice, setSamSpadeUnapprovedNotice] = useState<{ prompt: string; message: string } | null>(null);
+  const [samSpadeUnapprovedNotice, setSamSpadeUnapprovedNotice] = useState<{ prompt: string } | null>(null);
   const [safeguardRuntimeConfig, setSafeguardRuntimeConfig] = useState<SafeguardRuntimeConfig>(() => loadSafeguardRuntimeConfig());
   const [safeguardApiKey, setSafeguardApiKey] = useState('');
   const [responderTelemetryConfig, setResponderTelemetryConfig] = useState<ResponderTelemetryConfig>(() => loadResponderTelemetryConfig());
-  const [responderApiKey, setResponderApiKey] = useState('');
-  const [lastResponderRun, setLastResponderRun] = useState<ResponderRunTelemetry>({ status: 'idle' });
-  const [backendHealth, setBackendHealth] = useState<BackendHealthResponse | null>(null);
+	  const [responderApiKey, setResponderApiKey] = useState('');
+	  const [lastResponderRun, setLastResponderRun] = useState<ResponderRunTelemetry>({ status: 'idle' });
+	  const [lastBackendSafeguardOutcome, setLastBackendSafeguardOutcome] = useState<BackendSafeguardExecution | null>(null);
+	  const [backendHealth, setBackendHealth] = useState<BackendHealthResponse | null>(null);
   const [isEditingRuntimeApiConfig, setIsEditingRuntimeApiConfig] = useState(false);
   const [isEditingSafeguardRuntimeConfig, setIsEditingSafeguardRuntimeConfig] = useState(false);
   // State to store the list of audit logs
@@ -2161,11 +2216,12 @@ export default function App() {
     setInput('');
     setSamSpadeInput('');
     setSamSpadeTheory('');
-    setSamSpadeSession(null);
-    setSamSpadeStatus('idle');
-    setLatency(null);
-    setSanitizationPreview(null);
-    setBulkProgress(0);
+	    setSamSpadeSession(null);
+	    setSamSpadeStatus('idle');
+	    setLatency(null);
+	    setSanitizationPreview(null);
+	    setLastBackendSafeguardOutcome(null);
+	    setBulkProgress(0);
     setBulkTotal(0);
     setIsBulkProcessing(false);
     setSessionId(crypto.randomUUID());
@@ -2180,19 +2236,27 @@ export default function App() {
     return DetectionLevel.CLEAN;
   };
 
+  const isSamSpadeReviewBlocked = (review: SamSpadeReviewArtifact): boolean =>
+    review.status === 'PENDING_REVIEW' ||
+    review.escalationRecommended ||
+    mapSamSpadeDetectionLevel(review.detectionLevel) >= DetectionLevel.SUSPICIOUS;
+
   // Sam Spade submissions are governed by the backend CTF route, then mirrored into
   // Analyst Chat and Audit Logs without re-running responder inference.
   const appendSamSpadeReviewSurfaces = async (
     review: SamSpadeReviewArtifact,
     session: SamSpadeSession,
   ) => {
-    const latestPlayerPrompt = session.messages.filter((message) => message.role === 'player').at(-1)?.text ?? review.sanitizedPrompt;
+    const reviewBlocked = isSamSpadeReviewBlocked(review);
+    const latestPlayerPrompt = reviewBlocked
+      ? SAM_SPADE_BLOCKED_CONTENT_LABEL
+      : session.messages.filter((message) => message.role === 'player').at(-1)?.text ?? review.sanitizedPrompt;
     const actionLabel = review.action === 'solve' ? 'Solve Attempt' : 'Question';
     const displayedPrompt = `[Sam Spade / ${session.caseId} / ${actionLabel}] ${latestPlayerPrompt}`;
     setMessages((prev) => [
       ...prev,
       { role: 'user', text: displayedPrompt },
-      { role: 'model', text: review.response },
+      { role: 'model', text: reviewBlocked ? SAM_SPADE_BLOCKED_CONTENT_LABEL : review.response },
     ]);
 
     if (review.responderStatus === 'COMPLETED') {
@@ -2550,12 +2614,16 @@ export default function App() {
 
   // --- Real-time Logs ---
 
-  // Memoized sorted audit logs based on the current sort configuration
-  const sortedAuditLogs = useMemo(() => {
-    const mergedLogs = [
+  const mergedAuditLogs = useMemo(() => {
+    return [
       ...ephemeralAuditLogs,
       ...auditLogs.filter((log) => !ephemeralAuditLogs.some((ephemeral) => ephemeral.id === log.id)),
     ];
+  }, [auditLogs, ephemeralAuditLogs]);
+
+  // Memoized sorted audit logs based on the current sort configuration
+  const sortedAuditLogs = useMemo(() => {
+    const mergedLogs = mergedAuditLogs;
     let sortableLogs = [...mergedLogs];
     if (sortConfig !== null) {
       sortableLogs.sort((a, b) => {
@@ -2609,7 +2677,7 @@ export default function App() {
       });
     }
     return sortableLogs;
-  }, [auditLogs, ephemeralAuditLogs, sortConfig]);
+  }, [mergedAuditLogs, sortConfig]);
 
   const visibleAuditLogs = useMemo(() => {
     return sortedAuditLogs.filter((log) => {
@@ -2878,9 +2946,10 @@ export default function App() {
         if (estimatedPromptTokens > parsedContextWindowLimit) {
           const contextWindowMessage = `MAX CONTEXT WINDOW EXCEEDED: Estimated prompt footprint ${estimatedPromptTokens} tokens exceeds the configured max context window of ${parsedContextWindowLimit}. Submission blocked before backend inference.`;
           toast.error(`Submission blocked: estimated prompt footprint ${estimatedPromptTokens} tokens exceeds the configured max context window of ${parsedContextWindowLimit}.`);
-          setLatency(null);
-          setLastExecutedSanitization(sanitization);
-          setSanitizationPreview(null);
+	          setLatency(null);
+	          setLastExecutedSanitization(sanitization);
+	          setSanitizationPreview(null);
+	          setLastBackendSafeguardOutcome(null);
           const blockedUserMessage: ChatMessage = {
             role: 'user',
             text: options?.displayInputPrefix ? `${options.displayInputPrefix}${sanitization.sanitized}` : sanitization.sanitized,
@@ -3038,17 +3107,19 @@ export default function App() {
       text: options?.displayInputPrefix ? `${options.displayInputPrefix}${sanitization.sanitized}` : sanitization.sanitized,
     };
     setMessages(prev => [...prev, userMsg]);
-    setInput('');
-    setLastExecutedSanitization(sanitization);
-    setSanitizationPreview(null);
+	    setInput('');
+	    setLastExecutedSanitization(sanitization);
+	    setSanitizationPreview(null);
+	    setLastBackendSafeguardOutcome(null);
 
     try {
       let auditLogId: string | null = null;
+      let auditLogBase: AuditLog | null = null;
       // 2. Audit Log (Immutable)
       if (activeGuardrails.sessionAudit) {
         // For the Audit Log, we ALWAYS redact PII even if the live guardrail is disabled
-        const logSanitization = activeGuardrails.piiRedaction 
-          ? sanitization 
+        const logSanitization = activeGuardrails.piiRedaction
+          ? sanitization
           : sanitizeInput(textToProcess, keywords, topics, regexes, { ...activeGuardrails, piiRedaction: true }, {
               entropyThreshold: governanceConfig.entropyThreshold,
               syntacticThreshold: governanceConfig.syntacticThreshold,
@@ -3057,7 +3128,7 @@ export default function App() {
         try {
           if (localReviewMode) {
             auditLogId = crypto.randomUUID();
-            setAuditLogs(prev => [{
+            auditLogBase = {
               id: auditLogId!,
               userId: profile.uid,
               userRole: profile.role,
@@ -3076,35 +3147,69 @@ export default function App() {
               source: options?.source || 'analyst_chat',
               batchId: options?.batchId || undefined,
               expectedVerdict: options?.expectedVerdict || undefined
-            }, ...prev]);
+            };
+            const createdAuditLog = auditLogBase;
+            setAuditLogs(prev => [createdAuditLog!, ...prev.filter((log) => log.id !== createdAuditLog!.id)]);
           } else {
-          // Create the audit log entry
-          const docRef = await addDoc(collection(db, 'audit_logs'), {
-            userId: profile.uid,
-            userRole: profile.role,
-            sessionId: sessionId,
-            timestamp: serverTimestamp(),
-            sanitizedPrompt: logSanitization.sanitized,
-            detectionFlags: logSanitization.redactions,
-            obfuscationSummary: buildObfuscationSummary(logSanitization.redactions, logSanitization.decodeTelemetry),
-            entropy: logSanitization.entropy,
-            globalEntropy: logSanitization.globalEntropy,
-            suspiciousChunks: logSanitization.suspiciousChunks,
-            escalationRecommended: logSanitization.isPotentiallyAdversarial,
-            detectionLevel: logSanitization.detectionLevel,
-            latencyMs: logSanitization.latencyMs,
-            modelId: 'gemini-3-flash-preview',
-            source: options?.source || 'analyst_chat',
-            batchId: options?.batchId || null,
-            expectedVerdict: options?.expectedVerdict || null
-          });
-          auditLogId = docRef.id;
+            // Create the audit log entry
+            const docRef = await addDoc(collection(db, 'audit_logs'), {
+              userId: profile.uid,
+              userRole: profile.role,
+              sessionId: sessionId,
+              timestamp: serverTimestamp(),
+              sanitizedPrompt: logSanitization.sanitized,
+              detectionFlags: logSanitization.redactions,
+              obfuscationSummary: buildObfuscationSummary(logSanitization.redactions, logSanitization.decodeTelemetry),
+              entropy: logSanitization.entropy,
+              globalEntropy: logSanitization.globalEntropy,
+              suspiciousChunks: logSanitization.suspiciousChunks,
+              escalationRecommended: logSanitization.isPotentiallyAdversarial,
+              detectionLevel: logSanitization.detectionLevel,
+              latencyMs: logSanitization.latencyMs,
+              modelId: 'gemini-3-flash-preview',
+              source: options?.source || 'analyst_chat',
+              batchId: options?.batchId || null,
+              expectedVerdict: options?.expectedVerdict || null
+            });
+            auditLogId = docRef.id;
+            auditLogBase = {
+              id: auditLogId,
+              userId: profile.uid,
+              userRole: profile.role,
+              sessionId: sessionId,
+              timestamp: new Date(),
+              sanitizedPrompt: logSanitization.sanitized,
+              detectionFlags: logSanitization.redactions,
+              obfuscationSummary: buildObfuscationSummary(logSanitization.redactions, logSanitization.decodeTelemetry),
+              entropy: logSanitization.entropy,
+              latencyMs: logSanitization.latencyMs,
+              globalEntropy: logSanitization.globalEntropy,
+              suspiciousChunks: logSanitization.suspiciousChunks,
+              escalationRecommended: logSanitization.isPotentiallyAdversarial,
+              detectionLevel: logSanitization.detectionLevel,
+              modelId: 'gemini-3-flash-preview',
+              source: options?.source || 'analyst_chat',
+              batchId: options?.batchId || undefined,
+              expectedVerdict: options?.expectedVerdict || undefined
+            };
+            const createdAuditLog = auditLogBase;
+            setAuditLogs(prev => [createdAuditLog!, ...prev.filter((log) => log.id !== createdAuditLog!.id)]);
           }
         } catch (error) {
           // Handle errors creating the audit log
           handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
         }
       }
+
+      const patchCurrentAuditLog = (patch: Partial<AuditLog>) => {
+        if (!auditLogId) return;
+        auditLogBase = auditLogBase ? { ...auditLogBase, ...patch } : auditLogBase;
+        const fallbackLog = auditLogBase ? { ...auditLogBase, id: auditLogId } : null;
+        setAuditLogs((prev) => applyAuditLogPatchOrInsert(prev, auditLogId!, patch, fallbackLog));
+        if (!localReviewMode && fallbackLog) {
+          setEphemeralAuditLogs((prev) => applyAuditLogPatchOrInsert(prev, auditLogId!, patch, fallbackLog));
+        }
+      };
 
       // 3. Generate Advice
       let responseText = "";
@@ -3118,14 +3223,14 @@ export default function App() {
         responseText = "SYSTEM HALTED: All automated inference is currently paused. Your request has been routed to the manual review queue.";
         setLatency(null);
         if (auditLogId) {
-          try {
-            if (localReviewMode) {
-              setAuditLogs(prev => prev.map(log => log.id === auditLogId ? { ...log, status: 'PENDING_REVIEW' } : log));
-            } else {
-            // Mark the log as pending review
-            await updateDoc(doc(db, 'audit_logs', auditLogId), { status: 'PENDING_REVIEW' });
-            }
-          } catch (e) { console.error(e); }
+          const reviewPatch: Partial<AuditLog> = { status: 'PENDING_REVIEW' };
+          patchCurrentAuditLog(reviewPatch);
+          if (!localReviewMode) {
+            try {
+              // Mark the log as pending review
+              await updateDoc(doc(db, 'audit_logs', auditLogId), reviewPatch);
+            } catch (e) { console.error(e); }
+          }
         }
       // Check for Human-in-the-Loop (HITL) trigger conditions
       } else if (
@@ -3139,14 +3244,14 @@ export default function App() {
         responseText = "PENDING REVIEW: Your request has been flagged for manual review by a security analyst. Please wait.";
         setLatency(null);
         if (auditLogId) {
-          try {
-            if (localReviewMode) {
-              setAuditLogs(prev => prev.map(log => log.id === auditLogId ? { ...log, status: 'PENDING_REVIEW' } : log));
-            } else {
-            // Mark the log as pending review
-            await updateDoc(doc(db, 'audit_logs', auditLogId), { status: 'PENDING_REVIEW' });
-            }
-          } catch (e) { console.error(e); }
+          const reviewPatch: Partial<AuditLog> = { status: 'PENDING_REVIEW' };
+          patchCurrentAuditLog(reviewPatch);
+          if (!localReviewMode) {
+            try {
+              // Mark the log as pending review
+              await updateDoc(doc(db, 'audit_logs', auditLogId), reviewPatch);
+            } catch (e) { console.error(e); }
+          }
         }
       // Check if the input was flagged as adversarial or suspicious
       } else if (sanitization.isPotentiallyAdversarial) {
@@ -3199,8 +3304,20 @@ export default function App() {
             const contextWindowUtilization = contextWindowLimit && responderUsage?.totalTokens
               ? parseFloat(((responderUsage.totalTokens / contextWindowLimit) * 100).toFixed(1))
               : undefined;
-            responderAuditPatch = {
-              judgeDecision: backendResponse.safeguards.verdict,
+	            const backendSafeguardOutcome: BackendSafeguardExecution = {
+	              backendGatewayStatus: backendResponse.status,
+	              backendSafeguardVerdict: backendResponse.safeguards.verdict,
+	              backendSafeguardReasoning: backendResponse.safeguards.analystReasoning,
+	              backendReachedSafeguard: true,
+	            };
+	            setLastBackendSafeguardOutcome(backendSafeguardOutcome);
+	            responderAuditPatch = {
+	              judgeDecision: backendResponse.safeguards.verdict,
+	              ...backendSafeguardOutcome,
+	              detectionFlags: Array.from(new Set([
+	                ...sanitization.redactions,
+                ...backendResponse.detectionFlags,
+              ])),
               forwardedPromptHash,
               responderModel: backendResponse.responder?.modelId,
               responderStatus: backendResponse.responder?.status ?? (backendResponse.status === 'CLEAN' ? 'NO_RESPONDER_TEXT' : backendResponse.status),
@@ -3227,27 +3344,30 @@ export default function App() {
               contextWindowUtilization,
             };
             if (auditLogId && responderUsage) {
-              if (localReviewMode) {
-                setAuditLogs(prev => prev.map(log => log.id === auditLogId ? {
-                  ...log,
-                  ...responderAuditPatch,
-                } : log));
-              } else {
-                await updateDoc(doc(db, 'audit_logs', auditLogId), {
-                  judgeDecision: responderAuditPatch.judgeDecision ?? null,
-                  forwardedPromptHash: responderAuditPatch.forwardedPromptHash ?? null,
-                  responderModel: responderAuditPatch.responderModel ?? null,
-                  responderStatus: responderAuditPatch.responderStatus ?? null,
-                  responderLatencyMs: responderAuditPatch.responderLatencyMs ?? null,
-                  promptTokens: responderUsage.promptTokens ?? null,
-                  completionTokens: responderUsage.completionTokens ?? null,
-                  totalTokens: responderUsage.totalTokens ?? null,
-                  contextWindowLimit: contextWindowLimit ?? null,
-                  contextWindowUtilization: contextWindowUtilization ?? null,
-                });
-                setAuditLogs((prev) => applyAuditLogPatch(prev, auditLogId, {
-                  ...responderAuditPatch,
-                }));
+              const telemetryPatch: Partial<AuditLog> = { ...responderAuditPatch };
+              patchCurrentAuditLog(telemetryPatch);
+              if (!localReviewMode) {
+                try {
+                  await updateDoc(doc(db, 'audit_logs', auditLogId), {
+                    ...(telemetryPatch.judgeDecision ? { judgeDecision: telemetryPatch.judgeDecision } : {}),
+                    ...(telemetryPatch.backendGatewayStatus ? { backendGatewayStatus: telemetryPatch.backendGatewayStatus } : {}),
+                    ...(telemetryPatch.backendSafeguardVerdict ? { backendSafeguardVerdict: telemetryPatch.backendSafeguardVerdict } : {}),
+                    ...(telemetryPatch.backendSafeguardReasoning ? { backendSafeguardReasoning: telemetryPatch.backendSafeguardReasoning } : {}),
+                    ...(telemetryPatch.backendReachedSafeguard !== undefined ? { backendReachedSafeguard: telemetryPatch.backendReachedSafeguard } : {}),
+                    ...(telemetryPatch.detectionFlags ? { detectionFlags: telemetryPatch.detectionFlags } : {}),
+                    ...(telemetryPatch.forwardedPromptHash ? { forwardedPromptHash: telemetryPatch.forwardedPromptHash } : {}),
+                    ...(telemetryPatch.responderModel ? { responderModel: telemetryPatch.responderModel } : {}),
+                    ...(telemetryPatch.responderStatus ? { responderStatus: telemetryPatch.responderStatus } : {}),
+                    ...(telemetryPatch.responderLatencyMs !== undefined ? { responderLatencyMs: telemetryPatch.responderLatencyMs } : {}),
+                    ...(telemetryPatch.promptTokens !== undefined ? { promptTokens: telemetryPatch.promptTokens } : {}),
+                    ...(telemetryPatch.completionTokens !== undefined ? { completionTokens: telemetryPatch.completionTokens } : {}),
+                    ...(telemetryPatch.totalTokens !== undefined ? { totalTokens: telemetryPatch.totalTokens } : {}),
+                    ...(telemetryPatch.contextWindowLimit !== undefined ? { contextWindowLimit: telemetryPatch.contextWindowLimit } : {}),
+                    ...(telemetryPatch.contextWindowUtilization !== undefined ? { contextWindowUtilization: telemetryPatch.contextWindowUtilization } : {}),
+                  });
+                } catch (error) {
+                  console.error("Failed to update audit log responder telemetry", error);
+                }
               }
             }
           } else {
@@ -3311,9 +3431,10 @@ export default function App() {
         const structuredAuditOutcome = structuredResponderDecision
           ? deriveStructuredAuditOutcome(structuredResponderDecision, sanitization)
           : null;
+        const backendSafeguardEscalated = isBackendSafeguardIntervention(responderAuditPatch);
         const shouldApplyResponderAuditOutcome = structuredAuditOutcome
           ? true
-          : (outputSanitization.triggeredEscalation || llmTriggeredEscalation || responderEscalated);
+          : (backendSafeguardEscalated || outputSanitization.triggeredEscalation || llmTriggeredEscalation || responderEscalated);
 
         // When the model returns the canonical structured decision contract, use it
         // as the source of truth for the final audit outcome instead of secondary
@@ -3323,6 +3444,8 @@ export default function App() {
         if (shouldApplyResponderAuditOutcome && auditLogId) {
           const escalatedDetectionLevel = structuredAuditOutcome
             ? structuredAuditOutcome.detectionLevel
+            : backendSafeguardEscalated
+              ? Math.max(sanitization.detectionLevel, mapBackendSafeguardVerdictToDetectionLevel(responderAuditPatch.backendSafeguardVerdict))
             : responderDecision === 'block' || responderDecision === 'refusal'
               ? DetectionLevel.ADVERSARIAL
               : responderDecision === 'policy_violation'
@@ -3330,61 +3453,39 @@ export default function App() {
                 : Math.max(sanitization.detectionLevel, DetectionLevel.SUSPICIOUS);
           const shouldQueueReview = structuredAuditOutcome
             ? structuredAuditOutcome.shouldQueueReview
-            : responderDecision === 'queue_for_review';
+            : backendSafeguardEscalated || responderDecision === 'queue_for_review';
           const escalationRecommended = structuredAuditOutcome
             ? structuredAuditOutcome.escalationRecommended
             : true;
-          try {
-            if (localReviewMode) {
-              setAuditLogs(prev => prev.map(log => log.id === auditLogId ? {
-                ...log,
-                escalationRecommended,
-                status: shouldQueueReview ? 'PENDING_REVIEW' : log.status,
-                detectionLevel: escalatedDetectionLevel,
-                detectionFlags: responderDecision === 'policy_violation' && !log.detectionFlags.includes('POLICY_VIOLATION')
-                  ? [...log.detectionFlags, 'POLICY_VIOLATION']
-                  : responderDecision === 'block' && !log.detectionFlags.includes('RESPONDER_BLOCK')
-                    ? Array.from(new Set([
-                        ...log.detectionFlags,
-                        'RESPONDER_BLOCK',
-                        ...( /^fail_secure(?:\b|[-_:])/i.test(rawResponseForDecisioning.trim()) ? ['RESPONDER_FAIL_SECURE'] : []),
-                      ]))
-                    : responderDecision === 'queue_for_review' && !log.detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW')
-                      ? [...log.detectionFlags, 'RESPONDER_QUEUE_FOR_REVIEW']
-                      : responderDecision === 'refusal' && !log.detectionFlags.includes('RESPONDER_REFUSAL')
-                        ? [...log.detectionFlags, 'RESPONDER_REFUSAL']
-                        : log.detectionFlags
-              } : log));
-            } else {
-            const existingLog = auditLogs.find((log) => log.id === auditLogId);
-            const nextDetectionFlags = responderDecision === 'policy_violation'
-              ? Array.from(new Set([...(existingLog?.detectionFlags ?? []), 'POLICY_VIOLATION']))
+          const existingDetectionFlags = auditLogBase?.detectionFlags ?? [];
+          const nextDetectionFlags = backendSafeguardEscalated && responderAuditPatch.detectionFlags
+            ? responderAuditPatch.detectionFlags
+            : responderDecision === 'policy_violation'
+              ? Array.from(new Set([...existingDetectionFlags, 'POLICY_VIOLATION']))
               : responderDecision === 'block'
                 ? Array.from(new Set([
-                    ...(existingLog?.detectionFlags ?? []),
+                    ...existingDetectionFlags,
                     'RESPONDER_BLOCK',
                     ...( /^fail_secure(?:\b|[-_:])/i.test(rawResponseForDecisioning.trim()) ? ['RESPONDER_FAIL_SECURE'] : []),
                   ]))
                 : responderDecision === 'queue_for_review'
-                  ? Array.from(new Set([...(existingLog?.detectionFlags ?? []), 'RESPONDER_QUEUE_FOR_REVIEW']))
+                  ? Array.from(new Set([...existingDetectionFlags, 'RESPONDER_QUEUE_FOR_REVIEW']))
                   : responderDecision === 'refusal'
-                    ? Array.from(new Set([...(existingLog?.detectionFlags ?? []), 'RESPONDER_REFUSAL']))
+                    ? Array.from(new Set([...existingDetectionFlags, 'RESPONDER_REFUSAL']))
                     : undefined;
-            await updateDoc(doc(db, 'audit_logs', auditLogId), { 
-              escalationRecommended,
-              ...(shouldQueueReview ? { status: 'PENDING_REVIEW' } : {}),
-              detectionLevel: escalatedDetectionLevel,
-              ...(nextDetectionFlags ? { detectionFlags: nextDetectionFlags } : {})
-            });
-            setAuditLogs((prev) => applyAuditLogPatch(prev, auditLogId, {
-              escalationRecommended,
-              ...(shouldQueueReview ? { status: 'PENDING_REVIEW' } : {}),
-              detectionLevel: escalatedDetectionLevel,
-              ...(nextDetectionFlags ? { detectionFlags: nextDetectionFlags } : {}),
-            }));
+          const escalationPatch: Partial<AuditLog> = {
+            escalationRecommended,
+            ...(shouldQueueReview ? { status: 'PENDING_REVIEW' } : {}),
+            detectionLevel: escalatedDetectionLevel,
+            ...(nextDetectionFlags ? { detectionFlags: nextDetectionFlags } : {}),
+          };
+          patchCurrentAuditLog(escalationPatch);
+          if (!localReviewMode) {
+            try {
+              await updateDoc(doc(db, 'audit_logs', auditLogId), escalationPatch);
+            } catch (error) {
+              console.error("Failed to update audit log escalation status", error);
             }
-          } catch (error) {
-            console.error("Failed to update audit log escalation status", error);
           }
         }
         
@@ -3395,28 +3496,32 @@ export default function App() {
 
       // Update the audit log with the final response
       if (auditLogId) {
-        try {
-          if (localReviewMode) {
-            setAuditLogs(prev => prev.map(log => log.id === auditLogId ? { ...log, response: responseText, ...responderAuditPatch } : log));
-          } else {
-          await updateDoc(doc(db, 'audit_logs', auditLogId), {
-            response: responseText,
-            ...(responderAuditPatch.judgeDecision ? { judgeDecision: responderAuditPatch.judgeDecision } : {}),
-            ...(responderAuditPatch.forwardedPromptHash ? { forwardedPromptHash: responderAuditPatch.forwardedPromptHash } : {}),
-            ...(responderAuditPatch.responderModel ? { responderModel: responderAuditPatch.responderModel } : {}),
-            ...(responderAuditPatch.responderStatus ? { responderStatus: responderAuditPatch.responderStatus } : {}),
-            ...(responderAuditPatch.responderLatencyMs !== undefined ? { responderLatencyMs: responderAuditPatch.responderLatencyMs } : {}),
-            ...(responderAuditPatch.promptTokens !== undefined ? { promptTokens: responderAuditPatch.promptTokens } : {}),
-            ...(responderAuditPatch.completionTokens !== undefined ? { completionTokens: responderAuditPatch.completionTokens } : {}),
-            ...(responderAuditPatch.totalTokens !== undefined ? { totalTokens: responderAuditPatch.totalTokens } : {}),
-            ...(responderAuditPatch.contextWindowLimit !== undefined ? { contextWindowLimit: responderAuditPatch.contextWindowLimit } : {}),
-            ...(responderAuditPatch.contextWindowUtilization !== undefined ? { contextWindowUtilization: responderAuditPatch.contextWindowUtilization } : {}),
-            ...(responderAuditPatch.responseSanitizationFlags ? { responseSanitizationFlags: responderAuditPatch.responseSanitizationFlags } : {}),
-          });
-          setAuditLogs((prev) => applyAuditLogPatch(prev, auditLogId, { response: responseText, ...responderAuditPatch }));
+        const finalAuditPatch: Partial<AuditLog> = {
+          response: responseText,
+          ...(responderAuditPatch.judgeDecision ? { judgeDecision: responderAuditPatch.judgeDecision } : {}),
+          ...(responderAuditPatch.backendGatewayStatus ? { backendGatewayStatus: responderAuditPatch.backendGatewayStatus } : {}),
+          ...(responderAuditPatch.backendSafeguardVerdict ? { backendSafeguardVerdict: responderAuditPatch.backendSafeguardVerdict } : {}),
+          ...(responderAuditPatch.backendSafeguardReasoning ? { backendSafeguardReasoning: responderAuditPatch.backendSafeguardReasoning } : {}),
+          ...(responderAuditPatch.backendReachedSafeguard !== undefined ? { backendReachedSafeguard: responderAuditPatch.backendReachedSafeguard } : {}),
+          ...(responderAuditPatch.detectionFlags ? { detectionFlags: responderAuditPatch.detectionFlags } : {}),
+          ...(responderAuditPatch.forwardedPromptHash ? { forwardedPromptHash: responderAuditPatch.forwardedPromptHash } : {}),
+          ...(responderAuditPatch.responderModel ? { responderModel: responderAuditPatch.responderModel } : {}),
+          ...(responderAuditPatch.responderStatus ? { responderStatus: responderAuditPatch.responderStatus } : {}),
+          ...(responderAuditPatch.responderLatencyMs !== undefined ? { responderLatencyMs: responderAuditPatch.responderLatencyMs } : {}),
+          ...(responderAuditPatch.promptTokens !== undefined ? { promptTokens: responderAuditPatch.promptTokens } : {}),
+          ...(responderAuditPatch.completionTokens !== undefined ? { completionTokens: responderAuditPatch.completionTokens } : {}),
+          ...(responderAuditPatch.totalTokens !== undefined ? { totalTokens: responderAuditPatch.totalTokens } : {}),
+          ...(responderAuditPatch.contextWindowLimit !== undefined ? { contextWindowLimit: responderAuditPatch.contextWindowLimit } : {}),
+          ...(responderAuditPatch.contextWindowUtilization !== undefined ? { contextWindowUtilization: responderAuditPatch.contextWindowUtilization } : {}),
+          ...(responderAuditPatch.responseSanitizationFlags ? { responseSanitizationFlags: responderAuditPatch.responseSanitizationFlags } : {}),
+        };
+        patchCurrentAuditLog(finalAuditPatch);
+        if (!localReviewMode) {
+          try {
+            await updateDoc(doc(db, 'audit_logs', auditLogId), finalAuditPatch);
+          } catch (error) {
+            console.error("Failed to update audit log response", error);
           }
-        } catch (error) {
-          console.error("Failed to update audit log response", error);
         }
       }
 
@@ -3427,6 +3532,12 @@ export default function App() {
           'bulk_ingest',
           options.batchId,
           options.expectedVerdict,
+          {
+            backendGatewayStatus: responderAuditPatch.backendGatewayStatus,
+            backendSafeguardVerdict: responderAuditPatch.backendSafeguardVerdict,
+            backendSafeguardReasoning: responderAuditPatch.backendSafeguardReasoning,
+            backendReachedSafeguard: responderAuditPatch.backendReachedSafeguard,
+          },
         );
         const nextEntries = [...loadPlaygroundMetrics(), metricEntry];
         savePlaygroundMetrics(nextEntries);
@@ -3522,11 +3633,10 @@ export default function App() {
       });
       setSamSpadeSession(result.session);
       if (result.review.status === 'PENDING_REVIEW' || result.review.escalationRecommended) {
-        setSamSpadeInput(submittedPrompt);
+        setSamSpadeInput('');
         setSamSpadeInputAlert(true);
         setSamSpadeUnapprovedNotice({
-          prompt: submittedPrompt,
-          message: result.review.response,
+          prompt: SAM_SPADE_BLOCKED_CONTENT_LABEL,
         });
         toast.error('Unapproved content detected');
       } else {
@@ -4020,10 +4130,6 @@ export default function App() {
                   <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-red-300">Submitted Prompt</p>
                   <p className="text-sm text-slate-200">{samSpadeUnapprovedNotice?.prompt}</p>
                 </div>
-                <div className="rounded-lg border border-slate-800 bg-black/30 p-3">
-                  <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-slate-400">Review Result</p>
-                  <p className="text-sm text-slate-300">{samSpadeUnapprovedNotice?.message}</p>
-                </div>
               </div>
               <DialogFooter>
                 <Button
@@ -4210,36 +4316,50 @@ export default function App() {
                         </div>
                       )}
                       {/* Message List */}
-                      {messages.map((m, i) => {
-                        const isAdversarialDetectionMessage = m.text.startsWith('ADVERSARIAL DETECTION TRIGGERED:');
-                        const isSuspiciousDetectionMessage = m.text.startsWith('SUSPICIOUS DETECTION TRIGGERED:');
-                        const isPolicyViolationMessage = m.text.startsWith('POLICY VIOLATION DETECTED:');
-                        const isStructuredBlockMessage = m.text.startsWith('Decision: BLOCK');
-                        const isStructuredAllowMessage = m.text.startsWith('Decision: ALLOW_AND_FORWARD');
+	                      {messages.map((m, i) => {
+	                        const isAdversarialDetectionMessage = m.text.startsWith('ADVERSARIAL DETECTION TRIGGERED:');
+	                        const isSuspiciousDetectionMessage = m.text.startsWith('SUSPICIOUS DETECTION TRIGGERED:');
+	                        const isPolicyViolationMessage = m.text.startsWith('POLICY VIOLATION DETECTED:');
+	                        const isPendingReviewMessage = m.text.startsWith('PENDING REVIEW:');
+	                        const isBackendInterceptMessage = m.text.startsWith('Backend intercepted the prompt:');
+	                        const isStructuredBlockMessage = m.text.startsWith('Decision: BLOCK');
+	                        const isStructuredAllowMessage = m.text.startsWith('Decision: ALLOW_AND_FORWARD');
 
                         return (
                         <div key={i} className={`flex ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                           <div className={`max-w-[80%] p-5 border rounded-2xl ${
                             m.role === 'user'
                               ? 'bg-primary/5 border-primary/10'
-                              : isAdversarialDetectionMessage
-                                ? 'bg-destructive/10 border-destructive/30'
-                                : isStructuredBlockMessage
-                                  ? 'bg-destructive/10 border-destructive/30'
-                                  : isStructuredAllowMessage
-                                    ? 'bg-green-500/10 border-green-500/30'
-                                : isPolicyViolationMessage
-                                  ? 'bg-orange-500/10 border-orange-500/30'
+	                              : isAdversarialDetectionMessage
+	                                ? 'bg-destructive/10 border-destructive/30'
+	                                : isStructuredBlockMessage
+	                                  ? 'bg-destructive/10 border-destructive/30'
+	                                  : isStructuredAllowMessage
+	                                    ? 'bg-green-500/10 border-green-500/30'
+	                                    : isBackendInterceptMessage || isPendingReviewMessage
+	                                      ? 'bg-purple-500/10 border-purple-500/30'
+	                                : isPolicyViolationMessage
+	                                  ? 'bg-orange-500/10 border-orange-500/30'
                                   : isSuspiciousDetectionMessage
                                     ? 'bg-amber-500/10 border-amber-500/30'
                                     : 'bg-muted/30 border-border'
                           }`}>
                             <div className="flex items-center gap-2 mb-3">
                               {m.role === 'user' ? <UserIcon className="w-3.5 h-3.5 text-primary" /> : <ShieldCheck className="w-3.5 h-3.5 text-primary" />}
-                              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                                {m.role === 'user' ? 'Analyst' : 'Counter-Spy.ai'}
-                              </span>
-                            </div>
+	                              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+	                                {m.role === 'user' ? 'Analyst' : 'Counter-Spy.ai'}
+	                              </span>
+	                              {m.role === 'model' && isBackendInterceptMessage && (
+	                                <Badge variant="outline" className="border-purple-500/50 bg-purple-500/10 text-[10px] uppercase text-purple-500">
+	                                  Backend Review
+	                                </Badge>
+	                              )}
+	                              {m.role === 'model' && isPendingReviewMessage && (
+	                                <Badge variant="outline" className="border-purple-500/50 bg-purple-500/10 text-[10px] uppercase text-purple-500">
+	                                  Pending Review
+	                                </Badge>
+	                              )}
+	                            </div>
                             {/* Message Content */}
                             <p className="text-sm leading-relaxed whitespace-pre-wrap text-foreground">
                               {isAdversarialDetectionMessage ? (
@@ -4257,12 +4377,22 @@ export default function App() {
                                   <span className="text-green-500 font-bold">Decision: ALLOW_AND_FORWARD</span>
                                   {m.text.substring('Decision: ALLOW_AND_FORWARD'.length)}
                                 </>
-                              ) : isPolicyViolationMessage ? (
-                                <>
-                                  <span className="text-orange-500 font-bold">POLICY VIOLATION DETECTED:</span>
-                                  {m.text.substring('POLICY VIOLATION DETECTED:'.length)}
-                                </>
-                              ) : isSuspiciousDetectionMessage ? (
+	                              ) : isPolicyViolationMessage ? (
+	                                <>
+	                                  <span className="text-orange-500 font-bold">POLICY VIOLATION DETECTED:</span>
+	                                  {m.text.substring('POLICY VIOLATION DETECTED:'.length)}
+	                                </>
+	                              ) : isBackendInterceptMessage ? (
+	                                <>
+	                                  <span className="text-purple-500 font-bold">Backend intercepted the prompt:</span>
+	                                  {m.text.substring('Backend intercepted the prompt:'.length)}
+	                                </>
+	                              ) : isPendingReviewMessage ? (
+	                                <>
+	                                  <span className="text-purple-500 font-bold">PENDING REVIEW:</span>
+	                                  {m.text.substring('PENDING REVIEW:'.length)}
+	                                </>
+	                              ) : isSuspiciousDetectionMessage ? (
                                 <>
                                   <span className="text-amber-500 font-bold">SUSPICIOUS DETECTION TRIGGERED:</span>
                                   {m.text.substring('SUSPICIOUS DETECTION TRIGGERED:'.length)}
@@ -4331,14 +4461,47 @@ export default function App() {
                     </CardHeader>
                     <CardContent className="p-5 space-y-5">
                       {/* Display sanitization results if available */}
-                      {(sanitizationPreview || lastExecutedSanitization) ? (
-                        (() => {
-                          const displaySanitization = sanitizationPreview || lastExecutedSanitization;
-                          const hasSensitiveDataExposure = displaySanitization!.redactions.some((redaction) => PII_OR_SECRET_REDACTIONS.includes(redaction));
-                          return (
-                            <>
-                              {/* Entropy Filter Display */}
-                              {activeGuardrails.entropyFilter && (
+	                      {(sanitizationPreview || lastExecutedSanitization) ? (
+	                        (() => {
+	                          const displaySanitization = sanitizationPreview || lastExecutedSanitization;
+	                          const displayBackendOutcome = sanitizationPreview ? null : lastBackendSafeguardOutcome;
+	                          const backendStatus = displayBackendOutcome?.backendGatewayStatus;
+	                          const backendStatusLabel = getBackendGatewayStatusLabel(backendStatus);
+	                          const backendRequiresReview = displayBackendOutcome
+	                            ? isBackendSafeguardIntervention(displayBackendOutcome)
+	                            : false;
+	                          const hasSensitiveDataExposure = displaySanitization!.redactions.some((redaction) => PII_OR_SECRET_REDACTIONS.includes(redaction));
+	                          return (
+	                            <>
+	                              {displayBackendOutcome && (
+	                                <Alert className={`rounded-xl p-3 ${
+	                                  backendRequiresReview
+	                                    ? 'border-purple-500/30 bg-purple-500/10 text-purple-600'
+	                                    : backendStatus === 'CLEAN'
+	                                      ? 'border-green-500/30 bg-green-500/10 text-green-600'
+	                                      : 'border-amber-500/30 bg-amber-500/10 text-amber-600'
+	                                }`}>
+	                                  <ShieldAlert className="w-4 h-4" />
+	                                  <AlertTitle className="ml-2 flex items-center gap-2 text-xs font-bold uppercase">
+	                                    Backend Safeguard
+	                                    <Badge variant="outline" className="border-current bg-background/40 px-1.5 py-0 text-[9px] uppercase">
+	                                      {backendRequiresReview ? 'Review' : backendStatusLabel}
+	                                    </Badge>
+	                                  </AlertTitle>
+	                                  <AlertDescription className="text-[9px]">
+	                                    {backendRequiresReview
+	                                      ? `Local gates passed; backend returned ${backendStatusLabel} and queued analyst review.`
+	                                      : backendStatus === 'CLEAN'
+	                                        ? 'Local gates passed; backend safeguard allowed the prompt to continue.'
+	                                        : `Backend safeguard returned ${backendStatusLabel}.`}
+	                                    {displayBackendOutcome.backendSafeguardReasoning
+	                                      ? ` ${displayBackendOutcome.backendSafeguardReasoning}`
+	                                      : ''}
+	                                  </AlertDescription>
+	                                </Alert>
+	                              )}
+	                              {/* Entropy Filter Display */}
+	                              {activeGuardrails.entropyFilter && (
                                 <div className="space-y-2">
                                   <p className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
                                     Max Window Entropy
@@ -4852,7 +5015,7 @@ export default function App() {
             <div className="flex flex-col h-full min-h-0 gap-6 overflow-y-auto pr-2">
               <ThreatDashboard
                 localReviewMode={localReviewMode}
-                localAuditLogs={auditLogs}
+                localAuditLogs={mergedAuditLogs}
                 governanceConfig={governanceConfig}
                 onGovernanceConfigChange={setGovernanceConfig}
               />

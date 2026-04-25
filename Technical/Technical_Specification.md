@@ -123,6 +123,18 @@ External services must authenticate with the Counter-Spy gateway using **Bearer 
 
 Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records.
 
+### 5.3 Backend Safeguard Attribution Fields
+The frontend carries structured backend outcome data from `/v1/intercept` into Audit Logs, local review state, and browser-local Playground/Bulk metrics:
+
+| Field | Meaning |
+| :--- | :--- |
+| `backendGatewayStatus` | Gateway outcome: `CLEAN`, `INTERCEPTED`, `QUEUED`, or `SHIELD_ERROR`. |
+| `backendSafeguardVerdict` | Safeguard judge verdict: `CLEAN`, `SUSPICIOUS`, or `ADVERSARIAL`. |
+| `backendSafeguardReasoning` | Backend safeguard reasoning for review and operator context. |
+| `backendReachedSafeguard` | True when local gates allowed the prompt to reach the backend safeguard judge. |
+
+These fields prevent model/safeguard interventions from being misclassified as local sanitizer results. They are especially important for Bulk Ingest prompts that appear in Analyst Chat but are blocked by the backend safeguard judge after local sanitizer redaction.
+
 ---
 
 ## 6. Operational Controls: Telemetry Isolation
@@ -141,3 +153,4 @@ The platform utilizes a real-time anomaly detection engine to monitor threat vel
     *   **Z > 2.0**: Triggers "Anomalous Activity" dashboard alerts.
     *   **Z > 5.0**: Triggers high-priority escalation via PagerDuty/Slack integrations.
 *   **Implementation Details**: For detailed dashboard telemetry and SOPs, refer to the [Analyst & Administrator Operations Guide](../OPERATIONS_GUIDE.MD).
+*   **Layered Defense Funnel:** The Metrics surface tracks pre-inference blocks, backend safeguard/model interventions, and post-model escapes. It uses `backendReachedSafeguard`, `backendGatewayStatus`, and `backendSafeguardVerdict` as structured layer attribution before falling back to older severity heuristics.

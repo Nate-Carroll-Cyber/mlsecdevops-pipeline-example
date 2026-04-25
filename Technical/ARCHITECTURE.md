@@ -136,6 +136,18 @@ Future external services would authenticate with the Counter-Spy gateway using *
 
 Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records.
 
+### 5.3 Backend Safeguard Attribution Fields
+When a prompt reaches `/v1/intercept`, the frontend persists a structured backend outcome alongside the normal audit fields:
+
+| Field | Meaning |
+| :--- | :--- |
+| `backendGatewayStatus` | Gateway outcome: `CLEAN`, `INTERCEPTED`, `QUEUED`, or `SHIELD_ERROR`. |
+| `backendSafeguardVerdict` | Safeguard judge verdict: `CLEAN`, `SUSPICIOUS`, or `ADVERSARIAL`. |
+| `backendSafeguardReasoning` | Human-readable judge rationale returned by the backend. |
+| `backendReachedSafeguard` | Boolean marker that the prompt reached the backend safeguard layer. |
+
+These fields are the source of truth for Defense Funnel attribution. Metrics no longer rely on response-text matching to determine whether a Bulk Ingest or Analyst Chat item was blocked locally, blocked by the safeguard judge, or allowed through to the downstream responder.
+
 ---
 
 ## 6. Operational Controls: Telemetry Isolation
@@ -156,5 +168,6 @@ The platform utilizes a real-time anomaly detection engine to monitor threat vel
     *   **Pre-Inference Block Rate:** Fraction of prompts blocked before the Safeguard LLM is invoked.
     *   **Model Intervention Rate:** Fraction of prompts that reached the Safeguard LLM and were then blocked or queued there.
     *   **Post-Model Escape Rate:** Fraction of likely malicious prompts that bypass both the pre-inference layer and the Safeguard LLM layer and still land clean or informational.
+    *   **Structured attribution:** `backendReachedSafeguard`, `backendGatewayStatus`, and `backendSafeguardVerdict` determine whether a record belongs to the local pre-inference bucket or the backend safeguard/model-intervention bucket.
     *   **Ground-Truth Assist:** When available, bulk-ingest `expectedVerdict` labels are used to strengthen post-model escape calculations instead of relying only on final severity heuristics.
 *   **Implementation Details**: For detailed dashboard telemetry and SOPs, refer to the [Analyst & Administrator Operations Guide](../OPERATIONS_GUIDE.MD).

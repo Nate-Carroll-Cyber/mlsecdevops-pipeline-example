@@ -3,6 +3,7 @@
 | Version | Date | Description |
 | :--- | :--- | :--- |
 | v2.0 | 2026-04-21 | Promotion to Beta: stabilized local demo stack, guarded backend responder path, Lara translation modes, Sam Spade governed intake, and layered defense funnel metrics. |
+| v2.1 | 2026-04-25 | Runtime sync: backend safeguard attribution is now structured in audit/metrics records, and blocked Sam Spade CTF content is masked as `Bad content.` on gameplay surfaces. |
 
 ---
 
@@ -29,9 +30,18 @@ The dashboard tracks the rate of "Threats" (Suspicious or Adversarial logs) over
 > **Notification Escalation:** When a Z-Score exceeds **5.0**, the system automatically triggers a high-priority alert. In production environments, this is integrated with **PagerDuty** and **Slack (#soc-alerts)** to ensure immediate analyst response.
 
 > [!TIP]
-> Audit records retain a `source` marker such as `analyst_chat` or `bulk_ingest`, so Bulk Ingest traffic can be compared against analyst-entered traffic without removing it from the main dashboards.
+> Audit records retain a `source` marker such as `analyst_chat`, `bulk_ingest`, `playground`, or `ctf_chat`, so Bulk Ingest and Sam Spade CTF traffic can be compared against analyst-entered traffic without removing it from the main dashboards.
 
-### 2.2 Session Forensics & User Profiling
+### 2.2 Defense Funnel Attribution
+The Defense Funnel splits governed traffic into three layers:
+
+- **Pre-Inference Block Rate:** local sanitizer/governance blocks before the backend safeguard judge.
+- **Model Intervention Rate:** prompts that reached the backend safeguard judge and were blocked or queued there.
+- **Post-Model Escape Rate:** likely malicious prompts that bypassed both layers and still landed clean/informational.
+
+Backend safeguard interventions are attributed from structured fields (`backendReachedSafeguard`, `backendGatewayStatus`, `backendSafeguardVerdict`) rather than from response text. If a Bulk Ingest prompt is shown in Analyst Chat as backend-intercepted, it should increment the Model Intervention Rate.
+
+### 2.3 Session Forensics & User Profiling
 To identify "low and slow" persistent attackers, analysts must look beyond individual logs.
 *   **User History:** The Audit Logs view supports filtering by `userId`. Clicking a User ID in any log entry will isolate that user's entire interaction history.
 *   **Pattern Analysis:** Look for repeated `INFORMATIONAL` or `SUSPICIOUS` flags from the same user over several days, which may indicate a model probing campaign.
@@ -68,6 +78,9 @@ graph TD
     G -->|Yes| H[Mark as Informational]
     G -->|No| I[Approve as Clean]
 ```
+
+### 3.4 Sam Spade CTF Review Surface
+Blocked Sam Spade CTF attempts are deliberately bland in the gameplay UI. The player-facing modal shows only `Bad content.` and does not replay the submitted payload or a separate review result. Analysts should use Audit Logs, filtered by `CTF Chat`, to inspect the sanitized prompt, detection flags, and review rationale.
 
 ---
 

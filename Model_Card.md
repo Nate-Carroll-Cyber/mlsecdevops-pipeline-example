@@ -11,7 +11,7 @@ The system is model-neutral. It does not assume a fixed Gemini, OpenAI, or open-
 - **Local sanitizer:** TypeScript policy engine that runs before external inference and enforces PII/secret redaction, entropy thresholds, regex rules, blocked keywords, forbidden phrases, language recovery, and obfuscation detection.
 - **Safeguard judge:** OpenAI-compatible API endpoint called by the backend `/v1/intercept` gateway. It receives the visible Firewall Prompt, guardrails policy, relevant Knowledge Base context, and a backend-owned structured JSON verdict contract.
 - **Downstream responder:** Separate responder model called only after local checks and the safeguard judge return a clean forwarding decision. It receives the Downstream Responder Prompt as its instruction.
-- **Sam Spade CTF:** Governed by the shared review/audit path. Clean gameplay replies now use the live downstream responder after local sanitizer and safeguard approval, with admin-managed Sam Spade persona and scenario prompts appended to the responder instruction.
+- **Sam Spade CTF:** Governed by the shared review/audit path. Clean gameplay replies now use the live downstream responder after local sanitizer and safeguard approval, with admin-managed Sam Spade persona and scenario prompts appended to the responder instruction. Sensitive redaction placeholders are blocked before gameplay/responder inference and are masked as `Bad content.` on the CTF surface.
 
 ## 3. Runtime Configuration
 
@@ -26,6 +26,8 @@ Analyst Chat and Responder runtime configuration are intentionally separate.
 The safeguard path expects structured decisions such as `ALLOW_AND_FORWARD`, `BLOCK`, `QUEUE_FOR_REVIEW`, and `FAIL_SECURE`. The backend maps these decisions into Counter-Spy.ai outcomes such as `CLEAN`, `SUSPICIOUS`, `ADVERSARIAL`, or `PENDING_REVIEW` before audit and metrics processing.
 
 The visible Firewall Prompt remains the reviewable policy baseline, including forbidden-category and gibberish/obfuscation guidance. The backend appends the JSON verdict contract outside that user-visible prompt.
+
+Audit and Metrics preserve backend safeguard attribution through `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, and `backendReachedSafeguard`. These fields distinguish local pre-inference blocks from backend safeguard/model interventions.
 
 ## 5. Safety and Fail-Closed Behavior
 

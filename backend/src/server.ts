@@ -10,6 +10,7 @@ import { sanitizePrompt, type FirewallVerdict } from './security/sanitizer.js';
 import {
   createSamSpadeSession,
   getSamSpadeSession,
+  shouldInterceptSamSpadeIntake,
   solveSamSpadeCase,
   submitSamSpadeMessage,
   type SamSpadeReviewArtifact,
@@ -1105,7 +1106,7 @@ app.post('/v1/ctf/sam-spade/message', async (req: Request, res: Response<SamSpad
 
   try {
     const sanitization = sanitizePrompt(parsed.data.prompt, parsed.data.tuning);
-    if (sanitization.verdict !== 'CLEAN') {
+    if (shouldInterceptSamSpadeIntake(sanitization)) {
       const result = submitSamSpadeMessage(parsed.data);
       res.status(200).json(result);
       return;

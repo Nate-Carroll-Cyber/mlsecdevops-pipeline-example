@@ -42,7 +42,6 @@ import {
 import {
   normalizeSpelling,
   type NormalizationResult,
-  type SpellCheckBackend,
 } from '../lib/spellNormalize';
 import {
   FOREIGN_LANGUAGE_KEYS,
@@ -116,11 +115,12 @@ export function SyntacticAnalyzer({
   const [submitBaseDelayMs, setSubmitBaseDelayMs] = useState('750');
   const [submitJitterMs, setSubmitJitterMs] = useState('500');
   const [normalizationEnabled, setNormalizationEnabled] = useState(true);
-  const [normalizationBackend, setNormalizationBackend] = useState<SpellCheckBackend>('heuristic');
-  const [languageToolUrl, setLanguageToolUrl] = useState('http://localhost:8010');
   const [translationEnabled, setTranslationEnabled] = useState(true);
   const [translationMode, setTranslationMode] = useState<TranslationMode>('recover_to_english');
   const [translationTargetLang, setTranslationTargetLang] = useState('es');
+  const [laraBaseUrl, setLaraBaseUrl] = useState('https://api.laratranslate.com');
+  const [laraAccessKeyId, setLaraAccessKeyId] = useState('');
+  const [laraApiKey, setLaraApiKey] = useState('');
   const [backendHealth, setBackendHealth] = useState<BackendHealthResponse | null>(null);
   const [backendHealthError, setBackendHealthError] = useState<string | null>(null);
   const [isCheckingBackendHealth, setIsCheckingBackendHealth] = useState(false);
@@ -289,6 +289,9 @@ export function SyntacticAnalyzer({
     setTranslationEnabled(true);
     setTranslationMode('recover_to_english');
     setTranslationTargetLang('es');
+    setLaraBaseUrl('https://api.laratranslate.com');
+    setLaraAccessKeyId('');
+    setLaraApiKey('');
     setLanguagePipelineError(null);
   };
 
@@ -322,18 +325,31 @@ export function SyntacticAnalyzer({
 
       if (normalizationEnabled) {
         normalized = await normalizeSpelling(currentText, {
-          backend: normalizationBackend,
-          languageToolUrl,
+          backend: 'heuristic',
         });
         currentText = normalized.text;
       }
 
       if (translationEnabled) {
+        const trimmedLaraBaseUrl = laraBaseUrl.trim();
+        const trimmedLaraAccessKeyId = laraAccessKeyId.trim();
+        const trimmedLaraApiKey = laraApiKey.trim();
         const translationResult = await translatePromptViaBackend({
           text: currentText,
           provider: TRANSLATION_PROVIDER,
           mode: translationMode,
           ...(translationMode === 'generate_foreign_variant' ? { targetLang: translationTargetLang } : {}),
+          ...(
+            trimmedLaraBaseUrl || trimmedLaraAccessKeyId || trimmedLaraApiKey
+              ? {
+                  runtimeConfig: {
+                    ...(trimmedLaraBaseUrl ? { baseUrl: trimmedLaraBaseUrl } : {}),
+                    ...(trimmedLaraAccessKeyId ? { accessKeyId: trimmedLaraAccessKeyId } : {}),
+                    ...(trimmedLaraApiKey ? { apiKey: trimmedLaraApiKey } : {}),
+                  },
+                }
+              : {}
+          ),
         });
         translated = translationResult;
         currentText = translationResult.text;
@@ -988,33 +1004,14 @@ export function SyntacticAnalyzer({
             <div className="space-y-2">
               <label className="flex items-center gap-2 text-xs font-medium text-slate-400">
                 <span>Normalization Backend</span>
-                <HelpTooltip text="Heuristic runs fully in-browser. LanguageTool uses a configured local or remote service for richer correction." />
+                <HelpTooltip text="Spell verification uses the browser-local heuristic pass. Lara settings live in the Translation panel." />
               </label>
-              <select
-                className="flex h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500"
-                value={normalizationBackend}
-                onChange={(e) => setNormalizationBackend(e.target.value as SpellCheckBackend)}
-                disabled={!normalizationEnabled}
+              <div
+                className={`flex h-10 w-full items-center rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 ${!normalizationEnabled ? 'opacity-60' : ''}`}
               >
-                <option value="heuristic">Heuristic (Browser-Local)</option>
-                <option value="languagetool">LanguageTool (Provider)</option>
-              </select>
-            </div>
-
-            {normalizationEnabled && normalizationBackend === 'languagetool' && (
-              <div className="space-y-2">
-                <label className="flex items-center gap-2 text-xs font-medium text-slate-400">
-                  <span>LanguageTool URL</span>
-                  <HelpTooltip text="LanguageTool endpoint used for spelling and grammar correction. Example: http://localhost:8010" />
-                </label>
-                <input
-                  type="text"
-                  className="flex h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500"
-                  value={languageToolUrl}
-                  onChange={(e) => setLanguageToolUrl(e.target.value)}
-                />
+                Heuristic (Browser-Local)
               </div>
-            )}
+            </div>
           </div>
 
           <div className="rounded-lg border border-slate-800 bg-slate-950/60 p-4 space-y-3">
@@ -1044,6 +1041,59 @@ export function SyntacticAnalyzer({
               <Badge variant="outline" className="border-slate-700 text-slate-200">
                 Manual only
               </Badge>
+            </div>
+
+            <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+              <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
+                <span>Lara Runtime Settings</span>
+                <HelpTooltip text="Optional browser-memory Lara overrides for this manual translation call. Leave blank to use backend environment credentials." />
+              </div>
+              <div className="space-y-2">
+                <label className="flex items-center gap-2 text-xs font-medium text-slate-400">
+                  <span>Lara API Base URL</span>
+                  <HelpTooltip text="Lara Translate API root. Recommended: https://api.laratranslate.com" />
+                </label>
+                <input
+                  type="url"
+                  className="flex h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                  value={laraBaseUrl}
+                  onChange={(e) => setLaraBaseUrl(e.target.value)}
+                  placeholder="https://api.laratranslate.com"
+                  disabled={!translationEnabled}
+                />
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <label className="flex items-center gap-2 text-xs font-medium text-slate-400">
+                    <span>Lara Access Key ID</span>
+                    <HelpTooltip text="Optional browser-memory access key ID. This is sent only when you click Run Normalize -> Translate." />
+                  </label>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    className="flex h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                    value={laraAccessKeyId}
+                    onChange={(e) => setLaraAccessKeyId(e.target.value)}
+                    placeholder="Use backend env if blank"
+                    disabled={!translationEnabled}
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="flex items-center gap-2 text-xs font-medium text-slate-400">
+                    <span>Lara API Key</span>
+                    <HelpTooltip text="Optional browser-memory Lara secret/API key. This is not saved and is sent only to the local backend for the manual translation call." />
+                  </label>
+                  <input
+                    type="password"
+                    autoComplete="off"
+                    className="flex h-10 w-full rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
+                    value={laraApiKey}
+                    onChange={(e) => setLaraApiKey(e.target.value)}
+                    placeholder="Use backend env if blank"
+                    disabled={!translationEnabled}
+                  />
+                </div>
+              </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

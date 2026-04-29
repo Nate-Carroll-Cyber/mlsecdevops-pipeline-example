@@ -108,8 +108,8 @@ To ensure the integrity of the security operations platform, Counter-Spy.ai impl
 - **MCP / A2A Safety Detection**: The built-in MCP / A2A Agent Safety Policy contributes hard-block indicator phrases to the effective blocked-keyword set used by the live sanitization path and the Analyst Playground, helping detect instruction-override, approval-bypass, and exfiltration patterns common to tool-using agents.
 - **MCP / A2A Guardrail Reference**: The recommended Guardrails Policy now explicitly tells the firewall baseline to review the MCP / A2A Agent Safety Policy when evaluating tool-use, routing, approval-bypass, or exfiltration patterns.
 - **Analyst Mode**: A toggleable administrative view for managing system configurations and reviewing logs.
-- **Analyst Playground**: A dedicated sandbox environment featuring the Syntactic Complexity Analyzer, allowing security teams to test and tune firewall thresholds against complex prompt injection attempts in real-time. Single-prompt Playground submissions can also be routed through the same live firewall path used by Analyst Chat, with audit provenance preserved as `playground`. It now includes a manual **Normalize - Translate** pipeline so analysts can verify likely spelling intent, either recover foreign-language prompts back into English or generate one foreign-language variant from English, and then hand the result into the obfuscation workflow.
-- **Backend-Mediated Lara Translation**: The Playground translation stage now routes through the Counter-Spy.ai backend instead of calling translation providers directly from the browser. It is still intentionally manual and text-only: Lara Translate runs only when an analyst explicitly triggers the pipeline, supporting both auto-detect source -> English recovery and English -> analyst-selected foreign-language variant generation while keeping credentials server-side.
+- **Analyst Playground**: A dedicated sandbox environment featuring the Syntactic Complexity Analyzer, allowing security teams to test and tune firewall thresholds against complex prompt injection attempts in real-time. Single-prompt Playground submissions can also be routed through the same live firewall path used by Analyst Chat, with audit provenance preserved as `playground`. It now includes a manual **Normalize - Translate** pipeline so analysts can run browser-local spelling verification, either recover foreign-language prompts back into English or generate one foreign-language variant from English, and then hand the result into the obfuscation workflow.
+- **Backend-Mediated Lara Translation**: The Playground translation stage now routes through the Counter-Spy.ai backend instead of calling translation providers directly from the browser. It is still intentionally manual and text-only: Lara Translate runs only when an analyst explicitly triggers the pipeline, supporting both auto-detect source -> English recovery and English -> analyst-selected foreign-language variant generation. Lara credentials can remain backend-managed or be supplied as browser-memory-only runtime overrides for local demos.
 - **Sam Spade CTF Intake**: The Sam Spade home tab now includes a live question field backed by a dedicated backend session/message/solve API under a `ctf_chat` source. This keeps the noir CTF surface aligned with the same governed sanitization, review, and audit path as the rest of Counter-Spy.ai without treating Analyst Chat as the transport layer.
 - **Dedicated Sam Spade API Path**: The Sam Spade surface now uses its own backend session/message/solve API (`/v1/ctf/sam-spade/...`) with separate frontend session state and local backend persistence. Each Sam Spade submission is governed by the same local sanitizer and safeguard judge path under the `ctf_chat` source. Clean gameplay turns are forwarded to the configured downstream responder with the active Downstream Responder Prompt plus admin-managed Sam Spade persona and scenario prompts. Blocked turns, including already-redacted sensitive placeholders such as `[REDACTED_CREDIT_CARD]`, remain out of the noir transcript, never reach the Sam Spade responder, and are masked as `Bad content.` on the CTF gameplay surface while the audit artifact keeps the sanitized review detail.
 - **CTF Audit Filter**: Audit Logs now include a quick `CTF Chat` source filter so Sam Spade traffic can be isolated immediately without losing the broader audit trail view.
@@ -216,12 +216,13 @@ Then set the backend env vars:
 - `LARA_ACCESS_KEY_SECRET`
 - optional `LARA_API_BASE_URL` if you are not using the default Lara host
 
-Then open the Playground and use **Use Recommended Settings** in the Normalize - Translate panel. The current translation path is hardcoded to:
+Then open the Playground and use **Use Recommended Settings** in the Normalize - Translate panel. The current language pipeline is:
 
-- Provider: `lara`
+- Spell Verification: browser-local heuristic normalization for common typo recovery.
+- Translation provider: `lara`
 - Mode 1: auto-detect source -> `English`
 - Mode 2: `English` -> analyst-selected foreign target language
-- Credentials: backend-only
+- Credentials: backend env by default, with optional browser-memory Lara Base URL, Access Key ID, and API Key overrides in the Translation panel.
 
 Translation still runs only when you explicitly click **Run Normalize -> Translate** in the Playground. It is not executed on every prompt edit or submission.
 
@@ -233,7 +234,7 @@ LARA_ACCESS_KEY_SECRET=your_lara_access_key_secret
 LARA_API_BASE_URL=https://api.laratranslate.com
 ```
 
-That file is ignored by git and is the preferred stable local-demo path for Lara configuration.
+That file is ignored by git and is the preferred stable local-demo path for Lara configuration. For one-off local demos, the Playground Translation panel can also send browser-memory Lara credentials to the local backend for the single manual translation call; those values are not persisted.
 
 ### Customization
 The branding shield is bundled at `public/brand/counter-spy-shield.png`, with the original source image preserved at `public/brand/counter-spy-shield-original.png`. To change the app chrome logo, replace the display PNG or update the `APP_LOGO_URL` constant in `src/App.tsx`.

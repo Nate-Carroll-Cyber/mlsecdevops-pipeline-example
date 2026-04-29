@@ -572,6 +572,11 @@ const TranslateRequestSchema = z.object({
   provider: TranslationProviderSchema.default('lara'),
   mode: z.enum(['recover_to_english', 'generate_foreign_variant']).default('recover_to_english'),
   targetLang: z.string().min(2).max(16).optional(),
+  runtimeConfig: z.object({
+    baseUrl: z.string().url().optional(),
+    accessKeyId: z.string().min(1).optional(),
+    apiKey: z.string().min(1).optional(),
+  }).optional(),
 });
 
 type TranslateRequest = z.infer<typeof TranslateRequestSchema>;
@@ -758,19 +763,35 @@ function isTextLikelyEncodedForTranslation(text: string): boolean {
 
 let laraTranslator: Translator | null | undefined;
 
-function getLaraTranslator(): Translator | null {
+function getLaraTranslator(runtimeConfig?: TranslateRequest['runtimeConfig']): Translator | null {
+  const accessKeyId = runtimeConfig?.accessKeyId?.trim() || env.LARA_ACCESS_KEY_ID;
+  const accessKeySecret = runtimeConfig?.apiKey?.trim() || env.LARA_ACCESS_KEY_SECRET;
+  const apiBaseUrl = runtimeConfig?.baseUrl?.trim() || env.LARA_API_BASE_URL;
+
+  if (runtimeConfig?.accessKeyId || runtimeConfig?.apiKey || runtimeConfig?.baseUrl) {
+    if (!accessKeyId || !accessKeySecret) {
+      return null;
+    }
+
+    const credentials = new Credentials(accessKeyId, accessKeySecret);
+    return new Translator(credentials, {
+      ...(apiBaseUrl ? { serverUrl: apiBaseUrl } : {}),
+      connectionTimeoutMs: 10_000,
+    });
+  }
+
   if (laraTranslator !== undefined) {
     return laraTranslator;
   }
 
-  if (!env.LARA_ACCESS_KEY_ID || !env.LARA_ACCESS_KEY_SECRET) {
+  if (!accessKeyId || !accessKeySecret) {
     laraTranslator = null;
     return laraTranslator;
   }
 
-  const credentials = new Credentials(env.LARA_ACCESS_KEY_ID, env.LARA_ACCESS_KEY_SECRET);
+  const credentials = new Credentials(accessKeyId, accessKeySecret);
   laraTranslator = new Translator(credentials, {
-    ...(env.LARA_API_BASE_URL ? { serverUrl: env.LARA_API_BASE_URL } : {}),
+    ...(apiBaseUrl ? { serverUrl: apiBaseUrl } : {}),
     connectionTimeoutMs: 10_000,
   });
   return laraTranslator;
@@ -778,11 +799,11 @@ function getLaraTranslator(): Translator | null {
 
 async function translateWithLara(
   text: string,
-  options?: { sourceLang?: string | null; targetLang?: string },
+  options?: { sourceLang?: string | null; targetLang?: string; runtimeConfig?: TranslateRequest['runtimeConfig'] },
 ): Promise<{ text: string; sourceLang: string }> {
-  const translator = getLaraTranslator();
+  const translator = getLaraTranslator(options?.runtimeConfig);
   if (!translator) {
-    throw new Error('Lara Translate is not configured. Set LARA_ACCESS_KEY_ID and LARA_ACCESS_KEY_SECRET on the backend.');
+    throw new Error('Lara Translate is not configured. Set LARA_ACCESS_KEY_ID and LARA_ACCESS_KEY_SECRET on the backend or provide browser-memory Lara credentials.');
   }
 
   const result = await translator.translate(
@@ -814,6 +835,7 @@ async function translateText(input: TranslateRequest): Promise<TranslateResponse
   const translated = await translateWithLara(input.text, {
     sourceLang: laraSourceLang,
     targetLang: laraTargetLang,
+    runtimeConfig: input.runtimeConfig,
   });
 
   return {

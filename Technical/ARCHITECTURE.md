@@ -21,12 +21,17 @@ The system bifurcates the request lifecycle into two distinct phases:
     *   **Current forbidden-category note:** Operator-managed forbidden phrases are enforced locally and can supplement safeguard context, while the visible recommended Firewall Prompt remains the reviewable source for baseline category and gibberish guidance.
     *   **Current telemetry and gating note:** When the provider returns usage metadata, the gateway surfaces prompt/completion/total token counts. The browser can also apply an operator-supplied max context window as a pre-submit gate in Analyst Chat and the Prompt Playground, then reuse that same value to compute post-run context utilization for audit review.
 *   **Manual Translation Gateway (`/v1/translate`)**:
-    *   Owns backend-only Lara Translate access for the Playground.
+    *   Owns Lara Translate access for the Playground.
     *   Runs only when an analyst explicitly triggers the Normalize - Translate pipeline.
     *   Supports two modes:
         *   auto-detect source -> English recovery
         *   English -> selected foreign-language variant generation
+    *   Uses backend environment credentials by default, with optional browser-memory Lara Base URL, Access Key ID, and API Key overrides for local demos.
     *   Keeps translation licensing/cost exposure bounded by avoiding automatic calls on prompt edits or standard submissions.
+*   **Browser-Local Spell Verification**:
+    *   Runs before the optional Lara translation hop inside the Playground Normalize - Translate pipeline.
+    *   Uses the local typo-recovery heuristic only; no external LanguageTool/provider request is made from this stage.
+    *   Skips obvious encoded or non-plain-text inputs so adversarial encodings are preserved for firewall testing.
 
 ### 1.2 System Resilience & Fallback Policies
 The Beta implementation adheres to a **Fail-Secure** philosophy across all critical components:

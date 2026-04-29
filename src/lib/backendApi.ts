@@ -313,6 +313,11 @@ export async function translatePromptViaBackend(input: {
   provider?: 'lara';
   mode?: 'recover_to_english' | 'generate_foreign_variant';
   targetLang?: string;
+  runtimeConfig?: {
+    baseUrl?: string;
+    accessKeyId?: string;
+    apiKey?: string;
+  };
 }): Promise<BackendTranslateResponse> {
   const response = await fetch(resolveBackendUrl('/v1/translate'), {
     method: 'POST',

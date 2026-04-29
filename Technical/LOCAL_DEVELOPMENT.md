@@ -96,12 +96,13 @@ Optional value:
 
 - `LARA_API_BASE_URL` if you need a non-default Lara endpoint
 
-The Playground translation stage is now intentionally narrow and manual:
+The Playground language pipeline is intentionally narrow and manual:
 
-- Provider: `lara`
+- Spell Verification: browser-local heuristic normalization for common typo recovery.
+- Translation provider: `lara`
 - Mode 1: auto-detect source -> `English`
 - Mode 2: `English` -> analyst-selected foreign target language
-- Credentials: backend-only
+- Credentials: backend env by default, with optional browser-memory Lara Base URL, Access Key ID, and API Key overrides in the Translation panel.
 
 For normal local testing, you should only need the Lara credentials plus the backend running on `18080`.
 Translation only runs when you explicitly click **Run Normalize -> Translate** in the Playground. It is not invoked automatically during prompt editing, firewall submission, or bulk ingest.
@@ -114,7 +115,7 @@ LARA_ACCESS_KEY_SECRET=your_lara_access_key_secret
 LARA_API_BASE_URL=https://api.laratranslate.com
 ```
 
-`docker-compose.demo.yml` now reads that file for backend-only Lara credentials so translation survives rebuilds and container recreates without re-injecting secrets through the shell.
+`docker-compose.demo.yml` now reads that file for backend-only Lara credentials so translation survives rebuilds and container recreates without re-injecting secrets through the shell. For one-off demos, the Playground Translation panel can also send browser-memory Lara credentials to the local backend for the single manual translation call. Those values are not written to localStorage.
 
 ### Optional: Sam Spade Service Config
 

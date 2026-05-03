@@ -39,7 +39,7 @@ The Defense Funnel splits governed traffic into three layers:
 - **Model Intervention Rate:** prompts that reached the backend safeguard judge and were blocked or queued there.
 - **Post-Model Escape Rate:** likely malicious prompts that bypassed both layers and still landed clean/informational.
 
-Backend safeguard interventions are attributed from structured fields (`backendReachedSafeguard`, `backendGatewayStatus`, `backendSafeguardVerdict`) rather than from response text. If a Bulk Ingest prompt is shown in Analyst Chat as backend-intercepted, it should increment the Model Intervention Rate.
+Backend safeguard interventions are attributed from structured fields (`backendReachedSafeguard`, `backendGatewayStatus`, `backendSafeguardVerdict`) rather than from response text. Runtime timing is split across `localPrecheckLatencyMs`, `backendSafeguardLatencyMs`, `backendGatewayLatencyMs`, and `responderLatencyMs`, so safeguard timing remains visible even when responder routing is disabled for local passthrough. If a Bulk Ingest prompt is shown in Analyst Chat as backend-intercepted, it should increment the Model Intervention Rate.
 
 ### 2.3 Session Forensics & User Profiling
 To identify "low and slow" persistent attackers, analysts must look beyond individual logs.

@@ -439,8 +439,8 @@ The first integration does not need to be large.
 
 - Counter-Spy endpoint receives player message
 - Counter-Spy sanitizes / governs / logs
-- approved prompts are forwarded internally to Sam Spade orchestration and the configured downstream responder
-- orchestration returns responder-backed Sam Spade response + state deltas
+- approved prompts are forwarded internally to Sam Spade orchestration and then to the configured downstream responder when responder routing is enabled
+- orchestration returns responder-backed or local-passthrough Sam Spade response + state deltas
 - Counter-Spy returns a stable frontend response contract
 
 ---
@@ -475,11 +475,11 @@ The first integration does not need to be large.
 ### Implemented Runtime Notes
 
 - Sam Spade message traffic uses the dedicated `/v1/ctf/sam-spade/message` route.
-- Clean turns pass through local sanitizer and the safeguard judge before reaching the downstream responder.
-- The backend assembles the Downstream Responder Prompt, Sam Spade persona prompt, and active scenario prompt before responder inference.
+- Clean turns pass through local sanitizer and the safeguard judge before reaching the downstream responder or local responder passthrough.
+- The backend assembles the Downstream Responder Prompt, Sam Spade persona prompt, and active scenario prompt before responder inference when responder routing is enabled.
 - CTF turns with sensitive redaction signals such as `CREDIT_CARD`, `SSN`, `API_KEY`, `SECRET_KEY`, or `JWT` are intercepted before responder inference and return `Bad content.` to the CTF surface.
 - The frontend mirrors CTF review artifacts into Analyst Chat and Audit Logs without re-running responder inference.
-- Review artifacts may carry a `sam_spade_ctf` responder prompt profile plus responder provider/model/status/latency telemetry.
+- Review artifacts may carry a `sam_spade_ctf` responder prompt profile plus responder provider/model/status, split latency telemetry, and local passthrough status.
 
 ---
 

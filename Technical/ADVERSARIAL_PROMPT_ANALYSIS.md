@@ -114,6 +114,10 @@ The current audit log already captures much of what we need. For analysis, deriv
 | `backendGatewayStatus` | `enum?` | `/v1/intercept` outcome: `CLEAN`, `INTERCEPTED`, `QUEUED`, or `SHIELD_ERROR` |
 | `backendSafeguardVerdict` | `enum?` | Backend safeguard judge verdict when the prompt reached that layer |
 | `backendReachedSafeguard` | `boolean?` | True when the local layer allowed the prompt into the backend safeguard path |
+| `localPrecheckLatencyMs` | `number?` | Backend deterministic precheck latency for prompts that reached `/v1/intercept` |
+| `backendSafeguardLatencyMs` | `number?` | Pure safeguard judge call latency, excluding local precheck and responder time |
+| `backendGatewayLatencyMs` | `number?` | Total backend gateway latency for the intercept request |
+| `responderLatencyMs` | `number?` | Downstream responder latency; local responder passthrough records `0` |
 | `atlasTactic` | `string?` | Active MITRE ATLAS organizer shown in the UI |
 | `atlasTechniqueId` | `string?` | Canonical ATLAS organizer node ID |
 | `atlasTechniqueName` | `string?` | Canonical ATLAS organizer node label |

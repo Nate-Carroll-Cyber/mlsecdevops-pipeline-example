@@ -15,8 +15,8 @@ This document defines the current local API boundary for the Sam Spade CTF surfa
 2. Player submits a message or a case-solving theory
 3. Backend sanitizes and evaluates the input
 4. If the turn is blocked, or if it contains sensitive redaction placeholders such as `[REDACTED_CREDIT_CARD]`, backend marks it for review before gameplay continues
-5. If the turn is clean, backend calls the safeguard judge and then forwards the sanitized turn to the configured downstream responder
-6. Backend updates Sam Spade session state with the responder-backed noir reply and emits a review artifact
+5. If the turn is clean, backend calls the configured safeguard judge and then either forwards the sanitized turn to the downstream responder or returns local responder passthrough when responder routing is disabled
+6. Backend updates Sam Spade session state with the governed noir reply or passthrough notice and emits a review artifact
 7. Frontend mirrors that artifact into Analyst Chat and Audit Logs
 
 ## Endpoints
@@ -69,9 +69,9 @@ Current behavior note:
 - blocked turns are intercepted before gameplay
 - blocked turns return the generic gameplay response `Bad content.` and are not forwarded to the Sam Spade responder
 - sensitive redaction flags such as `CREDIT_CARD`, `SSN`, `API_KEY`, `JWT`, and `SECRET_KEY` force interception for CTF gameplay even when the wider platform would treat the redaction as an informational data-exposure alert
-- clean turns call the live downstream responder after local sanitizer and safeguard judge approval
+- clean turns call the configured safeguard judge after local sanitizer approval, then call the live downstream responder only when responder routing is enabled
 - the responder receives the active Downstream Responder Prompt plus Sam Spade persona/scenario prompts from System Configuration
-- review artifacts may include responder prompt profile, provider, model, status, and latency telemetry
+- review artifacts may include responder prompt profile, provider, model, status, split safeguard/responder latency telemetry, and local passthrough status
 
 Request:
 

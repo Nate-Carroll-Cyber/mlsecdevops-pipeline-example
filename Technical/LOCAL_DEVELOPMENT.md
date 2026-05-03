@@ -40,7 +40,47 @@ VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev
 
 Open `http://localhost:3000/`.
 
-Clean prompts are routed to the backend gateway. The gateway runs local prechecks first, calls a separately configured OpenAI-compatible safeguard judge, and forwards to the downstream responder only after the safeguard judge returns `CLEAN`. Analyst Chat safeguard configuration remains separate from the responder provider, Base URL, Model ID, API key, and context-window controls in the **Responder** tab. In the current runtime, clean responder calls are guided by the active Downstream Responder Prompt and relevant Knowledge Base policy context. Max context window is now a browser-local submission limit used by Analyst Chat and the Prompt Playground before dispatch.
+Clean prompts are routed to the backend gateway. The gateway runs local prechecks first, calls a separately configured OpenAI-compatible safeguard judge, and forwards to the downstream responder only after the safeguard judge returns `CLEAN` and **Responder Routing** is enabled. Analyst Chat safeguard configuration remains separate from the responder provider, Base URL, Model ID, API key, and context-window controls in the **Responder** tab. In the current runtime, clean responder calls are guided by the active Downstream Responder Prompt and relevant Knowledge Base policy context. Max context window is now a browser-local submission limit used by Analyst Chat and the Prompt Playground before dispatch.
+
+### Safeguard Effective Prompt and Drift Hash
+
+The frontend builds one canonical safeguard instruction from the visible Firewall Prompt, guardrails policy, forbidden phrases, relevant Knowledge Base excerpts, backend-owned JSON verdict contract, and neutral evidence contract. System Configuration displays this **Safeguard Effective Prompt Preview** and hashes that exact generated artifact for both the recommended baseline and current live config.
+
+The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. A backend fallback prompt exists only for direct `/v1/intercept` callers that omit `safeguardSystemPrompt`.
+
+### Split Runtime Latency
+
+Backend responses and audit records split latency into:
+
+- `localPrecheckLatencyMs`: backend deterministic sanitizer/precheck time
+- `backendSafeguardLatencyMs`: pure Safeguard LLM call time
+- `backendGatewayLatencyMs`: total `/v1/intercept` gateway time
+- `responderLatencyMs`: downstream responder time
+
+When responder routing is disabled, the safeguard latency remains visible and `responderLatencyMs` is `0` because the response is local passthrough. If frontend deterministic sanitizer blocks a prompt before `/v1/intercept`, no safeguard provider call is made and no safeguard latency exists for that request.
+
+### Analyst Chat Safeguard Provider Selector
+
+Admins can use the Analyst Chat System Status **Safeguard Provider** switch to choose which OpenAI-compatible safeguard judge runtime is sent with intercept requests:
+
+- `LM_STUDIO`: backend-managed demo config, currently `gpt-oss-safeguard-20b` at `http://192.168.0.183:1234/v1/chat/completions`.
+- `OPENAI`: hardcoded OpenAI-compatible defaults, currently `gpt-5.4-mini` at `https://api.openai.com/v1`.
+
+The OpenAI selector does not hardcode an API key. Use the Analyst Runtime Settings **Safeguard API Key** field for a browser-memory-only key override, or leave it blank to rely on backend environment credentials. Switching providers updates the Analyst Runtime Settings Base URL and Model ID automatically so operators do not have to retype long endpoints or model names.
+
+### Optional: Safeguard-Only Local Responder Passthrough
+
+Admins can disable **Responder Routing** from the Analyst Chat System Status panel while keeping either safeguard provider active. Clean prompts then follow:
+
+```text
+deterministic sanitizer -> Safeguard LLM judge -> LOCAL RESPONDER PASSTHROUGH
+```
+
+This mode sends the generated Safeguard Effective Prompt and neutral evidence block to the safeguard judge, records `backendReachedSafeguard: true`, preserves `backendSafeguardLatencyMs`, and intentionally avoids any downstream responder provider call. Clean responses use:
+
+```text
+LOCAL RESPONDER PASSTHROUGH: This prompt passed deterministic local guardrails and the Safeguard LLM judge. No downstream responder LLM or backend responder provider call was made.
+```
 
 ### Optional: Live Safeguard LLM Testing
 
@@ -177,7 +217,7 @@ Sanitizer note: the current runtime now treats any recognized obfuscation signal
 
 Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`.
 
-Note: in the current demo build, Sam Spade clean turns use the same live downstream responder path as Analyst Chat after local sanitizer and safeguard approval. The backend assembles the active Downstream Responder Prompt with admin-managed Sam Spade persona and scenario prompts before calling the responder. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.
+Note: in the current demo build, Sam Spade clean turns use the same governed path as Analyst Chat after local sanitizer and safeguard approval. When responder routing is enabled, the backend assembles the active Downstream Responder Prompt with admin-managed Sam Spade persona and scenario prompts before calling the responder. When responder routing is disabled, the safeguard verdict and latency are retained and the turn uses local responder passthrough. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.
 
 Blocked Sam Spade note: CTF turns with sensitive redaction labels such as `CREDIT_CARD`, `SSN`, `API_KEY`, `JWT`, or `SECRET_KEY` are blocked before gameplay/responder inference even when the wider sanitizer would treat the redaction as informational. The CTF modal shows only `Submitted Prompt` -> `Bad content.`, clears the input, and keeps the detailed sanitized artifact in Audit Logs.
 

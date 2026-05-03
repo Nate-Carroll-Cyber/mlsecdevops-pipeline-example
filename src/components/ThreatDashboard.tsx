@@ -715,6 +715,9 @@ export function ThreatDashboard({
           backendSafeguardVerdict: doc.data().backendSafeguardVerdict || undefined,
           backendSafeguardReasoning: doc.data().backendSafeguardReasoning || undefined,
           backendReachedSafeguard: doc.data().backendReachedSafeguard === true,
+          localPrecheckLatencyMs: doc.data().localPrecheckLatencyMs || undefined,
+          backendSafeguardLatencyMs: doc.data().backendSafeguardLatencyMs || undefined,
+          backendGatewayLatencyMs: doc.data().backendGatewayLatencyMs || undefined,
         }));
         allLogs = mergeLocalAuditLogOverlays(allLogs, localAuditLogs, yesterday);
 

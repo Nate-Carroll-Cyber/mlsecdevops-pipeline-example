@@ -120,7 +120,7 @@ export function submitSamSpadeMessage(args: {
   externalReasoning?: string;
   responderTelemetry?: {
     promptProfile: 'sam_spade_ctf';
-    provider: 'openai_compatible' | 'gemini';
+    provider?: 'openai_compatible' | 'gemini';
     modelId: string;
     status: string;
     latencyMs: number;

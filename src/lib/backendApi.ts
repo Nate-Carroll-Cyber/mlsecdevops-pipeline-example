@@ -19,11 +19,14 @@ const BackendInterceptResponseSchema = z.object({
     globalEntropy: z.number(),
     syntacticScore: z.number(),
     latencyMs: z.number(),
+    localPrecheckLatencyMs: z.number().optional(),
+    safeguardLatencyMs: z.number().optional(),
+    gatewayLatencyMs: z.number().optional(),
   }),
   responder: z.object({
     provider: z.enum(['openai_compatible', 'gemini']).optional(),
     modelId: z.string(),
-    status: z.literal('COMPLETED'),
+    status: z.enum(['COMPLETED', 'DISABLED_LOCAL_ONLY']),
     latencyMs: z.number(),
     response: z.string(),
     usage: z.object({
@@ -139,11 +142,14 @@ export interface BackendInterceptResponse {
     globalEntropy: number;
     syntacticScore: number;
     latencyMs: number;
+    localPrecheckLatencyMs?: number;
+    safeguardLatencyMs?: number;
+    gatewayLatencyMs?: number;
   };
   responder?: {
     provider?: 'openai_compatible' | 'gemini';
     modelId: string;
-    status: 'COMPLETED';
+    status: 'COMPLETED' | 'DISABLED_LOCAL_ONLY';
     latencyMs: number;
     response: string;
     usage?: {

@@ -15,6 +15,9 @@ services:
       APP_PORT: 8080
       APP_ENV: dev
       LOG_LEVEL: info
+      # Default safeguard judge for local inspector-style review.
+      SAFEGUARDS_API_BASE_URL: "http://192.168.0.183:1234/v1/chat/completions"
+      SAFEGUARDS_MODEL_ID: "gpt-oss-safeguard-20b"
       # Sam Spade stays enabled in the demo so the CTF surface works out of the box.
       SAM_SPADE_ENABLED: "true"
       SAM_SPADE_DEFAULT_CASE_ID: "case-067"

@@ -11,13 +11,13 @@ The system is model-neutral. It does not assume a fixed Gemini, OpenAI, or open-
 - **Local sanitizer:** TypeScript policy engine that runs before external inference and enforces PII/secret redaction, entropy thresholds, regex rules, blocked keywords, forbidden phrases, language recovery, and obfuscation detection.
 - **Safeguard judge:** OpenAI-compatible API endpoint called by the backend `/v1/intercept` gateway. It receives the visible Firewall Prompt, guardrails policy, relevant Knowledge Base context, and a backend-owned structured JSON verdict contract.
 - **Downstream responder:** Separate responder model called only after local checks and the safeguard judge return a clean forwarding decision. It receives the Downstream Responder Prompt as its instruction.
-- **Sam Spade CTF:** Governed by the shared review/audit path. Clean gameplay replies now use the live downstream responder after local sanitizer and safeguard approval, with admin-managed Sam Spade persona and scenario prompts appended to the responder instruction. Sensitive redaction placeholders are blocked before gameplay/responder inference and are masked as `Bad content.` on the CTF surface.
+- **Sam Spade CTF:** Governed by the shared review/audit path. Clean gameplay replies now use the live downstream responder after local sanitizer and safeguard approval when responder routing is enabled, with admin-managed Sam Spade persona and scenario prompts appended to the responder instruction. When responder routing is disabled, clean gameplay replies use local responder passthrough after safeguard approval. Sensitive redaction placeholders are blocked before gameplay/responder inference and are masked as `Bad content.` on the CTF surface.
 
 ## 3. Runtime Configuration
 
 Analyst Chat and Responder runtime configuration are intentionally separate.
 
-- **Analyst Chat / safeguard configuration:** OpenAI-compatible base URL, model ID, and API key can be backend-managed through `SAFEGUARDS_*` environment variables or supplied as browser-memory-only overrides for local demos.
+- **Analyst Chat / safeguard configuration:** OpenAI-compatible base URL, model ID, and API key can be backend-managed through `SAFEGUARDS_*` environment variables or supplied as browser-memory-only overrides for local demos. The local admin UI can select between the LM Studio demo safeguard (`gpt-oss-safeguard-20b` at `http://192.168.0.183:1234/v1/chat/completions`) and the OpenAI-compatible default (`gpt-5.4-mini` at `https://api.openai.com/v1`, with no hardcoded key).
 - **Responder configuration:** Provider, base URL, model ID, API key, and max context window can be backend-managed or supplied as browser-memory-only overrides. The responder can use an OpenAI-compatible provider or Gemini to demonstrate brokering between separate frontier model providers.
 - **Credential handling:** Browser-entered safeguard and responder API keys are held in memory only and are not intended to be committed to source control.
 
@@ -25,9 +25,9 @@ Analyst Chat and Responder runtime configuration are intentionally separate.
 
 The safeguard path expects structured decisions such as `ALLOW_AND_FORWARD`, `BLOCK`, `QUEUE_FOR_REVIEW`, and `FAIL_SECURE`. The backend maps these decisions into Counter-Spy.ai outcomes such as `CLEAN`, `SUSPICIOUS`, `ADVERSARIAL`, or `PENDING_REVIEW` before audit and metrics processing.
 
-The visible Firewall Prompt remains the reviewable policy baseline, including forbidden-category and gibberish/obfuscation guidance. The backend appends the JSON verdict contract outside that user-visible prompt.
+The visible Firewall Prompt remains the reviewable policy baseline, including forbidden-category and gibberish/obfuscation guidance. Runtime inspection now uses a generated Safeguard Effective Prompt that combines that visible prompt with active guardrails policy, forbidden phrases, Knowledge Base excerpts, the backend-owned JSON verdict contract, and the neutral evidence contract. System Configuration previews and hashes that exact effective prompt.
 
-Audit and Metrics preserve backend safeguard attribution through `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, and `backendReachedSafeguard`. These fields distinguish local pre-inference blocks from backend safeguard/model interventions.
+Audit and Metrics preserve backend safeguard attribution through `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, `backendReachedSafeguard`, `localPrecheckLatencyMs`, `backendSafeguardLatencyMs`, `backendGatewayLatencyMs`, and `responderLatencyMs`. These fields distinguish local pre-inference blocks from backend safeguard/model interventions and keep safeguard latency separate from local responder passthrough latency.
 
 ## 5. Safety and Fail-Closed Behavior
 

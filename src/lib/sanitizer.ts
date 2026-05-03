@@ -287,10 +287,10 @@ function hasLowNaturalLanguageLikelihood(input: string): boolean {
     .map((token) => token.trim())
     .filter((token) => token.length >= 4);
 
-  if (tokens.length < 5) return false;
+  if (tokens.length < 4) return false;
 
   const vowelishTokens = tokens.filter((token) => /[aeiouy]/.test(token));
-  if (vowelishTokens.length / tokens.length < 0.7) return false;
+  if (vowelishTokens.length / tokens.length < 0.4) return false;
 
   const uniqueTokenRate = new Set(tokens).size / tokens.length;
   const averageTokenLength = tokens.reduce((sum, token) => sum + token.length, 0) / tokens.length;
@@ -305,7 +305,8 @@ function hasLowNaturalLanguageLikelihood(input: string): boolean {
     averageTokenLength >= 4.2 &&
     (
       (originalTrigramRate <= 0.035 && bestShiftRate >= 0.16 && bestShiftRate - originalTrigramRate >= 0.08) ||
-      (originalTrigramRate <= 0.015 && tokens.length >= 7)
+      (originalTrigramRate <= 0.025 && tokens.length >= 7) ||
+      (originalTrigramRate <= 0.005 && bestShiftRate >= 0.07)
     );
 }
 
@@ -605,11 +606,12 @@ export function sanitizeInput(
           'you are now'
         ];
 
-    const keywordMatchedOriginally = keywordsToCheck.some((keyword) => {
-      const loweredKeyword = keyword.toLowerCase();
-      return normalized.includes(loweredKeyword) ||
-        normalizedDecodedSegments.some((segment) => segment.includes(loweredKeyword));
-    });
+	    const keywordMatchedOriginally = keywordsToCheck.some((keyword) => {
+	      const loweredKeyword = keyword.toLowerCase();
+	      return normalized.includes(loweredKeyword) ||
+	        input.toLowerCase().includes(loweredKeyword) ||
+	        normalizedDecodedSegments.some((segment) => segment.includes(loweredKeyword));
+	    });
 
     const keywordMatchedAfterSpelling = spellingNormalization.changed && keywordsToCheck.some((keyword) =>
       normalizedSpellCorrected.includes(keyword.toLowerCase())
@@ -770,14 +772,15 @@ export function sanitizeInput(
     redactions.push('POLICY_VIOLATION');
   }
 
-  const obfuscationSignalDetected =
-    obfuscationAnalysis.usedObfuscation ||
-    obfuscationAnalysis.signals.length > 0 ||
-    structuralSignals.length > 0 ||
-    leetspeakDetected ||
-    spellingObfuscationDetected ||
-    transformedSignalsUsed.length > 0 ||
-    lowNaturalLanguageLikelihoodDetected;
+	  const obfuscationSignalDetected =
+	    obfuscationAnalysis.usedObfuscation ||
+	    obfuscationAnalysis.signals.length > 0 ||
+	    structuralSignals.length > 0 ||
+	    leetspeakDetected ||
+	    spellingObfuscationDetected ||
+	    transformedSignalsUsed.length > 0 ||
+	    lowNaturalLanguageLikelihoodDetected ||
+	    coordinateCipherDetected;
 
   // Complexity analysis runs after the earlier normalization stages so the final
   // severity can reflect both structural suspicion and explicit policy hits.
@@ -818,9 +821,21 @@ export function sanitizeInput(
     // Escalate to SUSPICIOUS level
     detectionLevel = DetectionLevel.SUSPICIOUS;
   // Else if blocked content, moderate entropy, or other supporting risk signals are detected
-  } else if (
-    containsBlockedKeyword ||
-    containsForbiddenTopic ||
+	  } else if (
+	    (foreignLanguageDetected || mixedLanguageDetected || spellingObfuscationDetected) &&
+	    !containsBlockedKeyword &&
+	    !containsForbiddenTopic &&
+	    !containsRegexMatch &&
+	    !externalCallDetected &&
+	    !coordinateCipherDetected &&
+	    !syntacticAnalysis.isProbingAttempt &&
+	    !obfuscationSignalDetected &&
+	    input.length <= 2000
+	  ) {
+	    detectionLevel = DetectionLevel.INFORMATIONAL;
+	  } else if (
+	    containsBlockedKeyword ||
+	    containsForbiddenTopic ||
     externalCallDetected ||
     coordinateCipherDetected ||
     lowNaturalLanguageLikelihoodDetected ||
@@ -833,8 +848,8 @@ export function sanitizeInput(
   } else if (containsRegexMatch) {
     // Escalate to SUSPICIOUS level
     detectionLevel = DetectionLevel.SUSPICIOUS;
-  } else if (foreignLanguageDetected || spellingObfuscationDetected) {
-    detectionLevel = DetectionLevel.INFORMATIONAL;
+	  } else if (foreignLanguageDetected || mixedLanguageDetected || spellingObfuscationDetected) {
+	    detectionLevel = DetectionLevel.INFORMATIONAL;
   // Else if any redactions were applied (e.g., PII found)
   } else if (redactions.length > 0) {
     // Escalate to INFORMATIONAL level

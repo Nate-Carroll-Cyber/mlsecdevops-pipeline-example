@@ -16,8 +16,8 @@ The current Beta is a React/Vite/Firebase application with a TypeScript/Express 
 ### 1.1 Logical Flow
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
-2.  **The Sword (Backend-Mediated Inference):** The backend `/v1/intercept` route calls an OpenAI-compatible safeguard judge before any downstream responder receives a prompt. Analyst Chat safeguard configuration remains separate from responder configuration, allowing Counter-Spy.ai to sit between different frontier model providers. Credentials can remain backend-owned, while the UI can provide browser-local Base URL, Model ID, and memory-only API key overrides for the safeguard judge and separate provider settings for clean responder traffic.
-    *   **Current prompt-contract note:** The firewall stage is guided by the visible firewall prompt, the active guardrails policy, optional forbidden-phrase guidance, and relevant Knowledge Base policy context. The recommended visible Firewall Prompt includes baseline forbidden-category and gibberish/obfuscation guidance; the backend appends its JSON verdict contract outside the user-visible System Configuration prompt and normalizes legacy firewall decisions when needed. Only prompts the safeguard judge returns as `CLEAN` are forwarded to the responder model with the active Downstream Responder Prompt as its instruction.
+2.  **The Sword (Backend-Mediated Inference):** The backend `/v1/intercept` route calls an OpenAI-compatible safeguard judge before any downstream responder receives a prompt. Analyst Chat safeguard configuration remains separate from responder configuration, allowing Counter-Spy.ai to sit between different frontier model providers. Credentials can remain backend-owned, while the UI can select a safeguard provider preset (`LM_STUDIO` or `OPENAI`), provide browser-local Base URL / Model ID / memory-only API key overrides for the safeguard judge, and manage separate provider settings for clean responder traffic.
+    *   **Current prompt-contract note:** The firewall stage is guided by a generated Safeguard Effective Prompt built from the visible Firewall Prompt, active guardrails policy, optional forbidden-phrase guidance, relevant Knowledge Base policy context, backend-owned JSON verdict contract, and backend-owned neutral evidence contract. System Configuration displays and hashes that exact generated prompt so reviewable config and runtime payload stay aligned. The safeguard judge receives the generated instruction plus a candidate prompt after deterministic normalization/redaction and neutral preprocessing evidence, not the local sanitizer's final verdict or reasoning. Only prompts the safeguard judge returns as `CLEAN` are forwarded to the responder model with the active Downstream Responder Prompt as its instruction when responder routing is enabled; otherwise clean traffic returns local responder passthrough.
     *   **Current forbidden-category note:** Operator-managed forbidden phrases are enforced locally and can supplement safeguard context, while the visible recommended Firewall Prompt remains the reviewable source for baseline category and gibberish guidance.
     *   **Current telemetry and gating note:** When the provider returns usage metadata, the gateway surfaces prompt/completion/total token counts. The browser can also apply an operator-supplied max context window as a pre-submit gate in Analyst Chat and the Prompt Playground, then reuse that same value to compute post-run context utilization for audit review.
 *   **Manual Translation Gateway (`/v1/translate`)**:
@@ -127,19 +127,23 @@ Future external services would authenticate with the Counter-Spy gateway using *
 | `prompt` | `string` | The raw input string to be sanitized. |
 | `userId` | `string` | The unique identifier for the requesting user. |
 | `sessionId` | `string` | The identifier for the current interaction session. |
-| `metadata` | `object` | Optional key-value pairs, including browser-local safeguard Base URL, safeguard Model ID, memory-only safeguard API key override, responder provider, responder Base URL, responder Model ID, memory-only responder API key override, the active downstream responder prompt, and Sam Spade responder persona/scenario prompts for `ctf_chat` traffic. |
+| `metadata` | `object` | Optional key-value pairs, including browser-local safeguard Base URL, safeguard Model ID, memory-only safeguard API key override, `providerLlmRoutingEnabled` for direct/API local-only callers, `responderLlmRoutingEnabled`, responder provider, responder Base URL, responder Model ID, memory-only responder API key override, the active downstream responder prompt, and Sam Spade responder persona/scenario prompts for `ctf_chat` traffic. |
+
+**Safeguard Judge Input Contract:**
+
+The backend sends a candidate prompt after deterministic normalization/redaction and states that the candidate is not guaranteed safe. It then sends neutral preprocessing evidence: detection flags, redaction labels, decode telemetry, suspicious chunk count, max entropy, global entropy, and syntactic score. Local sanitizer verdict and reasoning remain response/audit telemetry only and are not sent to the safeguard judge.
 
 **Response Definitions:**
 | Code | Status | Description |
 | :--- | :--- | :--- |
-| `200` | `CLEAN` | Payload passed local prechecks and the safeguard judge, and, when configured, includes downstream responder output plus responder telemetry. |
+| `200` | `CLEAN` | Payload passed local prechecks and the safeguard judge. Responses may include downstream responder output or local responder passthrough with responder status `DISABLED_LOCAL_ONLY`. Direct/API callers that explicitly set `providerLlmRoutingEnabled: false` can still request deterministic local inspection. |
 | `202` | `QUEUED` | Payload intercepted for HITL/HOTL review. |
 | `401` | `UNAUTHORIZED` | Missing or invalid Bearer Token. |
 | `403` | `INTERCEPTED` | Local precheck or safeguard judge blocked payload (Adversarial/Suspicious). This is a governed result with a structured intercept payload, not a backend transport failure. |
 | `502` | `SAFEGUARD_OR_RESPONDER_ERROR` | Fail-closed block because the safeguard judge or downstream responder could not complete. |
 | `503` | `SHIELD_ERROR` | Fail-Secure block due to Shield Engine timeout/failure. |
 
-Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records.
+Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records. Local responder passthrough is represented with responder status `DISABLED_LOCAL_ONLY` and model `local-responder-passthrough`.
 
 ### 5.3 Backend Safeguard Attribution Fields
 When a prompt reaches `/v1/intercept`, the frontend persists a structured backend outcome alongside the normal audit fields:
@@ -150,8 +154,12 @@ When a prompt reaches `/v1/intercept`, the frontend persists a structured backen
 | `backendSafeguardVerdict` | Safeguard judge verdict: `CLEAN`, `SUSPICIOUS`, or `ADVERSARIAL`. |
 | `backendSafeguardReasoning` | Human-readable judge rationale returned by the backend. |
 | `backendReachedSafeguard` | Boolean marker that the prompt reached the backend safeguard layer. |
+| `localPrecheckLatencyMs` | Backend deterministic precheck latency in milliseconds. |
+| `backendSafeguardLatencyMs` | Pure Safeguard LLM call latency in milliseconds. |
+| `backendGatewayLatencyMs` | Total `/v1/intercept` gateway latency in milliseconds. |
+| `responderLatencyMs` | Downstream responder latency in milliseconds; local passthrough records `0`. |
 
-These fields are the source of truth for Defense Funnel attribution. Metrics no longer rely on response-text matching to determine whether a Bulk Ingest or Analyst Chat item was blocked locally, blocked by the safeguard judge, or allowed through to the downstream responder.
+These fields are the source of truth for Defense Funnel attribution and runtime latency display. Metrics no longer rely on response-text matching to determine whether a Bulk Ingest or Analyst Chat item was blocked locally, blocked by the safeguard judge, or allowed through to the downstream responder. The UI reports safeguard latency separately from responder latency so local passthrough does not hide safeguard timing.
 
 ---
 

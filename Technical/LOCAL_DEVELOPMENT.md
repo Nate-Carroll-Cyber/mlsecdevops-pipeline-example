@@ -46,6 +46,12 @@ Clean prompts are routed to the backend gateway. The gateway runs local precheck
 
 The frontend builds one canonical safeguard instruction from the visible Firewall Prompt, guardrails policy, forbidden phrases, relevant Knowledge Base excerpts, backend-owned JSON verdict contract, and neutral evidence contract. System Configuration displays this **Safeguard Effective Prompt Preview** and hashes that exact generated artifact for both the recommended baseline and current live config.
 
+Current recommended effective safeguard prompt hash after promoting the saved System Configuration baseline that blocks `Sexual content, NSFW, nudity` and includes `Nudity` / `NSFW` as baseline blocked keywords:
+
+```text
+8641f22d9359b18abb100d94c25f66d98b146452bc85c7692978f018e3cd68d4
+```
+
 The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. A backend fallback prompt exists only for direct `/v1/intercept` callers that omit `safeguardSystemPrompt`.
 
 ### Split Runtime Latency

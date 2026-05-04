@@ -44,7 +44,7 @@ Clean prompts are routed to the backend gateway. The gateway runs local precheck
 
 ### Safeguard Effective Prompt and Drift Hash
 
-The frontend builds one canonical safeguard instruction from the visible Firewall Prompt, guardrails policy, forbidden phrases, relevant Knowledge Base excerpts, backend-owned JSON verdict contract, and neutral evidence contract. System Configuration displays this **Safeguard Effective Prompt Preview** and hashes that exact generated artifact for both the recommended baseline and current live config.
+The frontend builds one canonical safeguard instruction from the internal firewall baseline, guardrails policy, forbidden phrases, relevant Knowledge Base excerpts, backend-owned JSON verdict contract, and neutral evidence contract. System Configuration displays this **Safeguard Effective Prompt Preview** and hashes that exact generated artifact for both the recommended baseline and current live config. The separate Firewall Prompt and Forbidden Phrases read/edit panels are intentionally hidden so analysts review the runtime artifact instead of partial source components.
 
 Current recommended effective safeguard prompt hash after promoting the saved System Configuration baseline that blocks `Sexual content, NSFW, nudity` and includes `Nudity` / `NSFW` as baseline blocked keywords:
 

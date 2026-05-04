@@ -5769,7 +5769,7 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                         >
                           <span className={`text-sm font-medium text-primary flex items-center gap-2 ${selectedPolicy === 'system_config' ? 'font-semibold' : ''}`}>
                             System Configuration
-                            <HelpTooltip text="Core firewall prompts, forwarding contract, and guardrails." />
+                            <HelpTooltip text="Effective safeguard prompt, forwarding contract, and guardrails." />
                           </span>
                           <Terminal className="w-4 h-4 opacity-0 group-hover:opacity-100 transition-opacity text-primary" />
                         </div>
@@ -5828,7 +5828,7 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                     <CardHeader className="border-b border-border flex flex-row justify-between items-center bg-muted/30">
                       <div>
                         <CardTitle className="text-sm font-semibold text-primary">System Configuration</CardTitle>
-                        <CardDescription className="text-xs mt-1">Core firewall prompts, forwarding contract, and guardrails</CardDescription>
+                        <CardDescription className="text-xs mt-1">Effective safeguard prompt, forwarding contract, and guardrails</CardDescription>
                       </div>
                       <div className="flex gap-3">
                         {/* Edit/Save Controls for System Config */}
@@ -5882,24 +5882,6 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                               </pre>
                             </div>
                           )}
-                          {/* Firewall Prompt Section */}
-                          <div>
-                            <label className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                              <span>Firewall Prompt</span>
-                              <HelpTooltip text="Instructions that define how the firewall should inspect, classify, and govern prompts." />
-                            </label>
-                            {isEditingConfig ? (
-                              <textarea 
-                                className="w-full h-48 p-4 text-sm border border-border rounded-xl bg-muted/50 focus:outline-none focus:ring-2 focus:ring-primary/20 resize-none font-mono"
-                                value={configForm.firewallPrompt}
-                                onChange={e => setConfigForm({...configForm, firewallPrompt: e.target.value})}
-                              />
-                            ) : (
-                              <div className="p-5 bg-muted/30 border border-border rounded-xl text-sm markdown-body">
-                                <ReactMarkdown>{systemConfig.firewallPrompt}</ReactMarkdown>
-                              </div>
-                            )}
-                          </div>
                           {/* Responder Prompt Section */}
                           <div>
                             <label className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -5986,25 +5968,6 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                             ) : (
                               <div className="p-5 bg-muted/30 border border-border rounded-xl text-sm whitespace-pre-wrap font-mono break-all overflow-hidden">
                                 {systemConfig.blockedKeywords}
-                              </div>
-                            )}
-                          </div>
-                          {/* Forbidden Phrases Section */}
-                          <div>
-                            <label className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                              <span>Forbidden Phrases (One per line)</span>
-                              <HelpTooltip text="Phrase patterns that should be flagged, escalated, or refused under active policy." />
-                            </label>
-                            {isEditingConfig ? (
-                              <textarea 
-                                className="w-full h-48 p-4 text-sm border border-border rounded-xl bg-muted/50 focus:outline-none focus:ring-2 focus:ring-primary/20 resize-none font-mono break-all"
-                                value={configForm.forbiddenTopics || ''}
-                                onChange={e => setConfigForm({...configForm, forbiddenTopics: e.target.value})}
-                                placeholder="e.g., Finances&#10;Politics&#10;Religion"
-                              />
-                            ) : (
-                              <div className="p-5 bg-muted/30 border border-border rounded-xl text-sm whitespace-pre-wrap font-mono break-all overflow-hidden">
-                                {systemConfig.forbiddenTopics || 'None'}
                               </div>
                             )}
                           </div>

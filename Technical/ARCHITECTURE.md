@@ -40,7 +40,7 @@ The Beta implementation adheres to a **Fail-Secure** philosophy across all criti
 | :--- | :--- | :--- | :--- |
 | **Shield Engine** | Timeout / 5xx Error | **Fail-Secure** | Request is blocked; user receives a 503 Service Unavailable. |
 | **Governance Sync** | Database Connection Loss | **Best-Effort Sync** | The app keeps its current in-memory/default governance state. It does not automatically force `isGlobalPause: true` on startup or sync failure. |
-| **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | If sanitization latency exceeds 100ms, the triggering request is blocked before inference, logged as `Adversarial` with `ReDoS_ATTEMPT_DETECTED`, and automatic Global System Pause is activated for subsequent traffic. |
+| **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | If sanitization latency exceeds 1,000ms, the triggering request is blocked before inference, logged as `Adversarial` with `ReDoS_ATTEMPT_DETECTED`, and automatic Global System Pause is activated for subsequent traffic. |
 
 ---
 
@@ -98,8 +98,8 @@ The governance state is persisted in Firestore (`config/governance`).
 
 ### 4.1 Anti-ReDoS Circuit Breaker
 *   **Logic:** Every `sanitizeInput` execution is wrapped in a high-resolution timing block (`performance.now()`).
-*   **Threshold:** 100ms.
-*   **Policy:** Any sanitization pass completing above 100ms is treated as a potential ReDoS event. The triggering request is blocked before inference, logged as `Adversarial` with the `ReDoS_ATTEMPT_DETECTED` flag, and contributes to both the `ReDoS Trips` resilience metric and the Defense Funnel's pre-inference blocked count.
+*   **Threshold:** 1,000ms.
+*   **Policy:** Any sanitization pass completing above 1,000ms is treated as a potential ReDoS event. The triggering request is blocked before inference, logged as `Adversarial` with the `ReDoS_ATTEMPT_DETECTED` flag, and contributes to both the `ReDoS Trips` resilience metric and the Defense Funnel's pre-inference blocked count.
 
 ---
 

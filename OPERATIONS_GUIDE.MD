@@ -141,7 +141,7 @@ Activate the Global System Pause when **any** of the following conditions are me
 1. **Z-Score > 5.0** sustained for more than 10 minutes.
 2. **Canary Token Trigger:** The system detects `COUNTERSPY_CANARY_TOKEN` in a log, indicating a System Instruction breach.
 3. **Third-Party Outage:** AWS Bedrock or Gemini is experiencing a degraded state (503 errors).
-4. **Automatic ReDoS Trigger:** Sanitization latency exceeds 100ms, which blocks the triggering prompt, logs `ReDoS_ATTEMPT_DETECTED`, and flips `isGlobalPause` on for subsequent traffic.
+4. **Automatic ReDoS Trigger:** Sanitization latency exceeds 1,000ms, which blocks the triggering prompt, logs `ReDoS_ATTEMPT_DETECTED`, and flips `isGlobalPause` on for subsequent traffic.
 
 ### 5.2 Recovery Protocol
 
@@ -178,7 +178,7 @@ Only promote logs that meet at least one of the following criteria:
 
 | Flag | Severity | Technical Detail |
 | :--- | :--- | :--- |
-| `ReDoS_ATTEMPT_DETECTED` | **Critical** | Sanitization latency exceeded 100ms. The triggering request was blocked before inference, logged as adversarial, and automatic Global System Pause was activated for subsequent traffic. |
+| `ReDoS_ATTEMPT_DETECTED` | **Critical** | Sanitization latency exceeded 1,000ms. The triggering request was blocked before inference, logged as adversarial, and automatic Global System Pause was activated for subsequent traffic. |
 | `TOKEN_DILUTION` | **High** | High local entropy spike in sliding window. Obfuscated payload buried in noise text. |
 | `SYNTACTIC_PROBE` | **Medium** | Elevated density of imperative verbs (e.g., "forget," "ignore," "must"). Indicates system override attempt. |
 | `PII_LEAK` | **Variable** | Detection of SSN, email addresses, or AWS keys. Verify whether redaction succeeded before releasing. |

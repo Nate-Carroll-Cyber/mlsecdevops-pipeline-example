@@ -243,6 +243,7 @@ type BackendSafeguardExecution = Pick<
 
 const PII_OR_SECRET_REDACTIONS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'AWS_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'SECRET_KEY'];
 const SAM_SPADE_BLOCKED_CONTENT_LABEL = 'Bad content.';
+const SANITIZATION_REDOS_LATENCY_THRESHOLD_MS = 1000;
 
 interface WakeLockSentinelLike {
   release(): Promise<void>;
@@ -3172,7 +3173,7 @@ export default function App() {
 
       // Active Defense Trigger (Circuit Breaker)
       // If sanitization takes too long, block the request to prevent ReDoS attacks
-	      if (sanitization.latencyMs > 100) {
+	      if (sanitization.latencyMs > SANITIZATION_REDOS_LATENCY_THRESHOLD_MS) {
 	      if (activeGuardrails.sessionAudit) {
 	        try {
 	          if (useLocalAuditSurface) {

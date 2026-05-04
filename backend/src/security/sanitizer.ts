@@ -44,6 +44,7 @@ const SENSITIVE_PATTERNS: SensitivePattern[] = [
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
 const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
+const SANITIZATION_REDOS_LATENCY_THRESHOLD_MS = 1000;
 
 const BLOCKED_KEYWORDS = [
   'ignore all previous instructions',
@@ -1053,7 +1054,7 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
   }
 
   const latencyMs = performance.now() - start;
-  if (latencyMs > 100) {
+  if (latencyMs > SANITIZATION_REDOS_LATENCY_THRESHOLD_MS) {
     detectionFlags.add('REDOS_ATTEMPT');
     verdict = 'ADVERSARIAL';
     reasons.push('sanitization latency exceeded fail-secure threshold');

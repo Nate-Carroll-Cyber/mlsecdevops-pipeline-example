@@ -136,7 +136,7 @@ Not every flagged log is suitable for the Golden Set. To ensure high-quality tra
 
 | Flag | Meaning | Analyst Action |
 | :--- | :--- | :--- |
-| `REDOS_ATTEMPT` | Input caused the sanitizer to hang (>100ms). | **Critical Block.** Likely a DoS attack. |
+| `REDOS_ATTEMPT` | Input caused the sanitizer to hang (>1,000ms). | **Critical Block.** Likely a DoS attack. |
 | `TOKEN_DILUTION` | High entropy detected in a specific 35-char window. | Inspect for hidden shellcode or encoded payloads. |
 | `SYNTACTIC_PROBE` | High density of imperative constraints detected. | Check for "Ignore previous instructions" patterns. |
 | `PII_LEAK` | Redactor identified emails, keys, or SSNs. | Ensure redaction was successful; block if sensitive. |

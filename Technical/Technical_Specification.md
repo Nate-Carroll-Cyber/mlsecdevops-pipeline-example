@@ -14,8 +14,8 @@ Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure La
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
 2.  **The Sword (Backend-Mediated Inference):** The backend gateway first calls an OpenAI-compatible safeguard judge, then forwards only `CLEAN` payloads to the downstream responder when responder routing is enabled. Safeguard runtime configuration is separate from responder runtime configuration; the Analyst Chat surface can select `LM_STUDIO` or `OPENAI` safeguard presets, and both safeguard and responder paths can use backend-managed credentials plus optional browser-local Base URL, Model ID, and memory-only API key overrides.
-    *   **Current prompt-contract note:** The safeguard judge receives one generated Safeguard Effective Prompt for inspection and forwarding decisions. That artifact combines the visible Firewall Prompt, guardrails policy, forbidden phrases, Knowledge Base excerpts, backend-owned JSON verdict contract, and backend-owned neutral evidence contract. System Configuration previews and hashes the exact effective prompt that is sent at runtime. The safeguard judge receives a candidate prompt after deterministic normalization/redaction plus neutral preprocessing evidence; it does not receive the local sanitizer's final verdict or reasoning. The Downstream Responder Prompt from System Configuration is sent as the responder instruction only after clean traffic clears the safeguard judge and responder routing remains enabled. When responder routing is disabled, clean safeguard verdicts return local responder passthrough instead.
-    *   **Current forbidden-category note:** Operator-managed forbidden phrases are enforced locally and can supplement safeguard context, while the visible recommended Firewall Prompt remains the reviewable source for baseline category and gibberish guidance.
+    *   **Current prompt-contract note:** The safeguard judge receives one generated Safeguard Effective Prompt for inspection and forwarding decisions. That artifact combines the internal firewall baseline, guardrails policy, forbidden phrases, Knowledge Base excerpts, backend-owned JSON verdict contract, and backend-owned neutral evidence contract. System Configuration previews and hashes the exact effective prompt that is sent at runtime. The safeguard judge receives a candidate prompt after deterministic normalization/redaction plus neutral preprocessing evidence; it does not receive the local sanitizer's final verdict or reasoning. The Downstream Responder Prompt from System Configuration is sent as the responder instruction only after clean traffic clears the safeguard judge and responder routing remains enabled. When responder routing is disabled, clean safeguard verdicts return local responder passthrough instead.
+    *   **Current forbidden-category note:** Configured forbidden phrases are enforced locally and included in the Safeguard Effective Prompt, which remains the reviewable source for baseline category and gibberish guidance.
 
 ### 1.2 System Resilience & Fallback Policies
 The Beta implementation adheres to a **Fail-Secure** philosophy across all critical components:
@@ -24,7 +24,7 @@ The Beta implementation adheres to a **Fail-Secure** philosophy across all criti
 | :--- | :--- | :--- | :--- |
 | **Shield Engine** | Timeout / 5xx Error | **Fail-Secure** | Request is blocked; user receives a 503 Service Unavailable. |
 | **Governance Sync** | Database Connection Loss | **Best-Effort Sync** | The app keeps its current in-memory/default governance state. It does not automatically force `isGlobalPause: true` on startup or sync failure. |
-| **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | If sanitization latency exceeds 100ms, the triggering request is blocked before inference, logged as `Adversarial` with `ReDoS_ATTEMPT_DETECTED`, and automatic Global System Pause is activated for subsequent traffic. |
+| **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | If sanitization latency exceeds 1,000ms, the triggering request is blocked before inference, logged as `Adversarial` with `ReDoS_ATTEMPT_DETECTED`, and automatic Global System Pause is activated for subsequent traffic. |
 
 ---
 
@@ -82,8 +82,8 @@ The governance state is persisted in Firestore (`config/governance`).
 
 ### 4.1 Anti-ReDoS Circuit Breaker
 *   **Logic:** Every `sanitizeInput` execution is wrapped in a high-resolution timing block (`performance.now()`).
-*   **Threshold:** 100ms.
-*   **Policy:** Any sanitization pass completing above 100ms is treated as a potential ReDoS event. The triggering request is blocked before inference, logged as `Adversarial` with the `ReDoS_ATTEMPT_DETECTED` flag, and contributes to both the `ReDoS Trips` resilience metric and the Defense Funnel's pre-inference blocked count.
+*   **Threshold:** 1,000ms.
+*   **Policy:** Any sanitization pass completing above 1,000ms is treated as a potential ReDoS event. The triggering request is blocked before inference, logged as `Adversarial` with the `ReDoS_ATTEMPT_DETECTED` flag, and contributes to both the `ReDoS Trips` resilience metric and the Defense Funnel's pre-inference blocked count.
 
 ---
 
@@ -162,3 +162,4 @@ The platform utilizes a real-time anomaly detection engine to monitor threat vel
     *   **Z > 5.0**: Triggers high-priority escalation via PagerDuty/Slack integrations.
 *   **Implementation Details**: For detailed dashboard telemetry and SOPs, refer to the [Analyst & Administrator Operations Guide](../OPERATIONS_GUIDE.MD).
 *   **Layered Defense Funnel:** The Metrics surface tracks pre-inference blocks, backend safeguard/model interventions, and post-model escapes. It uses `backendReachedSafeguard`, `backendGatewayStatus`, and `backendSafeguardVerdict` as structured layer attribution before falling back to older severity heuristics.
+*   **Detection Signal Rollups:** The Metrics **Detection Signals** card is a prompt-count rollup by detection family. It uses shared helper functions for local-review and Firestore-backed log sets, groups `FORBIDDEN_TOPIC` and future `FORBIDDEN_PHRASE` flags as **Forbidden Phrase Hits**, and treats **Obfuscation Hits** as any persisted obfuscation technique rather than only `OBFUSCATED_INSTRUCTION`.

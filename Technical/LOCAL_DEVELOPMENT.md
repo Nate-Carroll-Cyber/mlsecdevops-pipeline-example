@@ -44,7 +44,13 @@ Clean prompts are routed to the backend gateway. The gateway runs local precheck
 
 ### Safeguard Effective Prompt and Drift Hash
 
-The frontend builds one canonical safeguard instruction from the visible Firewall Prompt, guardrails policy, forbidden phrases, relevant Knowledge Base excerpts, backend-owned JSON verdict contract, and neutral evidence contract. System Configuration displays this **Safeguard Effective Prompt Preview** and hashes that exact generated artifact for both the recommended baseline and current live config.
+The frontend builds one canonical safeguard instruction from the internal firewall baseline, guardrails policy, forbidden phrases, relevant Knowledge Base excerpts, backend-owned JSON verdict contract, and neutral evidence contract. System Configuration displays this **Safeguard Effective Prompt Preview** and hashes that exact generated artifact for both the recommended baseline and current live config. The separate Firewall Prompt and Forbidden Phrases read/edit panels are intentionally hidden so analysts review the runtime artifact instead of partial source components.
+
+Current recommended effective safeguard prompt hash after promoting the saved System Configuration baseline that blocks `Sexual content, NSFW, nudity` and includes `Nudity` / `NSFW` as baseline blocked keywords:
+
+```text
+8641f22d9359b18abb100d94c25f66d98b146452bc85c7692978f018e3cd68d4
+```
 
 The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. A backend fallback prompt exists only for direct `/v1/intercept` callers that omit `safeguardSystemPrompt`.
 
@@ -212,6 +218,8 @@ Metrics note: the Security Operations view now includes a **Defense Funnel** car
 If your ingest run includes `expectedVerdict` labels, the escape-rate math will use those labels when available instead of relying only on final severity heuristics.
 
 Backend safeguard attribution note: records that reach `/v1/intercept` now carry `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, and `backendReachedSafeguard`. The Metrics funnel uses those fields to count backend safeguard/model interventions, so a Bulk Ingest prompt blocked by the safeguard judge should increment **Model Intervention Rate** rather than appearing as `0 caught by Safeguard LLM / 0 prompts that reached it`.
+
+Detection signal note: the Metrics **Detection Signals** card is a prompt-count rollup by detection family. Local-review and Firestore-backed views share the same aggregation helpers. **Forbidden Phrase Hits** includes both `FORBIDDEN_TOPIC` and future `FORBIDDEN_PHRASE` flags, and **Obfuscation Hits** counts any stored obfuscation technique shown in prompt details rather than only `OBFUSCATED_INSTRUCTION`.
 
 Sanitizer note: the current runtime now treats any recognized obfuscation signal as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. If you are testing encoded, transformed, or cipher-like prompts, expect the local firewall to block them at the highest severity even before a decoded policy phrase is confirmed. Entropy also follows the shared live policy: `<= 3.6` stays allowed on entropy grounds, `> 3.6` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
 

@@ -17,8 +17,8 @@ The current Beta is a React/Vite/Firebase application with a TypeScript/Express 
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
 2.  **The Sword (Backend-Mediated Inference):** The backend `/v1/intercept` route calls an OpenAI-compatible safeguard judge before any downstream responder receives a prompt. Analyst Chat safeguard configuration remains separate from responder configuration, allowing Counter-Spy.ai to sit between different frontier model providers. Credentials can remain backend-owned, while the UI can select a safeguard provider preset (`LM_STUDIO` or `OPENAI`), provide browser-local Base URL / Model ID / memory-only API key overrides for the safeguard judge, and manage separate provider settings for clean responder traffic.
-    *   **Current prompt-contract note:** The firewall stage is guided by a generated Safeguard Effective Prompt built from the visible Firewall Prompt, active guardrails policy, optional forbidden-phrase guidance, relevant Knowledge Base policy context, backend-owned JSON verdict contract, and backend-owned neutral evidence contract. System Configuration displays and hashes that exact generated prompt so reviewable config and runtime payload stay aligned. The safeguard judge receives the generated instruction plus a candidate prompt after deterministic normalization/redaction and neutral preprocessing evidence, not the local sanitizer's final verdict or reasoning. Only prompts the safeguard judge returns as `CLEAN` are forwarded to the responder model with the active Downstream Responder Prompt as its instruction when responder routing is enabled; otherwise clean traffic returns local responder passthrough.
-    *   **Current forbidden-category note:** Operator-managed forbidden phrases are enforced locally and can supplement safeguard context, while the visible recommended Firewall Prompt remains the reviewable source for baseline category and gibberish guidance.
+    *   **Current prompt-contract note:** The firewall stage is guided by a generated Safeguard Effective Prompt built from the internal firewall baseline, active guardrails policy, optional forbidden-phrase guidance, relevant Knowledge Base policy context, backend-owned JSON verdict contract, and backend-owned neutral evidence contract. System Configuration displays and hashes that exact generated prompt so reviewable config and runtime payload stay aligned. The current recommended effective prompt hash is `8641f22d9359b18abb100d94c25f66d98b146452bc85c7692978f018e3cd68d4`, representing the promoted baseline that blocks `Sexual content, NSFW, nudity`. The safeguard judge receives the generated instruction plus a candidate prompt after deterministic normalization/redaction and neutral preprocessing evidence, not the local sanitizer's final verdict or reasoning. Only prompts the safeguard judge returns as `CLEAN` are forwarded to the responder model with the active Downstream Responder Prompt as its instruction when responder routing is enabled; otherwise clean traffic returns local responder passthrough.
+    *   **Current forbidden-category note:** Configured forbidden phrases are enforced locally and included in the Safeguard Effective Prompt, which remains the reviewable source for baseline category and gibberish guidance.
     *   **Current telemetry and gating note:** When the provider returns usage metadata, the gateway surfaces prompt/completion/total token counts. The browser can also apply an operator-supplied max context window as a pre-submit gate in Analyst Chat and the Prompt Playground, then reuse that same value to compute post-run context utilization for audit review.
 *   **Manual Translation Gateway (`/v1/translate`)**:
     *   Owns Lara Translate access for the Playground.
@@ -40,7 +40,7 @@ The Beta implementation adheres to a **Fail-Secure** philosophy across all criti
 | :--- | :--- | :--- | :--- |
 | **Shield Engine** | Timeout / 5xx Error | **Fail-Secure** | Request is blocked; user receives a 503 Service Unavailable. |
 | **Governance Sync** | Database Connection Loss | **Best-Effort Sync** | The app keeps its current in-memory/default governance state. It does not automatically force `isGlobalPause: true` on startup or sync failure. |
-| **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | If sanitization latency exceeds 100ms, the triggering request is blocked before inference, logged as `Adversarial` with `ReDoS_ATTEMPT_DETECTED`, and automatic Global System Pause is activated for subsequent traffic. |
+| **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | If sanitization latency exceeds 1,000ms, the triggering request is blocked before inference, logged as `Adversarial` with `ReDoS_ATTEMPT_DETECTED`, and automatic Global System Pause is activated for subsequent traffic. |
 
 ---
 
@@ -98,8 +98,8 @@ The governance state is persisted in Firestore (`config/governance`).
 
 ### 4.1 Anti-ReDoS Circuit Breaker
 *   **Logic:** Every `sanitizeInput` execution is wrapped in a high-resolution timing block (`performance.now()`).
-*   **Threshold:** 100ms.
-*   **Policy:** Any sanitization pass completing above 100ms is treated as a potential ReDoS event. The triggering request is blocked before inference, logged as `Adversarial` with the `ReDoS_ATTEMPT_DETECTED` flag, and contributes to both the `ReDoS Trips` resilience metric and the Defense Funnel's pre-inference blocked count.
+*   **Threshold:** 1,000ms.
+*   **Policy:** Any sanitization pass completing above 1,000ms is treated as a potential ReDoS event. The triggering request is blocked before inference, logged as `Adversarial` with the `ReDoS_ATTEMPT_DETECTED` flag, and contributes to both the `ReDoS Trips` resilience metric and the Defense Funnel's pre-inference blocked count.
 
 ---
 
@@ -183,4 +183,5 @@ The platform utilizes a real-time anomaly detection engine to monitor threat vel
     *   **Post-Model Escape Rate:** Fraction of likely malicious prompts that bypass both the pre-inference layer and the Safeguard LLM layer and still land clean or informational.
     *   **Structured attribution:** `backendReachedSafeguard`, `backendGatewayStatus`, and `backendSafeguardVerdict` determine whether a record belongs to the local pre-inference bucket or the backend safeguard/model-intervention bucket.
     *   **Ground-Truth Assist:** When available, bulk-ingest `expectedVerdict` labels are used to strengthen post-model escape calculations instead of relying only on final severity heuristics.
+*   **Detection Signal Rollups:** The Metrics **Detection Signals** card reports prompt counts by detection family, not raw per-flag totals. The same aggregation helpers are used for local-review overlays and Firestore-backed metrics. `FORBIDDEN_TOPIC` and `FORBIDDEN_PHRASE` are grouped under **Forbidden Phrase Hits**, while **Obfuscation Hits** counts any stored obfuscation technique from `obfuscationSummary.techniques` or legacy detection flags so the rollup matches the prompt-detail badges.
 *   **Implementation Details**: For detailed dashboard telemetry and SOPs, refer to the [Analyst & Administrator Operations Guide](../OPERATIONS_GUIDE.MD).

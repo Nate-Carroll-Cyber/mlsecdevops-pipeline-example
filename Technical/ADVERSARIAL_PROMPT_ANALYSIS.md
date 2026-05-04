@@ -97,6 +97,8 @@ The current audit log already captures much of what we need. For analysis, deriv
 | `timestamp` | `datetime` | Event timestamp |
 | `source` | `enum` | `analyst_chat`, `playground`, `bulk_ingest`, `ctf_chat` |
 | `promptHash` | `string` | SHA-256 of raw or canonicalized prompt |
+| `isRetry` | `boolean?` | True when the backend has seen the same sanitized prompt hash in the recent retry window |
+| `retryOfHash` | `string?` | Prompt hash pointer for recent duplicate/replay submissions |
 | `sanitizedPrompt` | `string` | Restricted-use only |
 | `promptLength` | `number` | Character count |
 | `lineCount` | `number` | Number of lines |
@@ -113,6 +115,9 @@ The current audit log already captures much of what we need. For analysis, deriv
 | `batchId` | `string?` | Bulk ingest campaign grouping |
 | `backendGatewayStatus` | `enum?` | `/v1/intercept` outcome: `CLEAN`, `INTERCEPTED`, `QUEUED`, or `SHIELD_ERROR` |
 | `backendSafeguardVerdict` | `enum?` | Backend safeguard judge verdict when the prompt reached that layer |
+| `safeguardSchemaShape` | `enum?` | Runtime safeguard output shape: `verdict`, `decision`, or `malformed` from structured gateway logs |
+| `safeguardDivergent` | `boolean?` | True when the gateway action diverged from the expected verdict-to-action mapping |
+| `safeguardRawReasoningTrace` | `string?` | Optional provider-exposed reasoning trace lifted into structured gateway logs for security review |
 | `backendReachedSafeguard` | `boolean?` | True when the local layer allowed the prompt into the backend safeguard path |
 | `localPrecheckLatencyMs` | `number?` | Backend deterministic precheck latency for prompts that reached `/v1/intercept` |
 | `backendSafeguardLatencyMs` | `number?` | Pure safeguard judge call latency, excluding local precheck and responder time |

@@ -318,6 +318,41 @@ function calculateObfuscationSignalMetrics(logs: any[]) {
   };
 }
 
+function calculateFeaturePressureMetrics(logs: any[]) {
+  const featureLogs = logs.filter((log) => typeof log.researchSignal === 'number' && log.featureVector);
+  const researchSignalTotal = featureLogs.reduce((sum, log) => sum + Number(log.researchSignal || 0), 0);
+  const averagePressure = (selector: (log: any) => number | undefined) => {
+    if (featureLogs.length === 0) return 0;
+    const total = featureLogs.reduce((sum, log) => sum + Number(selector(log) || 0), 0);
+    return parseFloat(((total / featureLogs.length) * 100).toFixed(1));
+  };
+  const driverCounts = featureLogs.reduce<Record<string, number>>((counts, log) => {
+    const driver = log.topResearchDriver || log.featureVector?.topDriver;
+    if (!driver || driver === 'None') return counts;
+    counts[driver] = (counts[driver] ?? 0) + 1;
+    return counts;
+  }, {});
+
+  return {
+    featureSampleCount: featureLogs.length,
+    totalPromptCount: logs.length,
+    averageResearchSignal: featureLogs.length > 0
+      ? parseFloat((researchSignalTotal / featureLogs.length).toFixed(1))
+      : 0,
+    averageInstructionPressure: averagePressure((log) => log.featureVector?.syntactic?.normalized?.instructionPressure),
+    averageConstraintDensityPressure: averagePressure((log) => log.featureVector?.syntactic?.normalized?.constraintDensity),
+    averageSyntaxWrapperPressure: averagePressure((log) => log.featureVector?.syntactic?.normalized?.syntaxWrapperPressure),
+    averageObfuscationPressure: averagePressure((log) => log.featureVector?.syntactic?.normalized?.obfuscationPressure),
+    averageEntropyPressure: averagePressure((log) => log.featureVector?.entropy?.normalizedPressure),
+    averageNgramObfuscationSignal: averagePressure((log) => log.featureVector?.languageLikelihood?.normalizedSuspicion),
+    highResearchSignalCount: featureLogs.filter((log) => Number(log.researchSignal || 0) >= 70).length,
+    topResearchDriver: Object.entries(driverCounts).sort((left, right) => right[1] - left[1])[0]?.[0] ?? 'None',
+    lowNgramLikelihoodCount: featureLogs.filter((log) => log.featureVector?.languageLikelihood?.lowNaturalLanguageLikelihood).length,
+    obfuscationHeavyCount: featureLogs.filter((log) => Number(log.featureVector?.syntactic?.raw?.obfuscationBonus || 0) > 0).length,
+    instructionDenseCount: featureLogs.filter((log) => Number(log.featureVector?.syntactic?.normalized?.instructionPressure || 0) >= 0.7).length,
+  };
+}
+
 function wasOriginallyReleased(log: any, entropyThreshold?: number): boolean {
   const automatedSeverity = getAutomatedSeverityBucket(log, entropyThreshold);
   return automatedSeverity === 'clean' || automatedSeverity === 'informational';
@@ -605,6 +640,7 @@ export function ThreatDashboard({
         const highLatencyCount = filteredLogs.filter((log) => Number(log.latencyMs || 0) > 100).length;
         const detectionSignalMetrics = calculateDetectionSignalMetrics(filteredLogs);
         const obfuscationSignalMetrics = calculateObfuscationSignalMetrics(filteredLogs);
+        const researchSignalMetrics = calculateFeaturePressureMetrics(filteredLogs);
         const atlasColumns = ATLAS_TACTICS.map((tactic) => {
           const techniques = ATLAS_TECHNIQUE_DEFINITIONS
             .filter((definition) => definition.tactic === tactic)
@@ -674,6 +710,7 @@ export function ThreatDashboard({
           layerDefense: layerMetrics,
           detectionSignals: detectionSignalMetrics,
           obfuscationSignals: obfuscationSignalMetrics,
+          researchSignals: researchSignalMetrics,
           atlasHeatmap: {
             maxCount: maxAtlasCount,
             columns: atlasColumns,
@@ -717,6 +754,9 @@ export function ThreatDashboard({
           atlasTechniqueName: doc.data().atlasTechniqueName || undefined,
           detectionFlags: doc.data().detectionFlags || [],
           suspiciousChunks: doc.data().suspiciousChunks || [],
+          featureVector: doc.data().featureVector || undefined,
+          researchSignal: doc.data().researchSignal ?? undefined,
+          topResearchDriver: doc.data().topResearchDriver || undefined,
           sanitizedPrompt: doc.data().sanitizedPrompt || '',
           source: doc.data().source || 'analyst_chat',
           expectedVerdict: doc.data().expectedVerdict || undefined,
@@ -825,6 +865,7 @@ export function ThreatDashboard({
         const highLatencyCount = filteredLogs.filter((log) => Number(log.latencyMs || 0) > 100).length;
         const detectionSignalMetrics = calculateDetectionSignalMetrics(filteredLogs);
         const obfuscationSignalMetrics = calculateObfuscationSignalMetrics(filteredLogs);
+        const researchSignalMetrics = calculateFeaturePressureMetrics(filteredLogs);
         const atlasColumns = ATLAS_TACTICS.map((tactic) => {
           const techniques = ATLAS_TECHNIQUE_DEFINITIONS
             .filter((definition) => definition.tactic === tactic)
@@ -894,6 +935,7 @@ export function ThreatDashboard({
           layerDefense: layerMetrics,
           detectionSignals: detectionSignalMetrics,
           obfuscationSignals: obfuscationSignalMetrics,
+          researchSignals: researchSignalMetrics,
           atlasHeatmap: {
             maxCount: maxAtlasCount,
             columns: atlasColumns,
@@ -1474,7 +1516,7 @@ export function ThreatDashboard({
                 <span className="font-semibold text-fuchsia-400">{operationalMetrics.detectionSignals.obfuscatedHits}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Foreign Language</span>
+                <span className="text-muted-foreground">Foreign / Mixed Language</span>
                 <span className="font-semibold text-cyan-300">{operationalMetrics.detectionSignals.foreignLanguageHits}</span>
               </div>
               <div className="flex items-center justify-between">
@@ -1483,6 +1525,65 @@ export function ThreatDashboard({
               </div>
               </CardContent>
           </Card>
+
+          {operationalMetrics.researchSignals && (
+            <Card className="bg-card border-border shadow-sm overflow-visible">
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+                  <span>Feature Pressure</span>
+                  <HelpTooltip text="Pre-inference feature vectors recorded automatically with audit events, before Safeguard LLM forwarding. Feature Pressure is a 0-100 analysis score for comparing prompt structure; it does not independently block or allow traffic." />
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2 text-sm">
+                {operationalMetrics.researchSignals.featureSampleCount === 0 ? (
+                  <div className="rounded-md border border-slate-800 bg-slate-950/60 p-3 text-xs text-muted-foreground">
+                    No feature-vector audit events yet. Submit a prompt to populate this pre-inference analysis card.
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Avg Feature Pressure</span>
+                      <span className="font-semibold text-cyan-300">{operationalMetrics.researchSignals.averageResearchSignal} / 100</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">High Pressure Prompts</span>
+                      <span className="font-semibold text-amber-400">{operationalMetrics.researchSignals.highResearchSignalCount}</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Top Pressure Driver</span>
+                      <span className="max-w-40 truncate text-right font-semibold text-slate-100" title={operationalMetrics.researchSignals.topResearchDriver}>
+                        {operationalMetrics.researchSignals.topResearchDriver}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Avg Instruction Pressure</span>
+                      <span className="font-semibold text-cyan-300">{operationalMetrics.researchSignals.averageInstructionPressure}%</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Avg Constraint Density</span>
+                      <span className="font-semibold text-indigo-300">{operationalMetrics.researchSignals.averageConstraintDensityPressure}%</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Avg Syntax / Wrapper</span>
+                      <span className="font-semibold text-pink-300">{operationalMetrics.researchSignals.averageSyntaxWrapperPressure}%</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Avg Obfuscation Pressure</span>
+                      <span className="font-semibold text-fuchsia-400">{operationalMetrics.researchSignals.averageObfuscationPressure}%</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Avg Entropy Pressure</span>
+                      <span className="font-semibold text-amber-400">{operationalMetrics.researchSignals.averageEntropyPressure}%</span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-muted-foreground">Avg N-Gram Signal</span>
+                      <span className="font-semibold text-emerald-300">{operationalMetrics.researchSignals.averageNgramObfuscationSignal}%</span>
+                    </div>
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2">

@@ -219,6 +219,8 @@ If your ingest run includes `expectedVerdict` labels, the escape-rate math will 
 
 Backend safeguard attribution note: records that reach `/v1/intercept` now carry `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, and `backendReachedSafeguard`. The Metrics funnel uses those fields to count backend safeguard/model interventions, so a Bulk Ingest prompt blocked by the safeguard judge should increment **Model Intervention Rate** rather than appearing as `0 caught by Safeguard LLM / 0 prompts that reached it`.
 
+Detection signal note: the Metrics **Detection Signals** card is a prompt-count rollup by detection family. Local-review and Firestore-backed views share the same aggregation helpers. **Forbidden Phrase Hits** includes both `FORBIDDEN_TOPIC` and future `FORBIDDEN_PHRASE` flags, and **Obfuscation Hits** counts any stored obfuscation technique shown in prompt details rather than only `OBFUSCATED_INSTRUCTION`.
+
 Sanitizer note: the current runtime now treats any recognized obfuscation signal as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. If you are testing encoded, transformed, or cipher-like prompts, expect the local firewall to block them at the highest severity even before a decoded policy phrase is confirmed. Entropy also follows the shared live policy: `<= 3.6` stays allowed on entropy grounds, `> 3.6` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
 
 Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`.

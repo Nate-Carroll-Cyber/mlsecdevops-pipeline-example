@@ -27,7 +27,8 @@ import {
   type DecodeTelemetry,
   type ObfuscationSignal,
 } from './sanitizerObfuscation';
-import { normalizeForPolicy, normalizeWithoutLeet } from './sanitizerNormalization';
+import { normalizeForPolicy } from './sanitizerNormalization';
+import { hasLowNaturalLanguageLikelihood } from './languageLikelihood';
 
 // Define an array of sensitive patterns (Regex) to detect and redact PII and secrets
 const SENSITIVE_PATTERNS = [
@@ -63,18 +64,31 @@ const SENSITIVE_PATTERNS = [
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
 const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
+const FORCED_PREFIX_PATTERNS = [
+  /^\s*(?:always\s+)?(?:start|begin|open)(?:\s+(?:your\s+)?(?:response|reply|message|answer))?\s+(?:with|by)\b/i,
+  /^\s*(?:respond|reply|answer)\s+only\s+with\b/i,
+  /^\s*your\s+(?:response|reply|answer)\s+must\s+(?:start|begin)\s+with\b/i,
+  /^\s*(?:first|opening)\s+(?:word|sentence|line|character)\s+(?:must|should|will)\s+be\b/i,
+];
+const ANTI_SANITIZATION_PATTERNS = [
+  /\b(?:avoid|skip|bypass|disable|without|no)\s+(?:sanitiz|filter|moderat|censor)/i,
+  /\bwithhold(?:ing)?\s+(?:knowledge|information|content|details)/i,
+  /\bdo\s+not\s+(?:warn|caveat|moralize|lecture|disclaim|sanitize)/i,
+  /\b(?:no|without|skip)\s+(?:warnings?|disclaimers?|caveats?|safety\s+(?:notices?|disclaimers?))/i,
+  /\bunfiltered\b/i,
+  /\b(?:ignore|override|bypass)\s+(?:all\s+)?(?:safety|ethical|moral|content)\s+(?:rules?|guidelines?|policies|filters?|restrictions?)/i,
+];
+const PAIRED_RESPONSE_REGEX =
+  /\b(?:approved\s+(?:and|\/)\s+rejected|both\s+versions|two\s+responses|safe\s+(?:and|\/)\s+unsafe|opposite\s+response)\b/i;
+const PERSONA_ASSIGNMENT_REGEX =
+  /\b(?:you\s+are\s+(?:now\s+)?(?:[A-Z][A-Za-z0-9\-_]*|a\s+\w+)|your\s+name\s+is\s+\w+|you'?re\s+(?:now\s+)?(?:a|an)\s+\w+|act\s+as\s+(?:if\s+you\s+(?:are|were)\s+)?\w+|pretend\s+(?:to\s+be|you'?re)\s+\w+|reset\s+(?:chat|conversation|context))\b/i;
+const UNRESTRICTED_CAPABILITY_REGEX =
+  /\b(?:no\s+(?:rules?|restrictions?|limits?|filters?|boundaries?)|absolutely\s+no\s+\w+|unrestricted|untrammelled|unfiltered|uncensored|jailbroken|ignore\s+(?:all\s+)?(?:safety|previous|prior)\s+(?:instructions?|rules?|guidelines?)|can\s+do\s+anything|do\s+anything\s+(?:asked|requested)|any\s+(?:area|topic|subject)\s+is\s+open|gray\s+area|black\s+area|DAN\b|developer\s+mode|admin\s+mode)\b/i;
+const ALLCAPS_PERSONA_REGEX = /\b[A-Z]{4,}(?:-[A-Z0-9]+)+\b/;
 export const SUSPICIOUS_ENTROPY_THRESHOLD = 3.6;
 const SCRIPT_TAG_REGEX = /<script\b[^>]*(?:>[\s\S]*?<\/script>|\s*\/?>)/gi;
 const URL_WITH_SCHEME_REGEX = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/gi;
 const JAVASCRIPT_URI_REGEX = /\bjavascript:[^\s<>"']*/gi;
-const ENGLISH_TRIGRAMS = new Set([
-  'the', 'and', 'ing', 'ion', 'tio', 'ent', 'ati', 'for', 'her', 'tha', 'nth',
-  'int', 'ere', 'ter', 'est', 'ers', 'hat', 'ate', 'all', 'eth', 'his', 'ver',
-  'wit', 'thi', 'oth', 'res', 'ont', 'rea', 'eve', 'not', 'you', 'are', 'was',
-  'but', 'use', 'our', 'out', 'str', 'sys', 'pro', 'req', 'sen', 'sho', 'con',
-  'ple', 'ase', 'msg', 'ing', 'ide', 'com', 'sec', 'pol', 'tri', 'ans', 'tim',
-  'lat', 'gue', 'que', 'log', 'red', 'act', 'exp', 'ect', 'tra', 'ate', 'rom',
-]);
 
 // Enum defining the severity levels of detected threats
 export enum DetectionLevel {
@@ -239,75 +253,21 @@ function calculateEntropyLanguagePenalty(str: string): number {
   return looksLikePlainProse ? 1.65 : 0;
 }
 
-function normalizeForEnglishLikelihood(input: string): string {
-  const normalized = normalizeWithoutLeet(input)
-    .replace(REDACTED_PLACEHOLDER_REGEX, ' ')
-    .replace(/[^a-z\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-
-  return normalized;
+function hasForcedPrefix(prompt: string): boolean {
+  const head = prompt.slice(0, 200);
+  return FORCED_PREFIX_PATTERNS.some((pattern) => pattern.test(head));
 }
 
-function getEnglishTrigramHitRate(input: string): number {
-  const lettersOnly = input.replace(/\s+/g, '');
-  if (lettersOnly.length < 12) return 0;
-
-  let total = 0;
-  let hits = 0;
-  for (let index = 0; index <= lettersOnly.length - 3; index += 1) {
-    total += 1;
-    if (ENGLISH_TRIGRAMS.has(lettersOnly.slice(index, index + 3))) {
-      hits += 1;
-    }
-  }
-
-  return total > 0 ? hits / total : 0;
+function hasAntiSanitizationClause(prompt: string): boolean {
+  return ANTI_SANITIZATION_PATTERNS.some((pattern) => pattern.test(prompt));
 }
 
-function shiftCaesarText(input: string, shift: number): string {
-  return [...input].map((char) => {
-    if (!/[a-z]/.test(char)) return char;
-    const base = 'a'.charCodeAt(0);
-    const normalized = char.charCodeAt(0) - base;
-    return String.fromCharCode(((normalized - shift + 26) % 26) + base);
-  }).join('');
+function hasPersonaInjection(prompt: string): boolean {
+  return PERSONA_ASSIGNMENT_REGEX.test(prompt) && UNRESTRICTED_CAPABILITY_REGEX.test(prompt);
 }
 
-// Detect alphabetic gibberish that still looks like spaced prose by comparing
-// normalized character trigrams and bounded Caesar-shift recovery. This is used
-// as an obfuscation-family signal, not as a generic "bad writing" detector.
-function hasLowNaturalLanguageLikelihood(input: string): boolean {
-  const normalized = normalizeForEnglishLikelihood(input);
-
-  if (!normalized) return false;
-
-  const tokens = normalized
-    .split(' ')
-    .map((token) => token.trim())
-    .filter((token) => token.length >= 4);
-
-  if (tokens.length < 4) return false;
-
-  const vowelishTokens = tokens.filter((token) => /[aeiouy]/.test(token));
-  if (vowelishTokens.length / tokens.length < 0.4) return false;
-
-  const uniqueTokenRate = new Set(tokens).size / tokens.length;
-  const averageTokenLength = tokens.reduce((sum, token) => sum + token.length, 0) / tokens.length;
-  const originalTrigramRate = getEnglishTrigramHitRate(normalized);
-
-  let bestShiftRate = 0;
-  for (let shift = 1; shift < 26; shift += 1) {
-    bestShiftRate = Math.max(bestShiftRate, getEnglishTrigramHitRate(shiftCaesarText(normalized, shift)));
-  }
-
-  return uniqueTokenRate >= 0.75 &&
-    averageTokenLength >= 4.2 &&
-    (
-      (originalTrigramRate <= 0.035 && bestShiftRate >= 0.16 && bestShiftRate - originalTrigramRate >= 0.08) ||
-      (originalTrigramRate <= 0.025 && tokens.length >= 7) ||
-      (originalTrigramRate <= 0.005 && bestShiftRate >= 0.07)
-    );
+function hasPairedResponseInjection(prompt: string): boolean {
+  return PAIRED_RESPONSE_REGEX.test(prompt);
 }
 
 // Entropy should measure concealment pressure, not reward predictable wrapper
@@ -553,6 +513,10 @@ export function sanitizeInput(
   let mixedLanguageDetected = false;
   let externalCallDetected = false;
   let coordinateCipherDetected = false;
+  let forcedPrefixDetected = false;
+  let antiSanitizationDetected = false;
+  let personaInjectionDetected = false;
+  let pairedResponseDetected = false;
 
   // Recovery/normalization stage:
   // - normalize direct text for policy checks
@@ -719,6 +683,25 @@ export function sanitizeInput(
     externalCallDetected = true;
     if (!redactions.includes('EXTERNAL_CALL_ATTEMPT')) redactions.push('EXTERNAL_CALL_ATTEMPT');
   }
+  if (hasForcedPrefix(input)) {
+    forcedPrefixDetected = true;
+    if (!redactions.includes('FORCED_PREFIX_INJECTION')) redactions.push('FORCED_PREFIX_INJECTION');
+  }
+  if (hasAntiSanitizationClause(input)) {
+    antiSanitizationDetected = true;
+    if (!redactions.includes('ANTI_SANITIZATION_CLAUSE')) redactions.push('ANTI_SANITIZATION_CLAUSE');
+  }
+  if (hasPersonaInjection(input)) {
+    personaInjectionDetected = true;
+    if (!redactions.includes('PERSONA_INJECTION')) redactions.push('PERSONA_INJECTION');
+  }
+  if (hasPairedResponseInjection(input)) {
+    pairedResponseDetected = true;
+    if (!redactions.includes('PAIRED_RESPONSE_INJECTION')) redactions.push('PAIRED_RESPONSE_INJECTION');
+  }
+  if (ALLCAPS_PERSONA_REGEX.test(input)) {
+    if (!redactions.includes('ALLCAPS_PERSONA')) redactions.push('ALLCAPS_PERSONA');
+  }
   if (COORDINATE_CIPHER_REGEX.test(input)) {
     coordinateCipherDetected = true;
     if (!redactions.includes('COORDINATE_CIPHER')) redactions.push('COORDINATE_CIPHER');
@@ -779,8 +762,8 @@ export function sanitizeInput(
 	    leetspeakDetected ||
 	    spellingObfuscationDetected ||
 	    transformedSignalsUsed.length > 0 ||
-	    lowNaturalLanguageLikelihoodDetected ||
-	    coordinateCipherDetected;
+    lowNaturalLanguageLikelihoodDetected ||
+    coordinateCipherDetected;
 
   // Complexity analysis runs after the earlier normalization stages so the final
   // severity can reflect both structural suspicion and explicit policy hits.
@@ -801,6 +784,23 @@ export function sanitizeInput(
     // Check if a custom regex rule was matched
     containsRegexMatch ||
     externalCallDetected ||
+    forcedPrefixDetected ||
+    antiSanitizationDetected ||
+    personaInjectionDetected ||
+    (
+      pairedResponseDetected &&
+      (
+        containsBlockedKeyword ||
+        containsForbiddenTopic ||
+        containsRegexMatch ||
+        externalCallDetected ||
+        forcedPrefixDetected ||
+        antiSanitizationDetected ||
+        personaInjectionDetected ||
+        obfuscationSignalDetected ||
+        syntacticAnalysis.isProbingAttempt
+      )
+    ) ||
     coordinateCipherDetected ||
     lowNaturalLanguageLikelihoodDetected ||
     // Check if the syntactic analyzer detected a probing attempt
@@ -835,8 +835,25 @@ export function sanitizeInput(
 	    detectionLevel = DetectionLevel.INFORMATIONAL;
 	  } else if (
 	    containsBlockedKeyword ||
-	    containsForbiddenTopic ||
+    containsForbiddenTopic ||
     externalCallDetected ||
+    forcedPrefixDetected ||
+    antiSanitizationDetected ||
+    personaInjectionDetected ||
+    (
+      pairedResponseDetected &&
+      (
+        containsBlockedKeyword ||
+        containsForbiddenTopic ||
+        containsRegexMatch ||
+        externalCallDetected ||
+        forcedPrefixDetected ||
+        antiSanitizationDetected ||
+        personaInjectionDetected ||
+        obfuscationSignalDetected ||
+        syntacticAnalysis.isProbingAttempt
+      )
+    ) ||
     coordinateCipherDetected ||
     lowNaturalLanguageLikelihoodDetected ||
     (guardrails.entropyFilter && entropy > SUSPICIOUS_ENTROPY_THRESHOLD) ||

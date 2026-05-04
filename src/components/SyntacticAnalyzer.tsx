@@ -11,6 +11,7 @@ import { ShieldAlert, ShieldCheck, Activity, Info, Download, Save, Send, Languag
 import { analyzeSyntacticComplexity } from '../lib/syntacticAnalyzer';
 // Import the full sanitization function and DetectionLevel enum
 import { sanitizeInput, DetectionLevel } from '../lib/sanitizer';
+import { buildPromptFeatureVector, formatFeaturePercent } from '../lib/promptFeatureVector';
 import { POLICIES, extractMcpA2AHardBlockPhrases } from '../lib/policies';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -20,6 +21,7 @@ import {
   savePlaygroundMetrics,
   summarizePlaygroundMetrics,
   type PlaygroundMetricEntry,
+  type PromptFeatureVector,
 } from '../lib/playgroundMetrics';
 import {
   ATLAS_TACTICS,
@@ -75,6 +77,7 @@ interface SyntacticAnalyzerProps {
   };
   // Optional callback to route the current prompt through the live firewall pipeline
   onSubmitPrompt?: (prompt: string) => Promise<void>;
+  latestSubmittedFeatureVector?: PromptFeatureVector;
   // Optional flag showing the shared send pipeline is already busy
   isSubmitting?: boolean;
   maxContextWindow?: number;
@@ -94,6 +97,7 @@ export function SyntacticAnalyzer({
   activeGuardrails,
   governanceConfig,
   onSubmitPrompt,
+  latestSubmittedFeatureVector,
   isSubmitting = false,
   maxContextWindow,
   estimatePromptTokens,
@@ -193,9 +197,17 @@ export function SyntacticAnalyzer({
       });
     }
     
-    // Return both the syntactic analysis and the full sanitization result
-    return { syntactic, fullSanitization };
-  }, [promptText, systemConfig, activeGuardrails]);
+    const featureVector = buildPromptFeatureVector({
+      prompt: promptText,
+      syntactic,
+      sanitization: fullSanitization,
+      entropyThreshold: governanceConfig?.entropyThreshold ?? 4.0,
+      syntacticThreshold: governanceConfig?.syntacticThreshold ?? 65,
+    });
+
+    // Return the syntactic analysis, full sanitization result, and research-only feature vector.
+    return { syntactic, fullSanitization, featureVector };
+  }, [promptText, systemConfig, activeGuardrails, governanceConfig?.entropyThreshold, governanceConfig?.syntacticThreshold]);
 
   // Helper function to colorize the syntactic score based on severity thresholds
   const getScoreColor = (score: number) => {
@@ -284,6 +296,69 @@ export function SyntacticAnalyzer({
     : backendHealth?.ok
       ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-200'
       : 'border-rose-500/40 bg-rose-950/30 text-rose-200';
+  const hasCurrentPromptFeatureAnalysis = promptText.trim().length > 0;
+  const displayedFeatureVector = hasCurrentPromptFeatureAnalysis
+    ? analysis.featureVector
+    : latestSubmittedFeatureVector ?? null;
+  const hasFeatureAnalysis = Boolean(displayedFeatureVector);
+  const displayedSyntacticScore = hasCurrentPromptFeatureAnalysis
+    ? analysis.syntactic.score
+    : displayedFeatureVector?.syntactic.score ?? analysis.syntactic.score;
+  const displayedSyntacticThreshold = hasCurrentPromptFeatureAnalysis
+    ? governanceConfig?.syntacticThreshold ?? 65
+    : displayedFeatureVector?.syntactic.threshold ?? governanceConfig?.syntacticThreshold ?? 65;
+  const displayedSyntacticMetrics = hasCurrentPromptFeatureAnalysis || !displayedFeatureVector
+    ? analysis.syntactic.metrics
+    : {
+      constraintCount: displayedFeatureVector.syntactic.raw.constraintCount,
+      constraintDensity: displayedFeatureVector.syntactic.raw.constraintDensity,
+      specialCharRatio: displayedFeatureVector.syntactic.raw.specialCharRatio,
+      avgWordsPerSentence: displayedFeatureVector.syntactic.raw.avgWordsPerSentence,
+    };
+  const featureRows = [
+    {
+      label: 'Instruction Pressure',
+      value: displayedFeatureVector?.syntactic.normalized.instructionPressure ?? 0,
+      rawValue: `${displayedFeatureVector?.syntactic.raw.constraintCount ?? 0} control terms`,
+      tone: 'bg-cyan-500',
+      explanation: 'Measures jailbreak-style control language such as ignore, override, system prompt, developer mode, or respond as.',
+    },
+    {
+      label: 'Constraint Density',
+      value: displayedFeatureVector?.syntactic.normalized.constraintDensity ?? 0,
+      rawValue: `${displayedFeatureVector?.syntactic.raw.constraintDensity ?? 0}% of words`,
+      tone: 'bg-indigo-500',
+      explanation: 'Shows how concentrated those control terms are relative to prompt length; short directive-heavy prompts rise faster.',
+    },
+    {
+      label: 'Syntax / Wrapper Pressure',
+      value: displayedFeatureVector?.syntactic.normalized.syntaxWrapperPressure ?? 0,
+      rawValue: `${displayedFeatureVector?.syntactic.raw.specialCharRatio ?? 0}% special chars, ${displayedFeatureVector?.syntactic.raw.wrapperShellCount ?? 0} wrappers`,
+      tone: 'bg-pink-500',
+      explanation: 'Captures unusual tags, brackets, wrappers, shell-like framing, and code-shaped prompt structure.',
+    },
+    {
+      label: 'Obfuscation Pressure',
+      value: displayedFeatureVector?.syntactic.normalized.obfuscationPressure ?? 0,
+      rawValue: `${displayedFeatureVector?.syntactic.raw.obfuscationBonus ?? 0} bonus pts`,
+      tone: 'bg-rose-500',
+      explanation: 'Highlights base64-like blobs, escape sequences, leetspeak, or other concealment that can hide policy intent.',
+    },
+    {
+      label: 'Entropy Pressure',
+      value: displayedFeatureVector?.entropy.normalizedPressure ?? 0,
+      rawValue: `${(displayedFeatureVector?.entropy.maxWindowEntropy ?? 0).toFixed(2)} max window`,
+      tone: 'bg-amber-500',
+      explanation: 'Compares the highest entropy window against the active threshold to surface encoded or packed payloads.',
+    },
+    {
+      label: 'N-Gram Obfuscation Signal',
+      value: displayedFeatureVector?.languageLikelihood.normalizedSuspicion ?? 0,
+      rawValue: `${displayedFeatureVector?.languageLikelihood.trigramHitRate ?? 0} trigram hit rate`,
+      tone: 'bg-emerald-500',
+      explanation: 'Uses English trigrams and Caesar-shift recovery to detect alphabetic obfuscation that still looks like spaced prose.',
+    },
+  ];
 
   const resetTranslationSettings = () => {
     setTranslationEnabled(true);
@@ -431,6 +506,13 @@ export function SyntacticAnalyzer({
       entropyThreshold: governanceConfig?.entropyThreshold ?? 4.0,
       syntacticThreshold: governanceConfig?.syntacticThreshold ?? 65,
     });
+    const featureVector = buildPromptFeatureVector({
+      prompt: rawPrompt,
+      syntactic,
+      sanitization: fullSanitization,
+      entropyThreshold: governanceConfig?.entropyThreshold ?? 4.0,
+      syntacticThreshold: governanceConfig?.syntacticThreshold ?? 65,
+    });
     const promptHash = await hashText(rawPrompt);
     const suspiciousChunkHashes = await Promise.all(
       fullSanitization.suspiciousChunks.map((chunk) => hashText(chunk)),
@@ -473,6 +555,9 @@ export function SyntacticAnalyzer({
       constraintDensity: syntactic.metrics.constraintDensity,
       specialCharRatio: syntactic.metrics.specialCharRatio,
       avgWordsPerSentence: syntactic.metrics.avgWordsPerSentence,
+      featureVector,
+      researchSignal: featureVector.researchSignal,
+      topResearchDriver: featureVector.topDriver,
       obfuscationCategory: variant?.technique.category,
       obfuscationTechniqueId: variant?.technique.id,
       obfuscationTechniqueName: variant?.technique.name,
@@ -566,6 +651,23 @@ export function SyntacticAnalyzer({
       'constraintDensity',
       'specialCharRatio',
       'avgWordsPerSentence',
+      'researchSignal',
+      'topResearchDriver',
+      'weightedConstraintScore',
+      'wrapperShellCount',
+      'verbosityBonus',
+      'wrapperShellBonus',
+      'obfuscationBonus',
+      'keywordScoreContribution',
+      'densityScoreContribution',
+      'specialCharScoreContribution',
+      'normalizedInstructionPressure',
+      'normalizedSyntaxWrapperPressure',
+      'normalizedObfuscationPressure',
+      'normalizedEntropyPressure',
+      'trigramHitRate',
+      'bestCaesarShiftTrigramRate',
+      'lowNaturalLanguageLikelihood',
       'obfuscationCategory',
       'obfuscationTechniqueId',
       'obfuscationTechniqueName',
@@ -611,6 +713,23 @@ export function SyntacticAnalyzer({
       entry.constraintDensity,
       entry.specialCharRatio,
       entry.avgWordsPerSentence,
+      entry.researchSignal,
+      entry.topResearchDriver,
+      entry.featureVector?.syntactic.raw.weightedConstraintScore,
+      entry.featureVector?.syntactic.raw.wrapperShellCount,
+      entry.featureVector?.syntactic.raw.verbosityBonus,
+      entry.featureVector?.syntactic.raw.wrapperShellBonus,
+      entry.featureVector?.syntactic.raw.obfuscationBonus,
+      entry.featureVector?.syntactic.raw.keywordScoreContribution,
+      entry.featureVector?.syntactic.raw.densityScoreContribution,
+      entry.featureVector?.syntactic.raw.specialCharScoreContribution,
+      entry.featureVector?.syntactic.normalized.instructionPressure,
+      entry.featureVector?.syntactic.normalized.syntaxWrapperPressure,
+      entry.featureVector?.syntactic.normalized.obfuscationPressure,
+      entry.featureVector?.entropy.normalizedPressure,
+      entry.featureVector?.languageLikelihood.trigramHitRate,
+      entry.featureVector?.languageLikelihood.bestCaesarShiftTrigramRate,
+      entry.featureVector?.languageLikelihood.lowNaturalLanguageLikelihood,
       entry.obfuscationCategory,
       entry.obfuscationTechniqueId,
       entry.obfuscationTechniqueName,
@@ -1418,16 +1537,89 @@ export function SyntacticAnalyzer({
         </div>
       )}
 
+      <div className="bg-slate-900 p-4 rounded-lg border border-slate-800 space-y-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold text-slate-100">Feature Breakdown</h3>
+              <HelpTooltip
+                widthClassName="w-72"
+                text="Research-only feature vector for analysis and threshold tuning. It explains measurable prompt signals but does not independently block or allow traffic."
+              />
+            </div>
+            <p className="text-xs text-slate-400 mt-1">
+              {hasCurrentPromptFeatureAnalysis
+                ? 'Decomposes the current prompt into measurable pre-inference signals. Runtime verdict behavior is unchanged.'
+                : hasFeatureAnalysis
+                  ? 'Showing the latest submitted prompt feature vector. Type a new prompt to recalculate live.'
+                  : 'Decomposes prompts into measurable pre-inference signals. Runtime verdict behavior is unchanged.'}
+            </p>
+          </div>
+          <div className="min-w-[180px] rounded-md border border-slate-800 bg-slate-950/60 px-3 py-2 text-right">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Feature Pressure</div>
+            <div className="text-2xl font-black text-slate-100">{displayedFeatureVector ? displayedFeatureVector.researchSignal : '-'}</div>
+            <div className="text-[11px] text-slate-400">
+              {displayedFeatureVector ? `Top driver: ${displayedFeatureVector.topDriver}` : 'Enter a prompt to analyze'}
+            </div>
+          </div>
+        </div>
+
+        {!hasFeatureAnalysis ? (
+          <div className="rounded-md border border-slate-800 bg-slate-950/60 p-4 text-sm text-slate-400">
+            No feature data yet. Type or paste a prompt in the Playground editor to calculate pre-inference feature pressure.
+          </div>
+        ) : (
+          <>
+            <div className="overflow-hidden rounded-md border border-slate-800 bg-slate-950/60">
+              <div className="flex h-3 w-full">
+                {featureRows.map((row) => (
+                  <div
+                    key={row.label}
+                    className={`${row.tone} transition-all duration-300`}
+                    style={{ width: formatFeaturePercent(row.value) }}
+                    title={`${row.label}: ${formatFeaturePercent(row.value)}`}
+                  />
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              {featureRows.map((row) => (
+                <div key={row.label} className="rounded-md border border-slate-800 bg-slate-950/50 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold text-slate-200">{row.label}</div>
+                      <p className="text-xs text-slate-500 mt-1">{row.explanation}</p>
+                    </div>
+                    <div className="text-right">
+                      <div className="font-mono text-sm text-slate-100">{formatFeaturePercent(row.value)}</div>
+                      <div className="text-[11px] text-slate-500">{row.rawValue}</div>
+                    </div>
+                  </div>
+                  <div className="mt-3 h-2 rounded-full bg-slate-800">
+                    <div className={`${row.tone} h-2 rounded-full transition-all duration-300`} style={{ width: formatFeaturePercent(row.value) }} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+
+        <div className="rounded-md border border-blue-500/20 bg-blue-950/20 px-3 py-2 text-xs text-blue-100">
+          Research-only. Helps explain and compare prompts for analysis, exports, and calibration. It does not independently block or allow traffic.
+        </div>
+      </div>
+
       {/* Dashboard Grid for metrics */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         
         {/* Main Score Card displaying the overall syntactic score */}
         <div className="col-span-1 bg-slate-900 p-4 rounded-lg border border-slate-800 flex flex-col justify-center items-center text-center">
           <span className="text-slate-400 text-xs uppercase tracking-wider font-semibold mb-2">Syntactic Score</span>
-          <span className={`text-6xl font-black ${getScoreColor(analysis.syntactic.score)}`}>
-            {analysis.syntactic.score}
+          <span className={`text-6xl font-black ${getScoreColor(displayedSyntacticScore)}`}>
+            {displayedSyntacticScore}
           </span>
-          <span className="text-slate-500 text-xs mt-2">Threshold: {governanceConfig?.syntacticThreshold ?? 65}</span>
+          <span className="text-slate-500 text-xs mt-2">Threshold: {displayedSyntacticThreshold}</span>
         </div>
 
         {/* Metrics Breakdown Section */}
@@ -1437,13 +1629,13 @@ export function SyntacticAnalyzer({
           <div>
             <div className="flex justify-between text-sm mb-1">
               <span className="text-slate-300">Operational Keywords</span>
-              <span className="font-mono text-cyan-400">{analysis.syntactic.metrics.constraintCount} found</span>
+              <span className="font-mono text-cyan-400">{displayedSyntacticMetrics.constraintCount} found</span>
             </div>
             {/* Progress bar for Raw Keywords */}
             <div className="w-full bg-slate-800 rounded-full h-2">
               <div 
                 className="bg-cyan-500 h-2 rounded-full transition-all duration-300" 
-                style={{ width: `${Math.min((analysis.syntactic.metrics.constraintCount / 50) * 100, 100)}%` }}
+                style={{ width: `${Math.min((displayedSyntacticMetrics.constraintCount / 50) * 100, 100)}%` }}
               />
             </div>
             <p className="text-xs text-slate-500 mt-1">Raw count of meta-prompting instructions (highly indicative of injection).</p>
@@ -1453,13 +1645,13 @@ export function SyntacticAnalyzer({
           <div>
             <div className="flex justify-between text-sm mb-1">
               <span className="text-slate-300">Constraint Density</span>
-              <span className="font-mono text-indigo-400">{analysis.syntactic.metrics.constraintDensity}%</span>
+              <span className="font-mono text-indigo-400">{displayedSyntacticMetrics.constraintDensity}%</span>
             </div>
             {/* Progress bar for Constraint Density */}
             <div className="w-full bg-slate-800 rounded-full h-2">
               <div 
                 className="bg-indigo-500 h-2 rounded-full transition-all duration-300" 
-                style={{ width: `${Math.min(analysis.syntactic.metrics.constraintDensity, 100)}%` }}
+                style={{ width: `${Math.min(displayedSyntacticMetrics.constraintDensity, 100)}%` }}
               />
             </div>
             <p className="text-xs text-slate-500 mt-1">Density of operational overrides (ignore, must, system).</p>
@@ -1469,13 +1661,13 @@ export function SyntacticAnalyzer({
           <div>
             <div className="flex justify-between text-sm mb-1">
               <span className="text-slate-300">Special Character Ratio</span>
-              <span className="font-mono text-pink-400">{analysis.syntactic.metrics.specialCharRatio}%</span>
+              <span className="font-mono text-pink-400">{displayedSyntacticMetrics.specialCharRatio}%</span>
             </div>
             {/* Progress bar for Special Character Ratio */}
             <div className="w-full bg-slate-800 rounded-full h-2">
               <div 
                 className="bg-pink-500 h-2 rounded-full transition-all duration-300" 
-                style={{ width: `${Math.min(analysis.syntactic.metrics.specialCharRatio, 100)}%` }}
+                style={{ width: `${Math.min(displayedSyntacticMetrics.specialCharRatio, 100)}%` }}
               />
             </div>
             <p className="text-xs text-slate-500 mt-1">Usage of formatting escape characters (JSON/XML tags).</p>
@@ -1485,13 +1677,13 @@ export function SyntacticAnalyzer({
           <div>
             <div className="flex justify-between text-sm mb-1">
               <span className="text-slate-300">Sentence Verbosity</span>
-              <span className="font-mono text-amber-400">{analysis.syntactic.metrics.avgWordsPerSentence} words/sentence</span>
+              <span className="font-mono text-amber-400">{displayedSyntacticMetrics.avgWordsPerSentence} words/sentence</span>
             </div>
             {/* Progress bar for Sentence Verbosity */}
             <div className="w-full bg-slate-800 rounded-full h-2">
               <div 
                 className="bg-amber-500 h-2 rounded-full transition-all duration-300" 
-                style={{ width: `${Math.min((analysis.syntactic.metrics.avgWordsPerSentence / 100) * 100, 100)}%` }}
+                style={{ width: `${Math.min((displayedSyntacticMetrics.avgWordsPerSentence / 100) * 100, 100)}%` }}
               />
             </div>
             <p className="text-xs text-slate-500 mt-1">Detects run-on logic used for cognitive overload.</p>
@@ -1521,7 +1713,39 @@ export function SyntacticAnalyzer({
               <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">{label}</div>
               <div className="text-2xl font-bold text-slate-100">{summary.sampleCount}</div>
               <div className="text-xs text-slate-400">Avg syntactic {summary.averageSyntacticScore} | Avg entropy {summary.averageEntropy}</div>
+              <div className="text-xs text-slate-400">Feature samples {summary.featureSampleCount}/{summary.sampleCount} | Avg feature pressure {summary.featureSampleCount > 0 ? summary.averageResearchSignal : '-'}</div>
               <div className="text-xs text-slate-400">Suspicious {summary.suspiciousRate}% | Adversarial {summary.adversarialRate}%</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          {[
+            {
+              label: 'High Feature Pressure',
+              value: summaryAll.highResearchSignalCount,
+              detail: 'Snapshots at 70+ feature pressure. Analysis-only, not an enforcement count.',
+            },
+            {
+              label: 'Low N-Gram Likelihood',
+              value: summaryAll.lowLanguageLikelihoodCount,
+              detail: 'Prompts matching the trigram / Caesar-shift obfuscation heuristic.',
+            },
+            {
+              label: 'Obfuscation Heavy',
+              value: summaryAll.obfuscationHeavyCount,
+              detail: 'Snapshots where base64, escape sequences, or leetspeak contributed bonus pressure.',
+            },
+            {
+              label: 'Instruction Dense',
+              value: summaryAll.instructionDenseCount,
+              detail: 'Snapshots where directive language was concentrated enough to dominate the feature vector.',
+            },
+          ].map((metric) => (
+            <div key={metric.label} className="rounded-lg border border-slate-800 bg-slate-950/60 p-4 space-y-2">
+              <div className="text-xs font-semibold uppercase tracking-wider text-slate-400">{metric.label}</div>
+              <div className="text-2xl font-bold text-slate-100">{metric.value}</div>
+              <div className="text-xs text-slate-500">{metric.detail}</div>
             </div>
           ))}
         </div>
@@ -1533,12 +1757,17 @@ export function SyntacticAnalyzer({
           ) : (
             <div className="space-y-2">
               {recentEntries.map((entry) => (
-                <div key={entry.id} className="grid grid-cols-[140px_1fr_110px_160px] gap-3 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs">
+                <div key={entry.id} className="grid grid-cols-[140px_1fr_130px_170px] gap-3 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs">
                   <div className="text-slate-400">{new Date(entry.timestamp).toLocaleString()}</div>
                   <div className="font-mono text-slate-300 truncate" title={entry.promptHash}>{entry.promptHash}</div>
-                  <div className="text-slate-300">Score {entry.syntacticScore}</div>
+                  <div className="text-slate-300">Syn {entry.syntacticScore} | Pressure {entry.researchSignal ?? '-'}</div>
                   <div className="space-y-1">
                     <div className="text-slate-300">{entry.verdictLabel}</div>
+                    {entry.topResearchDriver && (
+                      <div className="text-[10px] text-slate-400 truncate" title={entry.topResearchDriver}>
+                        {entry.topResearchDriver}
+                      </div>
+                    )}
                     {entry.atlasTechniqueId && (
                       <div className="text-[10px] text-slate-400 truncate" title={`${entry.atlasTechniqueId} - ${entry.atlasTechniqueName || ''}`}>
                         {entry.atlasTechniqueId}

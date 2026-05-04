@@ -44,6 +44,27 @@ const SENSITIVE_PATTERNS: SensitivePattern[] = [
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
 const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
+const FORCED_PREFIX_PATTERNS = [
+  /^\s*(?:always\s+)?(?:start|begin|open)(?:\s+(?:your\s+)?(?:response|reply|message|answer))?\s+(?:with|by)\b/i,
+  /^\s*(?:respond|reply|answer)\s+only\s+with\b/i,
+  /^\s*your\s+(?:response|reply|answer)\s+must\s+(?:start|begin)\s+with\b/i,
+  /^\s*(?:first|opening)\s+(?:word|sentence|line|character)\s+(?:must|should|will)\s+be\b/i,
+];
+const ANTI_SANITIZATION_PATTERNS = [
+  /\b(?:avoid|skip|bypass|disable|without|no)\s+(?:sanitiz|filter|moderat|censor)/i,
+  /\bwithhold(?:ing)?\s+(?:knowledge|information|content|details)/i,
+  /\bdo\s+not\s+(?:warn|caveat|moralize|lecture|disclaim|sanitize)/i,
+  /\b(?:no|without|skip)\s+(?:warnings?|disclaimers?|caveats?|safety\s+(?:notices?|disclaimers?))/i,
+  /\bunfiltered\b/i,
+  /\b(?:ignore|override|bypass)\s+(?:all\s+)?(?:safety|ethical|moral|content)\s+(?:rules?|guidelines?|policies|filters?|restrictions?)/i,
+];
+const PAIRED_RESPONSE_REGEX =
+  /\b(?:approved\s+(?:and|\/)\s+rejected|both\s+versions|two\s+responses|safe\s+(?:and|\/)\s+unsafe|opposite\s+response)\b/i;
+const PERSONA_ASSIGNMENT_REGEX =
+  /\b(?:you\s+are\s+(?:now\s+)?(?:[A-Z][A-Za-z0-9\-_]*|a\s+\w+)|your\s+name\s+is\s+\w+|you'?re\s+(?:now\s+)?(?:a|an)\s+\w+|act\s+as\s+(?:if\s+you\s+(?:are|were)\s+)?\w+|pretend\s+(?:to\s+be|you'?re)\s+\w+|reset\s+(?:chat|conversation|context))\b/i;
+const UNRESTRICTED_CAPABILITY_REGEX =
+  /\b(?:no\s+(?:rules?|restrictions?|limits?|filters?|boundaries?)|absolutely\s+no\s+\w+|unrestricted|untrammelled|unfiltered|uncensored|jailbroken|ignore\s+(?:all\s+)?(?:safety|previous|prior)\s+(?:instructions?|rules?|guidelines?)|can\s+do\s+anything|do\s+anything\s+(?:asked|requested)|any\s+(?:area|topic|subject)\s+is\s+open|gray\s+area|black\s+area|DAN\b|developer\s+mode|admin\s+mode)\b/i;
+const ALLCAPS_PERSONA_REGEX = /\b[A-Z]{4,}(?:-[A-Z0-9]+)+\b/;
 const SANITIZATION_REDOS_LATENCY_THRESHOLD_MS = 1000;
 
 const BLOCKED_KEYWORDS = [
@@ -133,6 +154,23 @@ const COMMON_CORRECTIONS: Record<string, string> = {
   sysytem: 'system',
   yoru: 'your',
 };
+
+function hasForcedPrefix(prompt: string): boolean {
+  const head = prompt.slice(0, 200);
+  return FORCED_PREFIX_PATTERNS.some((pattern) => pattern.test(head));
+}
+
+function hasAntiSanitizationClause(prompt: string): boolean {
+  return ANTI_SANITIZATION_PATTERNS.some((pattern) => pattern.test(prompt));
+}
+
+function hasPersonaInjection(prompt: string): boolean {
+  return PERSONA_ASSIGNMENT_REGEX.test(prompt) && UNRESTRICTED_CAPABILITY_REGEX.test(prompt);
+}
+
+function hasPairedResponseInjection(prompt: string): boolean {
+  return PAIRED_RESPONSE_REGEX.test(prompt);
+}
 const COMPATIBILITY_GLYPH_REGEX = /[\u2460-\u24FF\u3200-\u32FF\uFF00-\uFFEF]/g;
 const CYRILLIC_CONFUSABLES: Record<string, string> = {
   а: 'a', А: 'a', е: 'e', Е: 'e', о: 'o', О: 'o', р: 'p', Р: 'p',
@@ -887,6 +925,11 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     hasLeetspeakObfuscation(prompt) || decodedSegments.some((segment) => hasLeetspeakObfuscation(segment));
   const languageSignals = detectLanguageSignals(prompt);
   const externalCallDetected = EXTERNAL_CALL_REGEX.test(prompt);
+  const forcedPrefixDetected = hasForcedPrefix(prompt);
+  const antiSanitizationDetected = hasAntiSanitizationClause(prompt);
+  const personaInjectionDetected = hasPersonaInjection(prompt);
+  const pairedResponseDetected = hasPairedResponseInjection(prompt);
+  const allCapsPersonaDetected = ALLCAPS_PERSONA_REGEX.test(prompt);
   const normalizedForeignRecovery = languageSignals.translatedCandidate ? normalizeForPolicy(languageSignals.translatedCandidate) : '';
   const normalizedDecodedSegments = decodedSegments.map((segment) => normalizeForPolicy(segment));
   let transformedSignalsUsed: ObfuscationSignal[] = [];
@@ -968,6 +1011,26 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     detectionFlags.add('EXTERNAL_CALL_ATTEMPT');
     redactions.add('EXTERNAL_CALL_ATTEMPT');
   }
+  if (forcedPrefixDetected) {
+    detectionFlags.add('FORCED_PREFIX_INJECTION');
+    redactions.add('FORCED_PREFIX_INJECTION');
+  }
+  if (antiSanitizationDetected) {
+    detectionFlags.add('ANTI_SANITIZATION_CLAUSE');
+    redactions.add('ANTI_SANITIZATION_CLAUSE');
+  }
+  if (personaInjectionDetected) {
+    detectionFlags.add('PERSONA_INJECTION');
+    redactions.add('PERSONA_INJECTION');
+  }
+  if (pairedResponseDetected) {
+    detectionFlags.add('PAIRED_RESPONSE_INJECTION');
+    redactions.add('PAIRED_RESPONSE_INJECTION');
+  }
+  if (allCapsPersonaDetected) {
+    detectionFlags.add('ALLCAPS_PERSONA');
+    redactions.add('ALLCAPS_PERSONA');
+  }
   if (COORDINATE_CIPHER_REGEX.test(prompt)) {
     detectionFlags.add('COORDINATE_CIPHER');
     redactions.add('COORDINATE_CIPHER');
@@ -1032,6 +1095,24 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     forbiddenTopicDetected ||
     regexMatchDetected ||
     externalCallDetected ||
+    forcedPrefixDetected ||
+    antiSanitizationDetected ||
+    personaInjectionDetected ||
+    (
+      pairedResponseDetected &&
+      (
+        blockedKeywordHits.length > 0 ||
+        forbiddenTopicDetected ||
+        regexMatchDetected ||
+        externalCallDetected ||
+        forcedPrefixDetected ||
+        antiSanitizationDetected ||
+        personaInjectionDetected ||
+        usedObfuscation ||
+        obfuscationSignals.length > 0 ||
+        leetspeakDetected
+      )
+    ) ||
     COORDINATE_CIPHER_REGEX.test(prompt) ||
     prompt.length > 2000
   ) {

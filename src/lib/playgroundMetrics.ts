@@ -39,6 +39,9 @@ export interface PlaygroundMetricEntry extends AtlasTaxonomyFields {
   constraintDensity?: number;
   specialCharRatio?: number;
   avgWordsPerSentence?: number;
+  featureVector?: PromptFeatureVector;
+  researchSignal?: number;
+  topResearchDriver?: string;
   obfuscationCategory?: string;
   obfuscationTechniqueId?: string;
   obfuscationTechniqueName?: string;
@@ -60,11 +63,114 @@ export interface PlaygroundMetricEntry extends AtlasTaxonomyFields {
 
 export interface PlaygroundMetricSummary {
   sampleCount: number;
+  featureSampleCount: number;
   averageSyntacticScore: number;
   averageEntropy: number;
+  averageResearchSignal: number;
+  highResearchSignalCount: number;
+  lowLanguageLikelihoodCount: number;
+  obfuscationHeavyCount: number;
+  instructionDenseCount: number;
+  topResearchDriver: string;
   suspiciousRate: number;
   adversarialRate: number;
 }
+
+export interface PromptFeatureVector {
+  syntactic: {
+    score: number;
+    threshold: number;
+    raw: {
+      constraintCount: number;
+      weightedConstraintScore: number;
+      constraintDensity: number;
+      specialCharRatio: number;
+      avgWordsPerSentence: number;
+      wrapperShellCount: number;
+      verbosityBonus: number;
+      wrapperShellBonus: number;
+      obfuscationBonus: number;
+      keywordScoreContribution: number;
+      densityScoreContribution: number;
+      specialCharScoreContribution: number;
+    };
+    normalized: {
+      instructionPressure: number;
+      constraintDensity: number;
+      syntaxWrapperPressure: number;
+      obfuscationPressure: number;
+      verbosityPressure: number;
+    };
+  };
+  entropy: {
+    globalEntropy: number;
+    maxWindowEntropy: number;
+    suspiciousChunkCount: number;
+    threshold: number;
+    normalizedPressure: number;
+  };
+  languageLikelihood: {
+    trigramHitRate: number;
+    bestCaesarShiftTrigramRate: number;
+    lowNaturalLanguageLikelihood: boolean;
+    tokenCount: number;
+    uniqueTokenRate: number;
+    averageTokenLength: number;
+    normalizedSuspicion: number;
+  };
+  researchSignal: number;
+  topDriver: string;
+  detectionFlags: string[];
+  redactions: string[];
+}
+
+const PromptFeatureVectorSchema: z.ZodType<PromptFeatureVector> = z.object({
+  syntactic: z.object({
+    score: z.number(),
+    threshold: z.number(),
+    raw: z.object({
+      constraintCount: z.number(),
+      weightedConstraintScore: z.number(),
+      constraintDensity: z.number(),
+      specialCharRatio: z.number(),
+      avgWordsPerSentence: z.number(),
+      wrapperShellCount: z.number(),
+      verbosityBonus: z.number(),
+      wrapperShellBonus: z.number(),
+      obfuscationBonus: z.number(),
+      keywordScoreContribution: z.number(),
+      densityScoreContribution: z.number(),
+      specialCharScoreContribution: z.number(),
+    }),
+    normalized: z.object({
+      instructionPressure: z.number(),
+      constraintDensity: z.number(),
+      syntaxWrapperPressure: z.number(),
+      obfuscationPressure: z.number(),
+      verbosityPressure: z.number(),
+    }),
+  }),
+  entropy: z.object({
+    globalEntropy: z.number(),
+    maxWindowEntropy: z.number(),
+    suspiciousChunkCount: z.number(),
+    threshold: z.number(),
+    normalizedPressure: z.number(),
+  }),
+  languageLikelihood: z.object({
+    trigramHitRate: z.number(),
+    bestCaesarShiftTrigramRate: z.number(),
+    lowNaturalLanguageLikelihood: z.boolean(),
+    tokenCount: z.number(),
+    uniqueTokenRate: z.number(),
+    averageTokenLength: z.number(),
+    normalizedSuspicion: z.number(),
+  }),
+  researchSignal: z.number(),
+  topDriver: z.string(),
+  detectionFlags: z.array(z.string()),
+  redactions: z.array(z.string()),
+});
 
 const PlaygroundMetricEntrySchema = z.object({
   id: z.string(),
@@ -90,6 +196,9 @@ const PlaygroundMetricEntrySchema = z.object({
   constraintDensity: z.number().optional(),
   specialCharRatio: z.number().optional(),
   avgWordsPerSentence: z.number().optional(),
+  featureVector: PromptFeatureVectorSchema.optional(),
+  researchSignal: z.number().optional(),
+  topResearchDriver: z.string().optional(),
   obfuscationCategory: z.string().optional(),
   obfuscationTechniqueId: z.string().optional(),
   obfuscationTechniqueName: z.string().optional(),
@@ -174,8 +283,15 @@ export function summarizePlaygroundMetrics(entries: PlaygroundMetricEntry[], day
   if (scopedEntries.length === 0) {
     return {
       sampleCount: 0,
+      featureSampleCount: 0,
       averageSyntacticScore: 0,
       averageEntropy: 0,
+      averageResearchSignal: 0,
+      highResearchSignalCount: 0,
+      lowLanguageLikelihoodCount: 0,
+      obfuscationHeavyCount: 0,
+      instructionDenseCount: 0,
+      topResearchDriver: 'None',
       suspiciousRate: 0,
       adversarialRate: 0,
     };
@@ -185,11 +301,33 @@ export function summarizePlaygroundMetrics(entries: PlaygroundMetricEntry[], day
   const adversarialCount = scopedEntries.filter((entry) => entry.detectionLevel >= 3).length;
   const syntacticTotal = scopedEntries.reduce((sum, entry) => sum + entry.syntacticScore, 0);
   const entropyTotal = scopedEntries.reduce((sum, entry) => sum + entry.entropy, 0);
+  const entriesWithResearchSignal = scopedEntries.filter((entry) => typeof entry.researchSignal === 'number');
+  const researchSignalTotal = entriesWithResearchSignal.reduce((sum, entry) => sum + (entry.researchSignal ?? 0), 0);
+  const highResearchSignalCount = entriesWithResearchSignal.filter((entry) => (entry.researchSignal ?? 0) >= 70).length;
+  const lowLanguageLikelihoodCount = entriesWithResearchSignal.filter((entry) => entry.featureVector?.languageLikelihood.lowNaturalLanguageLikelihood).length;
+  const obfuscationHeavyCount = entriesWithResearchSignal.filter((entry) => (entry.featureVector?.syntactic.raw.obfuscationBonus ?? 0) > 0).length;
+  const instructionDenseCount = entriesWithResearchSignal.filter((entry) => (entry.featureVector?.syntactic.normalized.instructionPressure ?? 0) >= 0.7).length;
+  const driverCounts = entriesWithResearchSignal.reduce<Record<string, number>>((counts, entry) => {
+    const driver = entry.topResearchDriver || entry.featureVector?.topDriver;
+    if (!driver) return counts;
+    counts[driver] = (counts[driver] ?? 0) + 1;
+    return counts;
+  }, {});
+  const topResearchDriver = Object.entries(driverCounts).sort((left, right) => right[1] - left[1])[0]?.[0] ?? 'None';
 
   return {
     sampleCount: scopedEntries.length,
+    featureSampleCount: entriesWithResearchSignal.length,
     averageSyntacticScore: parseFloat((syntacticTotal / scopedEntries.length).toFixed(1)),
     averageEntropy: parseFloat((entropyTotal / scopedEntries.length).toFixed(2)),
+    averageResearchSignal: entriesWithResearchSignal.length > 0
+      ? parseFloat((researchSignalTotal / entriesWithResearchSignal.length).toFixed(1))
+      : 0,
+    highResearchSignalCount,
+    lowLanguageLikelihoodCount,
+    obfuscationHeavyCount,
+    instructionDenseCount,
+    topResearchDriver,
     suspiciousRate: parseFloat(((suspiciousCount / scopedEntries.length) * 100).toFixed(1)),
     adversarialRate: parseFloat(((adversarialCount / scopedEntries.length) * 100).toFixed(1)),
   };

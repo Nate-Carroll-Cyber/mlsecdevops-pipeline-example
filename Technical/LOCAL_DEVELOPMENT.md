@@ -44,7 +44,7 @@ Clean prompts are routed to the backend gateway. The gateway runs local precheck
 
 ### Safeguard Effective Prompt and Drift Hash
 
-The frontend builds one canonical safeguard instruction from the internal firewall baseline, guardrails policy, forbidden phrases, relevant Knowledge Base excerpts, backend-owned JSON verdict contract, and neutral evidence contract. System Configuration displays this **Safeguard Effective Prompt Preview** and hashes that exact generated artifact for both the recommended baseline and current live config. The separate Firewall Prompt and Forbidden Phrases read/edit panels are intentionally hidden so analysts review the runtime artifact instead of partial source components.
+The frontend builds one canonical safeguard instruction from the internal firewall baseline, guardrails policy, forbidden phrases, relevant Knowledge Base excerpts, the single backend-owned runtime JSON verdict contract, and neutral evidence contract. System Configuration displays this **Safeguard Effective Prompt Preview** and hashes that exact generated artifact for both the recommended baseline and current live config. Obsolete decision-shaped contract text is stripped from active guardrails policy before runtime prompt assembly, so the safeguard sees only the `{ verdict, analystReasoning }` schema. The separate Firewall Prompt and Forbidden Phrases read/edit panels are intentionally hidden so analysts review the runtime artifact instead of partial source components.
 
 Current recommended effective safeguard prompt hash after promoting the saved System Configuration baseline that blocks `Sexual content, NSFW, nudity` and includes `Nudity` / `NSFW` as baseline blocked keywords:
 
@@ -104,7 +104,7 @@ Purpose of the UI fields under Analyst Chat **System Status** settings:
 - **Safeguard Model ID**: Browser-local model override for the firewall judge.
 - **Safeguard API Key**: Browser-memory-only key override sent to the local backend with Analyst Chat intercept requests. It is not written to localStorage.
 
-The safeguard judge must return a structured JSON verdict. The backend also normalizes legacy `ALLOW_AND_FORWARD`, `QUEUE_FOR_REVIEW`, `BLOCK`, and `FAIL_SECURE` decisions into `CLEAN`, `SUSPICIOUS`, or `ADVERSARIAL` so older firewall contracts remain compatible. If the safeguard judge is unavailable or rejects the request, `/v1/intercept` fails closed and does not call the downstream responder.
+The safeguard judge must return a structured JSON verdict with exactly `{"verdict":"CLEAN|SUSPICIOUS|ADVERSARIAL","analystReasoning":"brief reason"}`. Legacy decision-shaped payloads such as `ALLOW_AND_FORWARD`, malformed JSON, or non-JSON output are no longer normalized into an allow path; they fail secure to `SUSPICIOUS` / `QUEUED`. If the safeguard judge is unavailable or rejects the request, `/v1/intercept` fails closed and does not call the downstream responder.
 
 ### Optional: Live Downstream LLM Testing
 
@@ -219,9 +219,11 @@ If your ingest run includes `expectedVerdict` labels, the escape-rate math will 
 
 Backend safeguard attribution note: records that reach `/v1/intercept` now carry `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, and `backendReachedSafeguard`. The Metrics funnel uses those fields to count backend safeguard/model interventions, so a Bulk Ingest prompt blocked by the safeguard judge should increment **Model Intervention Rate** rather than appearing as `0 caught by Safeguard LLM / 0 prompts that reached it`.
 
+Safeguard observability note: every safeguard call emits structured JSON log events for `safeguard.schema` and `safeguard.divergence` via `metric_increment`, plus a detailed `safeguard_decision` event with prompt hash, retry marker, response shape, judge verdict, gateway action, divergence boolean, optional raw reasoning trace, and latency. These are intended for log-based metric extraction in CloudWatch or another collector.
+
 Detection signal note: the Metrics **Detection Signals** card is a prompt-count rollup by detection family. Local-review and Firestore-backed views share the same aggregation helpers. **Forbidden Phrase Hits** includes both `FORBIDDEN_TOPIC` and future `FORBIDDEN_PHRASE` flags, and **Obfuscation Hits** counts any stored obfuscation technique shown in prompt details rather than only `OBFUSCATED_INSTRUCTION`.
 
-Sanitizer note: the current runtime now treats any recognized obfuscation signal as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. If you are testing encoded, transformed, or cipher-like prompts, expect the local firewall to block them at the highest severity even before a decoded policy phrase is confirmed. Entropy also follows the shared live policy: `<= 3.6` stays allowed on entropy grounds, `> 3.6` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
+Sanitizer note: the current runtime now treats any recognized obfuscation signal as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. It also flags forced-prefix injection, anti-sanitization/no-disclaimer clauses, persona assignment plus unrestricted-capability language, and all-caps hyphenated persona handles (`ALLCAPS_PERSONA` is telemetry-only). If you are testing encoded, transformed, or cipher-like prompts, expect the local firewall to block them at the highest severity even before a decoded policy phrase is confirmed. Entropy also follows the shared live policy: `<= 3.6` stays allowed on entropy grounds, `> 3.6` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
 
 Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`.
 

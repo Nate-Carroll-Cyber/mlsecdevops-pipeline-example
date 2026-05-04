@@ -20,12 +20,48 @@ function hasEscapeSequenceBlob(input: string): boolean {
   return ESCAPE_SEQUENCE_REGEX.test(input);
 }
 
+export interface SyntacticComplexityMetrics {
+  constraintCount: number;
+  weightedConstraintScore: number;
+  constraintDensity: number;
+  specialCharRatio: number;
+  avgWordsPerSentence: number;
+  wrapperShellCount: number;
+  verbosityBonus: number;
+  wrapperShellBonus: number;
+  obfuscationBonus: number;
+  keywordScoreContribution: number;
+  densityScoreContribution: number;
+  specialCharScoreContribution: number;
+}
+
+export interface SyntacticComplexityAnalysis {
+  score: number;
+  isProbingAttempt: boolean;
+  metrics: SyntacticComplexityMetrics;
+}
+
+const ZERO_SYNTACTIC_METRICS: SyntacticComplexityMetrics = {
+  constraintCount: 0,
+  weightedConstraintScore: 0,
+  constraintDensity: 0,
+  specialCharRatio: 0,
+  avgWordsPerSentence: 0,
+  wrapperShellCount: 0,
+  verbosityBonus: 0,
+  wrapperShellBonus: 0,
+  obfuscationBonus: 0,
+  keywordScoreContribution: 0,
+  densityScoreContribution: 0,
+  specialCharScoreContribution: 0,
+};
+
 // Function to analyze the syntactic complexity of a prompt to detect adversarial patterns
-export function analyzeSyntacticComplexity(prompt: string, threshold: number = 65) {
+export function analyzeSyntacticComplexity(prompt: string, threshold: number = 65): SyntacticComplexityAnalysis {
   // Check if the prompt is empty or only contains whitespace
   if (!prompt || prompt.trim().length === 0) {
     // Return a zeroed-out result if the prompt is empty
-    return { score: 0, isProbingAttempt: false, metrics: { constraintCount: 0, constraintDensity: 0, specialCharRatio: 0, avgWordsPerSentence: 0 } };
+    return { score: 0, isProbingAttempt: false, metrics: ZERO_SYNTACTIC_METRICS };
   }
 
   const wrapperShellCount =
@@ -106,35 +142,43 @@ export function analyzeSyntacticComplexity(prompt: string, threshold: number = 6
   // --- Scoring Engine ---
   // Initialize the total syntactic complexity score
   let score = 0;
-  
+
   // Base score from raw count of operational keywords (highly indicative of meta-prompting)
   // Add 10 points per constraint, capped at 60 points
-  score += Math.min(weightedConstraintScore * 10, 60); 
-  
+  const keywordScoreContribution = Math.min(weightedConstraintScore * 10, 60);
+  score += keywordScoreContribution;
+
   // Score from density (catches short, dense injections)
   // Add points based on constraint density, capped at 40 points
-  score += Math.min(constraintDensity * 15, 40); 
-  
+  const densityScoreContribution = Math.min(constraintDensity * 15, 40);
+  score += densityScoreContribution;
+
   // Score from special characters (JSON/XML wrapping)
   // Add points based on special character ratio, capped at 30 points
-  score += Math.min(specialCharRatio * 10, 30); 
-  
+  const specialCharScoreContribution = Math.min(specialCharRatio * 10, 30);
+  score += specialCharScoreContribution;
+
+  let verbosityBonus = 0;
   // Verbosity (run-on sentences often used for cognitive overload)
   // Add 5 points if sentences are long (> 20 words)
-  if (avgWordsPerSentence > 20) score += 5;
+  if (avgWordsPerSentence > 20) verbosityBonus += 5;
   // Add another 10 points if sentences are very long (> 40 words)
-  if (avgWordsPerSentence > 40) score += 10; 
+  if (avgWordsPerSentence > 40) verbosityBonus += 10;
   // Add another 10 points if sentences are extremely long (> 60 words)
-  if (avgWordsPerSentence > 60) score += 10; 
+  if (avgWordsPerSentence > 60) verbosityBonus += 10;
+  score += verbosityBonus;
 
   // Benign wrapper shells still indicate prompt structure, just not adversarial syntax.
-  score += Math.min(wrapperShellCount * 8, 12);
+  const wrapperShellBonus = Math.min(wrapperShellCount * 8, 12);
+  score += wrapperShellBonus;
 
   // Encoded blobs and leetspeak are syntactic concealment signals even when the
   // wording itself does not contain explicit jailbreak verbs.
-  if (hasBase64LikeBlob(prompt)) score += 24;
-  if (hasEscapeSequenceBlob(prompt)) score += 20;
-  if (hasLeetspeakObfuscation(prompt)) score += 28;
+  let obfuscationBonus = 0;
+  if (hasBase64LikeBlob(prompt)) obfuscationBonus += 24;
+  if (hasEscapeSequenceBlob(prompt)) obfuscationBonus += 20;
+  if (hasLeetspeakObfuscation(prompt)) obfuscationBonus += 28;
+  score += obfuscationBonus;
 
   // Define the threshold score for classifying a prompt as a probing attempt
   // Return the final analysis results
@@ -147,12 +191,20 @@ export function analyzeSyntacticComplexity(prompt: string, threshold: number = 6
     metrics: {
       // The raw count of operational keywords
       constraintCount,
+      weightedConstraintScore: parseFloat(weightedConstraintScore.toFixed(1)),
       // The constraint density formatted to 1 decimal place
       constraintDensity: parseFloat(constraintDensity.toFixed(1)),
       // The special character ratio formatted to 1 decimal place
       specialCharRatio: parseFloat(specialCharRatio.toFixed(1)),
       // The average words per sentence formatted to 1 decimal place
-      avgWordsPerSentence: parseFloat(avgWordsPerSentence.toFixed(1))
+      avgWordsPerSentence: parseFloat(avgWordsPerSentence.toFixed(1)),
+      wrapperShellCount,
+      verbosityBonus,
+      wrapperShellBonus,
+      obfuscationBonus,
+      keywordScoreContribution: parseFloat(keywordScoreContribution.toFixed(1)),
+      densityScoreContribution: parseFloat(densityScoreContribution.toFixed(1)),
+      specialCharScoreContribution: parseFloat(specialCharScoreContribution.toFixed(1)),
     }
   };
 }

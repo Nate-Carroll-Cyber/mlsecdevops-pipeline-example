@@ -14,7 +14,7 @@ Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure La
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
 2.  **The Sword (Backend-Mediated Inference):** The backend gateway first calls an OpenAI-compatible safeguard judge, then forwards only `CLEAN` payloads to the downstream responder when responder routing is enabled. Safeguard runtime configuration is separate from responder runtime configuration; the Analyst Chat surface can select `LM_STUDIO` or `OPENAI` safeguard presets, and both safeguard and responder paths can use backend-managed credentials plus optional browser-local Base URL, Model ID, and memory-only API key overrides.
-    *   **Current prompt-contract note:** The safeguard judge receives one generated Safeguard Effective Prompt for inspection and forwarding decisions. That artifact combines the internal firewall baseline, guardrails policy, forbidden phrases, Knowledge Base excerpts, backend-owned JSON verdict contract, and backend-owned neutral evidence contract. System Configuration previews and hashes the exact effective prompt that is sent at runtime. The safeguard judge receives a candidate prompt after deterministic normalization/redaction plus neutral preprocessing evidence; it does not receive the local sanitizer's final verdict or reasoning. The Downstream Responder Prompt from System Configuration is sent as the responder instruction only after clean traffic clears the safeguard judge and responder routing remains enabled. When responder routing is disabled, clean safeguard verdicts return local responder passthrough instead.
+    *   **Current prompt-contract note:** The safeguard judge receives one generated Safeguard Effective Prompt for inspection and forwarding decisions. That artifact combines the internal firewall baseline, guardrails policy, forbidden phrases, Knowledge Base excerpts, the single backend-owned runtime JSON verdict contract, and backend-owned neutral evidence contract. System Configuration previews and hashes the exact effective prompt that is sent at runtime. The safeguard judge receives a candidate prompt after deterministic normalization/redaction plus neutral preprocessing evidence; it does not receive the local sanitizer's final verdict or reasoning. The Downstream Responder Prompt from System Configuration is sent as the responder instruction only after clean traffic clears the safeguard judge and responder routing remains enabled. When responder routing is disabled, clean safeguard verdicts return local responder passthrough instead. Legacy decision-shaped, malformed, or non-JSON safeguard outputs are treated as `SUSPICIOUS` and queued for review.
     *   **Current forbidden-category note:** Configured forbidden phrases are enforced locally and included in the Safeguard Effective Prompt, which remains the reviewable source for baseline category and gibberish guidance.
 
 ### 1.2 System Resilience & Fallback Policies
@@ -53,6 +53,8 @@ The analyzer uses a weighted heuristic to detect "Instruction Stacking":
 *   **Constraint Density (High Weight):** Frequency of imperative keywords.
 *   **Special Char Ratio (Medium Weight):** Inverse-match regex `/[a-zA-Z0-9\s]/g` to detect code-like syntax.
 *   **Thresholds:** Scores > 50 contribute to `Suspicious` classification; scores > 90 independently trigger `Adversarial` classification.
+*   **Pre-Inference Feature Vector:** The Playground now exposes the raw syntactic components behind the score, including weighted constraint pressure, density contribution, wrapper count, verbosity bonus, and obfuscation bonus. These fields feed the analysis-only Feature Pressure score and do not change runtime verdict thresholds. The Metrics dashboard averages all six normalized component pressures across submitted prompts: instruction, constraint density, syntax/wrapper, obfuscation, entropy, and n-gram.
+*   **N-Gram Obfuscation Telemetry:** The Playground feature vector includes English trigram hit rate, best Caesar-shift trigram recovery, and the low n-gram likelihood boolean used to explain alphabetic gibberish detections. This is separate from the runtime Foreign / Mixed Language detection signal.
 
 ### 2.3 Obfuscation Severity Policy
 Counter-Spy.ai now treats prompt concealment itself as a hostile act in the governed path.
@@ -60,6 +62,13 @@ Counter-Spy.ai now treats prompt concealment itself as a hostile act in the gove
 *   **Covered families:** URL encoding, HTML entities, unicode escapes, compatibility glyphs, symbol substitution, leetspeak, ROT13, reverse text, NATO phonetic, Morse code, braille, regional indicators, recursive decode chains, coordinate ciphers, structural wrappers, and low-English-likeness alphabetic gibberish.
 *   **Routing rule:** Once the frontend sanitizer classifies a prompt as obfuscation-family `Adversarial` or otherwise locally `Suspicious`/`Adversarial`, that prompt should terminate before backend inference. Backend error messaging is reserved for prompts that were actually allowed to attempt `/v1/intercept`.
 *   **Known coverage gap:** The present `VERTICAL_TEXT` family is still narrow and can miss some position-indexed or structured vertical layouts even though the overall policy treats such concealment as adversarial when recognized.
+
+### 2.4 Structural Jailbreak Signals
+The deterministic sanitizer now flags structural jailbreak patterns before the safeguard layer:
+*   `FORCED_PREFIX_INJECTION`: opening instructions that force the responder to start, begin, answer only with, or use a required first word/line/character.
+*   `ANTI_SANITIZATION_CLAUSE`: explicit requests to avoid sanitization, moderation, filtering, warnings, disclaimers, or safety policies.
+*   `PERSONA_INJECTION`: persona assignment combined with unrestricted capability language such as no rules, unrestricted, uncensored, developer mode, or do-anything claims.
+*   `ALLCAPS_PERSONA`: signal-only telemetry for all-caps hyphenated persona handles; this flag alone does not gate traffic.
 
 ---
 
@@ -115,17 +124,27 @@ External services must authenticate with the Counter-Spy gateway using **Bearer 
 
 The backend sends a candidate prompt after deterministic normalization/redaction and states that the candidate is not guaranteed safe. It then sends neutral preprocessing evidence: detection flags, redaction labels, decode telemetry, suspicious chunk count, max entropy, global entropy, and syntactic score. Local sanitizer verdict and reasoning remain response/audit telemetry only and are not sent to the safeguard judge.
 
+**Safeguard Judge Output Contract:**
+
+The safeguard judge must return only JSON with this runtime shape:
+
+```json
+{"verdict":"CLEAN|SUSPICIOUS|ADVERSARIAL","analystReasoning":"brief reason"}
+```
+
+Decision-shaped payloads such as `ALLOW_AND_FORWARD`, `BLOCK`, `QUEUE_FOR_REVIEW`, or `FAIL_SECURE` are no longer accepted as runtime output. They are recorded as schema shape `decision` and fail secure to `SUSPICIOUS` / `QUEUED`. Non-JSON, malformed JSON, and schema-mismatched outputs are recorded as `malformed` and also queue for review.
+
 **Response Definitions:**
 | Code | Status | Description |
 | :--- | :--- | :--- |
 | `200` | `CLEAN` | Payload passed local prechecks and the safeguard judge. Responses may include downstream responder output or local responder passthrough with responder status `DISABLED_LOCAL_ONLY`. Direct/API callers that explicitly set `providerLlmRoutingEnabled: false` can still request deterministic local inspection. |
-| `202` | `QUEUED` | Payload intercepted for HITL/HOTL review. |
+| `202` | `QUEUED` | Suspicious payload queued for HITL/HOTL review, including schema-non-conforming safeguard outputs. |
 | `401` | `UNAUTHORIZED` | Missing or invalid Bearer Token. |
-| `403` | `INTERCEPTED` | Local precheck or safeguard judge blocked payload (Adversarial/Suspicious). This is a governed result with a structured intercept payload, not a backend transport failure. |
+| `403` | `INTERCEPTED` | Adversarial local precheck or safeguard judge block. This is a governed result with a structured intercept payload, not a backend transport failure. |
 | `502` | `SAFEGUARD_OR_RESPONDER_ERROR` | Fail-closed block because the safeguard judge or downstream responder could not complete. |
 | `503` | `SHIELD_ERROR` | Fail-Secure block due to Shield Engine timeout/failure. |
 
-Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records. Local responder passthrough is recorded with model `local-responder-passthrough` and status `DISABLED_LOCAL_ONLY`.
+Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, retry marker, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records or structured gateway logs. Local responder passthrough is recorded with model `local-responder-passthrough` and status `DISABLED_LOCAL_ONLY`.
 
 ### 5.3 Backend Safeguard Attribution Fields
 The frontend carries structured backend outcome data from `/v1/intercept` into Audit Logs, local review state, and browser-local Playground/Bulk metrics:
@@ -142,6 +161,14 @@ The frontend carries structured backend outcome data from `/v1/intercept` into A
 | `responderLatencyMs` | Downstream responder latency in milliseconds; local passthrough records `0`. |
 
 These fields prevent model/safeguard interventions from being misclassified as local sanitizer results and keep safeguard latency distinct from local responder passthrough latency. They are especially important for Bulk Ingest prompts that appear in Analyst Chat but are blocked by the backend safeguard judge after local sanitizer redaction.
+
+### 5.4 Safeguard Schema and Divergence Observability
+Every safeguard decision emits structured JSON logs for metric extraction:
+*   `metric_increment` with `metric: "safeguard.schema"` and tag `shape` equal to `verdict`, `decision`, or `malformed`.
+*   `metric_increment` with `metric: "safeguard.divergence"` and tags `judgeVerdict`, `gatewayAction`, and `divergent`.
+*   `safeguard_decision` with prompt hash, retry marker, response shape, judge verdict, gateway action, divergence boolean, optional raw reasoning trace when exposed by the provider, and safeguard latency.
+
+The expected mapping is `CLEAN -> CLEAN`, `SUSPICIOUS -> QUEUED`, and `ADVERSARIAL -> INTERCEPTED`. Any non-zero divergence on suspicious or adversarial traffic indicates orchestration-vs-judge drift and should be treated as a correctness issue.
 
 ---
 

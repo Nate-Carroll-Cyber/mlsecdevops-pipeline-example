@@ -149,6 +149,7 @@ function getSeverityBucket(log: any, entropyThreshold?: number): SeverityBucket 
     detectionFlags.includes('POLICY_VIOLATION') ||
     detectionFlags.includes('BLOCKED_KEYWORD') ||
     detectionFlags.includes('FORBIDDEN_TOPIC') ||
+    detectionFlags.includes('FORBIDDEN_PHRASE') ||
     detectionFlags.includes('REGEX_MATCH') ||
     hasBackendSafeguardIntervention(log) ||
     upperResponse.startsWith('POLICY VIOLATION DETECTED')
@@ -184,6 +185,7 @@ function getAutomatedSeverityBucket(log: any, entropyThreshold?: number): Severi
     detectionFlags.includes('POLICY_VIOLATION') ||
     detectionFlags.includes('BLOCKED_KEYWORD') ||
     detectionFlags.includes('FORBIDDEN_TOPIC') ||
+    detectionFlags.includes('FORBIDDEN_PHRASE') ||
     detectionFlags.includes('REGEX_MATCH') ||
     hasBackendSafeguardIntervention(log) ||
     upperResponse.startsWith('POLICY VIOLATION DETECTED')
@@ -266,7 +268,54 @@ function hasPolicyViolationSignal(flags: string[] = []): boolean {
   return flags.includes('POLICY_VIOLATION') ||
     flags.includes('BLOCKED_KEYWORD') ||
     flags.includes('FORBIDDEN_TOPIC') ||
+    flags.includes('FORBIDDEN_PHRASE') ||
     flags.includes('REGEX_MATCH');
+}
+
+function getDetectionFlags(log: any): string[] {
+  return Array.isArray(log.detectionFlags) ? log.detectionFlags : [];
+}
+
+function hasKeywordSignal(log: any): boolean {
+  return getDetectionFlags(log).some((flag: string) => flag === 'BLOCKED_KEYWORD' || flag.startsWith('BLOCKED_KEYWORD:'));
+}
+
+function hasForbiddenPhraseSignal(log: any): boolean {
+  const detectionFlags = getDetectionFlags(log);
+  return detectionFlags.includes('FORBIDDEN_TOPIC') || detectionFlags.includes('FORBIDDEN_PHRASE');
+}
+
+function hasAnyObfuscationSignal(log: any): boolean {
+  return getObfuscationTechniques(log).length > 0;
+}
+
+function calculateDetectionSignalMetrics(logs: any[]) {
+  return {
+    piiHits: logs.filter((log) => hasAnySignal(log, PII_DETECTION_FLAGS)).length,
+    secretHits: logs.filter((log) => hasAnySignal(log, SECRET_DETECTION_FLAGS)).length,
+    regexHits: logs.filter((log) => getDetectionFlags(log).includes('REGEX_MATCH')).length,
+    keywordHits: logs.filter(hasKeywordSignal).length,
+    topicHits: logs.filter(hasForbiddenPhraseSignal).length,
+    obfuscatedHits: logs.filter(hasAnyObfuscationSignal).length,
+    foreignLanguageHits: logs.filter((log) => getDetectionFlags(log).includes('FOREIGN_LANGUAGE')).length,
+    spellingObfuscationHits: logs.filter((log) => getDetectionFlags(log).includes('SPELLING_OBFUSCATION')).length,
+  };
+}
+
+function calculateObfuscationSignalMetrics(logs: any[]) {
+  return {
+    urlEncodingHits: logs.filter((log) => getObfuscationTechniques(log).includes('URL_ENCODING')).length,
+    htmlEntityHits: logs.filter((log) => getObfuscationTechniques(log).includes('HTML_ENTITIES')).length,
+    leetspeakHits: logs.filter((log) => getObfuscationTechniques(log).includes('LEETSPEAK')).length,
+    rot13Hits: logs.filter((log) => getObfuscationTechniques(log).includes('ROT13')).length,
+    reverseTextHits: logs.filter((log) => getObfuscationTechniques(log).includes('REVERSE_TEXT')).length,
+    natoHits: logs.filter((log) => getObfuscationTechniques(log).includes('NATO_PHONETIC')).length,
+    morseHits: logs.filter((log) => getObfuscationTechniques(log).includes('MORSE_CODE')).length,
+    recursiveDecodeHits: logs.filter((log) => getObfuscationTechniques(log).includes('RECURSIVE_DECODE')).length,
+    structuralHits: logs.filter((log) =>
+      getDetectionFlags(log).some((flag: string) => STRUCTURAL_OBFUSCATION_FLAGS.includes(flag))
+    ).length,
+  };
 }
 
 function wasOriginallyReleased(log: any, entropyThreshold?: number): boolean {
@@ -554,23 +603,8 @@ export function ThreatDashboard({
         const maxLatencyMs = latencyValues.length > 0 ? latencyValues[latencyValues.length - 1] : 0;
         const redosTrips = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('ReDoS_ATTEMPT_DETECTED')).length;
         const highLatencyCount = filteredLogs.filter((log) => Number(log.latencyMs || 0) > 100).length;
-        const piiHits = filteredLogs.filter((log) => hasAnySignal(log, PII_DETECTION_FLAGS)).length;
-        const secretHits = filteredLogs.filter((log) => hasAnySignal(log, SECRET_DETECTION_FLAGS)).length;
-        const regexHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('REGEX_MATCH')).length;
-        const keywordHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.some((flag: string) => flag === 'BLOCKED_KEYWORD' || flag.startsWith('BLOCKED_KEYWORD:'))).length;
-        const topicHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('FORBIDDEN_TOPIC')).length;
-        const obfuscatedHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('OBFUSCATED_INSTRUCTION')).length;
-        const urlEncodingHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('URL_ENCODING')).length;
-        const htmlEntityHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('HTML_ENTITIES')).length;
-        const leetspeakHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('LEETSPEAK')).length;
-        const rot13Hits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('ROT13')).length;
-        const reverseTextHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('REVERSE_TEXT')).length;
-        const natoHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('NATO_PHONETIC')).length;
-        const morseHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('MORSE_CODE')).length;
-        const recursiveDecodeHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('RECURSIVE_DECODE')).length;
-        const structuralHits = filteredLogs.filter((log) =>
-          Array.isArray(log.detectionFlags) && log.detectionFlags.some((flag: string) => STRUCTURAL_OBFUSCATION_FLAGS.includes(flag))
-        ).length;
+        const detectionSignalMetrics = calculateDetectionSignalMetrics(filteredLogs);
+        const obfuscationSignalMetrics = calculateObfuscationSignalMetrics(filteredLogs);
         const atlasColumns = ATLAS_TACTICS.map((tactic) => {
           const techniques = ATLAS_TECHNIQUE_DEFINITIONS
             .filter((definition) => definition.tactic === tactic)
@@ -638,27 +672,8 @@ export function ThreatDashboard({
           },
           alertSeverity: alertCounts,
           layerDefense: layerMetrics,
-          detectionSignals: {
-            piiHits,
-            secretHits,
-            regexHits,
-            keywordHits,
-            topicHits,
-            obfuscatedHits,
-            foreignLanguageHits: filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('FOREIGN_LANGUAGE')).length,
-            spellingObfuscationHits: filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('SPELLING_OBFUSCATION')).length,
-          },
-          obfuscationSignals: {
-            urlEncodingHits,
-            htmlEntityHits,
-            leetspeakHits,
-            rot13Hits,
-            reverseTextHits,
-            natoHits,
-            morseHits,
-            recursiveDecodeHits,
-            structuralHits,
-          },
+          detectionSignals: detectionSignalMetrics,
+          obfuscationSignals: obfuscationSignalMetrics,
           atlasHeatmap: {
             maxCount: maxAtlasCount,
             columns: atlasColumns,
@@ -808,23 +823,8 @@ export function ThreatDashboard({
         const maxLatencyMs = latencyValues.length > 0 ? latencyValues[latencyValues.length - 1] : 0;
         const redosTrips = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('ReDoS_ATTEMPT_DETECTED')).length;
         const highLatencyCount = filteredLogs.filter((log) => Number(log.latencyMs || 0) > 100).length;
-        const piiHits = filteredLogs.filter((log) => hasAnySignal(log, PII_DETECTION_FLAGS)).length;
-        const secretHits = filteredLogs.filter((log) => hasAnySignal(log, SECRET_DETECTION_FLAGS)).length;
-        const regexHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('REGEX_MATCH')).length;
-        const keywordHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.some((flag: string) => flag === 'BLOCKED_KEYWORD' || flag.startsWith('BLOCKED_KEYWORD:'))).length;
-        const topicHits = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('FORBIDDEN_TOPIC')).length;
-        const obfuscatedHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('OBFUSCATED_INSTRUCTION')).length;
-        const urlEncodingHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('URL_ENCODING')).length;
-        const htmlEntityHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('HTML_ENTITIES')).length;
-        const leetspeakHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('LEETSPEAK')).length;
-        const rot13Hits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('ROT13')).length;
-        const reverseTextHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('REVERSE_TEXT')).length;
-        const natoHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('NATO_PHONETIC')).length;
-        const morseHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('MORSE_CODE')).length;
-        const recursiveDecodeHits = filteredLogs.filter((log) => getObfuscationTechniques(log).includes('RECURSIVE_DECODE')).length;
-        const structuralHits = filteredLogs.filter((log) =>
-          Array.isArray(log.detectionFlags) && log.detectionFlags.some((flag: string) => STRUCTURAL_OBFUSCATION_FLAGS.includes(flag))
-        ).length;
+        const detectionSignalMetrics = calculateDetectionSignalMetrics(filteredLogs);
+        const obfuscationSignalMetrics = calculateObfuscationSignalMetrics(filteredLogs);
         const atlasColumns = ATLAS_TACTICS.map((tactic) => {
           const techniques = ATLAS_TECHNIQUE_DEFINITIONS
             .filter((definition) => definition.tactic === tactic)
@@ -892,27 +892,8 @@ export function ThreatDashboard({
           },
           alertSeverity: alertCounts,
           layerDefense: layerMetrics,
-          detectionSignals: {
-            piiHits,
-            secretHits,
-            regexHits,
-            keywordHits,
-            topicHits,
-            obfuscatedHits,
-            foreignLanguageHits: filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('FOREIGN_LANGUAGE')).length,
-            spellingObfuscationHits: filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('SPELLING_OBFUSCATION')).length,
-          },
-          obfuscationSignals: {
-            urlEncodingHits,
-            htmlEntityHits,
-            leetspeakHits,
-            rot13Hits,
-            reverseTextHits,
-            natoHits,
-            morseHits,
-            recursiveDecodeHits,
-            structuralHits,
-          },
+          detectionSignals: detectionSignalMetrics,
+          obfuscationSignals: obfuscationSignalMetrics,
           atlasHeatmap: {
             maxCount: maxAtlasCount,
             columns: atlasColumns,
@@ -1464,7 +1445,7 @@ export function ThreatDashboard({
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
                 <span>Detection Signals</span>
-                <HelpTooltip text="Counts of the main detection types seen in the current dataset, such as PII, regex hits, forbidden phrase hits, and obfuscation." />
+                <HelpTooltip text="Prompt counts for the main detection flag families in the current dataset, such as PII, regex hits, forbidden phrase hits, and any recorded obfuscation technique." />
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
@@ -1489,7 +1470,7 @@ export function ThreatDashboard({
                 <span className="font-semibold text-violet-400">{operationalMetrics.detectionSignals.topicHits}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Obfuscated Hits</span>
+                <span className="text-muted-foreground">Obfuscation Hits</span>
                 <span className="font-semibold text-fuchsia-400">{operationalMetrics.detectionSignals.obfuscatedHits}</span>
               </div>
               <div className="flex items-center justify-between">

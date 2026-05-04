@@ -5871,16 +5871,17 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                               <div className="font-mono text-xs break-all">{currentConfigHash || 'Calculating...'}</div>
                             </div>
                           </div>
-                          {/* Firewall Prompt Section */}
-                          <div>
-                            <label className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                              <span>Safeguard Effective Prompt Preview</span>
-                              <HelpTooltip text="Canonical generated safeguard prompt built from editable config, Knowledge Base context, and backend-owned JSON/evidence contracts." />
-                            </label>
-                            <pre className="max-h-96 overflow-y-auto rounded-xl border border-border bg-muted/30 p-5 text-xs whitespace-pre-wrap break-all font-mono text-foreground">
-                              {effectiveSafeguardPromptPreview}
-                            </pre>
-                          </div>
+                          {!isEditingConfig && (
+                            <div>
+                              <label className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                                <span>Safeguard Effective Prompt Preview</span>
+                                <HelpTooltip text="Read-only canonical safeguard prompt generated from the saved config, Knowledge Base context, and backend-owned JSON/evidence contracts." />
+                              </label>
+                              <pre className="max-h-96 overflow-y-auto rounded-xl border border-border bg-muted/30 p-5 text-xs whitespace-pre-wrap break-all font-mono text-foreground">
+                                {effectiveSafeguardPromptPreview}
+                              </pre>
+                            </div>
+                          )}
                           {/* Firewall Prompt Section */}
                           <div>
                             <label className="mb-3 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">

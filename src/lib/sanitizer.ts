@@ -27,7 +27,7 @@ import {
   type DecodeTelemetry,
   type ObfuscationSignal,
 } from './sanitizerObfuscation';
-import { normalizeForPolicy } from './sanitizerNormalization';
+import { normalizeForPolicy, reflowVerticalText } from './sanitizerNormalization';
 import { hasLowNaturalLanguageLikelihood } from './languageLikelihood';
 
 // Define an array of sensitive patterns (Regex) to detect and redact PII and secrets
@@ -73,7 +73,7 @@ const FORCED_PREFIX_PATTERNS = [
 const ANTI_SANITIZATION_PATTERNS = [
   /\b(?:avoid|skip|bypass|disable|without|no)\s+(?:sanitiz|filter|moderat|censor)/i,
   /\bwithhold(?:ing)?\s+(?:knowledge|information|content|details)/i,
-  /\bdo\s+not\s+(?:warn|caveat|moralize|lecture|disclaim|sanitize)/i,
+  /\bdo\s+not\s+(?:warn|caveat|moralize|lecture|disclaim|sanitize|refuse)/i,
   /\b(?:no|without|skip)\s+(?:warnings?|disclaimers?|caveats?|safety\s+(?:notices?|disclaimers?))/i,
   /\bunfiltered\b/i,
   /\b(?:ignore|override|bypass)\s+(?:all\s+)?(?:safety|ethical|moral|content)\s+(?:rules?|guidelines?|policies|filters?|restrictions?)/i,
@@ -270,6 +270,10 @@ function hasPairedResponseInjection(prompt: string): boolean {
   return PAIRED_RESPONSE_REGEX.test(prompt);
 }
 
+function uniqueTextCandidates(candidates: string[]): string[] {
+  return [...new Set(candidates.filter((candidate) => candidate.trim().length > 0))];
+}
+
 // Entropy should measure concealment pressure, not reward predictable wrapper
 // shells like `[INSTRUCTION: ...]` or `<SYSTEM_MESSAGE_STYLE>`. We normalize
 // those structured headers out before scoring so templated clean prompts land
@@ -462,6 +466,10 @@ export function sanitizeInput(
     SUSPICIOUS_ENTROPY_THRESHOLD,
   );
   const suspiciousSyntacticThreshold = tuning.syntacticThreshold ?? 65;
+  const verticalReflow = reflowVerticalText(input);
+  const detectorCandidates = verticalReflow.hadVerticalRun
+    ? uniqueTextCandidates([input, verticalReflow.normalized, verticalReflow.reflowed])
+    : [input];
 
   // Always detect PII for metadata/governance, but conditionally redact the string
   // Iterate over each sensitive pattern defined earlier
@@ -523,7 +531,8 @@ export function sanitizeInput(
   // - attempt lightweight spelling recovery
   // - analyze obfuscation and decoded content
   // - detect foreign-language or mixed-language signals
-  const normalized = normalizeForPolicy(input);
+  const normalizedCandidates = detectorCandidates.map((candidate) => normalizeForPolicy(candidate));
+  const normalized = normalizedCandidates[0] ?? normalizeForPolicy(input);
   const spellingNormalization = normalizeWithHeuristicSync(input);
   const normalizedSpellCorrected = normalizeForPolicy(spellingNormalization.text);
   const obfuscationAnalysis = analyzeObfuscationInput(input, guardrails.obfuscationDetection);
@@ -572,8 +581,8 @@ export function sanitizeInput(
 
 	    const keywordMatchedOriginally = keywordsToCheck.some((keyword) => {
 	      const loweredKeyword = keyword.toLowerCase();
-	      return normalized.includes(loweredKeyword) ||
-	        input.toLowerCase().includes(loweredKeyword) ||
+	      return normalizedCandidates.some((candidate) => candidate.includes(loweredKeyword)) ||
+	        detectorCandidates.some((candidate) => candidate.toLowerCase().includes(loweredKeyword)) ||
 	        normalizedDecodedSegments.some((segment) => segment.includes(loweredKeyword));
 	    });
 
@@ -638,7 +647,7 @@ export function sanitizeInput(
   if (guardrails.blockedTopics) {
     const topicMatchedOriginally = forbiddenTopicsList.some(topic => 
       topic.trim() !== '' && (
-        normalized.includes(topic.toLowerCase()) ||
+        normalizedCandidates.some((candidate) => candidate.includes(topic.toLowerCase())) ||
         normalizedDecodedSegments.some((segment) => segment.includes(topic.toLowerCase())) ||
         normalizedTransformedSegments.some((segment) => segment.includes(topic.toLowerCase()))
       )
@@ -679,30 +688,30 @@ export function sanitizeInput(
     redactions.push('LOW_DICTIONARY_HIT_RATE');
   }
 
-  if (EXTERNAL_CALL_REGEX.test(input)) {
+  if (detectorCandidates.some((candidate) => EXTERNAL_CALL_REGEX.test(candidate))) {
     externalCallDetected = true;
     if (!redactions.includes('EXTERNAL_CALL_ATTEMPT')) redactions.push('EXTERNAL_CALL_ATTEMPT');
   }
-  if (hasForcedPrefix(input)) {
+  if (detectorCandidates.some((candidate) => hasForcedPrefix(candidate))) {
     forcedPrefixDetected = true;
     if (!redactions.includes('FORCED_PREFIX_INJECTION')) redactions.push('FORCED_PREFIX_INJECTION');
   }
-  if (hasAntiSanitizationClause(input)) {
+  if (detectorCandidates.some((candidate) => hasAntiSanitizationClause(candidate))) {
     antiSanitizationDetected = true;
     if (!redactions.includes('ANTI_SANITIZATION_CLAUSE')) redactions.push('ANTI_SANITIZATION_CLAUSE');
   }
-  if (hasPersonaInjection(input)) {
+  if (detectorCandidates.some((candidate) => hasPersonaInjection(candidate))) {
     personaInjectionDetected = true;
     if (!redactions.includes('PERSONA_INJECTION')) redactions.push('PERSONA_INJECTION');
   }
-  if (hasPairedResponseInjection(input)) {
+  if (detectorCandidates.some((candidate) => hasPairedResponseInjection(candidate))) {
     pairedResponseDetected = true;
     if (!redactions.includes('PAIRED_RESPONSE_INJECTION')) redactions.push('PAIRED_RESPONSE_INJECTION');
   }
-  if (ALLCAPS_PERSONA_REGEX.test(input)) {
+  if (detectorCandidates.some((candidate) => ALLCAPS_PERSONA_REGEX.test(candidate))) {
     if (!redactions.includes('ALLCAPS_PERSONA')) redactions.push('ALLCAPS_PERSONA');
   }
-  if (COORDINATE_CIPHER_REGEX.test(input)) {
+  if (detectorCandidates.some((candidate) => COORDINATE_CIPHER_REGEX.test(candidate))) {
     coordinateCipherDetected = true;
     if (!redactions.includes('COORDINATE_CIPHER')) redactions.push('COORDINATE_CIPHER');
   }
@@ -736,7 +745,10 @@ export function sanitizeInput(
         // Create a new RegExp object with the pattern and flags
         const regex = new RegExp(pattern, flags);
         // If the regex matches the original input
-        if (regex.test(input)) {
+        if (detectorCandidates.some((candidate) => {
+          regex.lastIndex = 0;
+          return regex.test(candidate);
+        })) {
           // Set the regex match flag to true
           containsRegexMatch = true;
           // Add 'REGEX_MATCH' to the redactions list if not already present
@@ -767,7 +779,12 @@ export function sanitizeInput(
 
   // Complexity analysis runs after the earlier normalization stages so the final
   // severity can reflect both structural suspicion and explicit policy hits.
-  const syntacticAnalysis = analyzeSyntacticComplexity(input, suspiciousSyntacticThreshold);
+  const syntacticAnalyses = detectorCandidates.map((candidate) =>
+    analyzeSyntacticComplexity(candidate, suspiciousSyntacticThreshold));
+  const syntacticAnalysis = syntacticAnalyses.reduce((maxAnalysis, analysis) =>
+    analysis.score > maxAnalysis.score ? analysis : maxAnalysis,
+    syntacticAnalyses[0] ?? analyzeSyntacticComplexity(input, suspiciousSyntacticThreshold),
+  );
 
   // High-level escalation heuristic used for the rest of the app UI and logging.
   // Entropy alone now participates directly: > 3.6 is suspicious, and above the

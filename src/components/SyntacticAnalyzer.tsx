@@ -18,6 +18,8 @@ import { Badge } from '@/components/ui/badge';
 import {
   loadPlaygroundMetrics,
   PLAYGROUND_METRICS_UPDATED_EVENT,
+  getFeaturePressure,
+  getTopPressureDriver,
   savePlaygroundMetrics,
   summarizePlaygroundMetrics,
   type PlaygroundMetricEntry,
@@ -556,7 +558,9 @@ export function SyntacticAnalyzer({
       specialCharRatio: syntactic.metrics.specialCharRatio,
       avgWordsPerSentence: syntactic.metrics.avgWordsPerSentence,
       featureVector,
+      featurePressure: featureVector.featurePressure,
       researchSignal: featureVector.researchSignal,
+      topPressureDriver: featureVector.topDriver,
       topResearchDriver: featureVector.topDriver,
       obfuscationCategory: variant?.technique.category,
       obfuscationTechniqueId: variant?.technique.id,
@@ -651,7 +655,9 @@ export function SyntacticAnalyzer({
       'constraintDensity',
       'specialCharRatio',
       'avgWordsPerSentence',
+      'featurePressure',
       'researchSignal',
+      'topPressureDriver',
       'topResearchDriver',
       'weightedConstraintScore',
       'wrapperShellCount',
@@ -713,7 +719,9 @@ export function SyntacticAnalyzer({
       entry.constraintDensity,
       entry.specialCharRatio,
       entry.avgWordsPerSentence,
+      getFeaturePressure(entry),
       entry.researchSignal,
+      getTopPressureDriver(entry),
       entry.topResearchDriver,
       entry.featureVector?.syntactic.raw.weightedConstraintScore,
       entry.featureVector?.syntactic.raw.wrapperShellCount,
@@ -1557,7 +1565,7 @@ export function SyntacticAnalyzer({
           </div>
           <div className="min-w-[180px] rounded-md border border-slate-800 bg-slate-950/60 px-3 py-2 text-right">
             <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">Feature Pressure</div>
-            <div className="text-2xl font-black text-slate-100">{displayedFeatureVector ? displayedFeatureVector.researchSignal : '-'}</div>
+            <div className="text-2xl font-black text-slate-100">{displayedFeatureVector ? getFeaturePressure({ featureVector: displayedFeatureVector }) : '-'}</div>
             <div className="text-[11px] text-slate-400">
               {displayedFeatureVector ? `Top driver: ${displayedFeatureVector.topDriver}` : 'Enter a prompt to analyze'}
             </div>
@@ -1760,12 +1768,12 @@ export function SyntacticAnalyzer({
                 <div key={entry.id} className="grid grid-cols-[140px_1fr_130px_170px] gap-3 rounded-lg border border-slate-800 bg-slate-950/60 p-3 text-xs">
                   <div className="text-slate-400">{new Date(entry.timestamp).toLocaleString()}</div>
                   <div className="font-mono text-slate-300 truncate" title={entry.promptHash}>{entry.promptHash}</div>
-                  <div className="text-slate-300">Syn {entry.syntacticScore} | Pressure {entry.researchSignal ?? '-'}</div>
+                  <div className="text-slate-300">Syn {entry.syntacticScore} | Pressure {getFeaturePressure(entry) ?? '-'}</div>
                   <div className="space-y-1">
                     <div className="text-slate-300">{entry.verdictLabel}</div>
-                    {entry.topResearchDriver && (
-                      <div className="text-[10px] text-slate-400 truncate" title={entry.topResearchDriver}>
-                        {entry.topResearchDriver}
+                    {getTopPressureDriver(entry) && (
+                      <div className="text-[10px] text-slate-400 truncate" title={getTopPressureDriver(entry)}>
+                        {getTopPressureDriver(entry)}
                       </div>
                     )}
                     {entry.atlasTechniqueId && (

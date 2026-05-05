@@ -10,7 +10,7 @@
  *    when they do not directly decode into plain text.
  * 5. `analyzeObfuscationInput(...)` is the main entry point used by `sanitizeInput(...)`.
  */
-import { hasCompatibilityGlyphObfuscation, hasLeetspeakObfuscation, normalizeForPolicy, normalizeWithoutLeet } from './sanitizerNormalization';
+import { hasCompatibilityGlyphObfuscation, hasLeetspeakObfuscation, normalizeForPolicy, normalizeWithoutLeet, reflowVerticalText } from './sanitizerNormalization';
 
 export type DecodeTelemetry = 'plain_text' | 'single_hop_decode' | 'recursive_decode';
 
@@ -438,6 +438,12 @@ export function extractTransformedSegments(input: string): { segments: string[];
   const signals: ObfuscationSignal[] = [];
   const baselineNormalized = normalizeWithoutLeet(input);
   const policyNormalized = normalizeForPolicy(input);
+  const verticalReflow = reflowVerticalText(input);
+
+  if (verticalReflow.hadVerticalRun && verticalReflow.reflowed !== verticalReflow.normalized) {
+    segments.push(verticalReflow.reflowed);
+    signals.push('VERTICAL_TEXT');
+  }
 
   if (hasCompatibilityGlyphObfuscation(input)) {
     segments.push(baselineNormalized);
@@ -473,7 +479,7 @@ export function detectStructuralObfuscation(input: string): ObfuscationSignal[] 
   if (END_SEQUENCE_REGEX.test(input)) signals.push('END_SEQUENCE');
   if (CHUNKING_REGEX.test(input)) signals.push('CHUNKING');
   if (VARIABLE_EXPANSION_REGEX.test(input)) signals.push('VARIABLE_EXPANSION');
-  if (VERTICAL_TEXT_REGEX.test(input)) signals.push('VERTICAL_TEXT');
+  if (VERTICAL_TEXT_REGEX.test(input) || reflowVerticalText(input).hadVerticalRun) signals.push('VERTICAL_TEXT');
   if (hasSymbolSubstitutionObfuscation(input)) signals.push('SYMBOL_SUBSTITUTION');
   return signals;
 }

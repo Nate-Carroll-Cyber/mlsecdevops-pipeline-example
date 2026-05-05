@@ -45,10 +45,10 @@ export function buildPromptFeatureVector(params: {
     { label: 'Entropy Pressure', value: entropyPressure, weight: 0.12 },
     { label: 'N-Gram Obfuscation Signal', value: languageSuspicion, weight: 0.12 },
   ];
-  const researchSignal = Math.round(
+  const featurePressure = Math.round(
     drivers.reduce((sum, driver) => sum + driver.value * driver.weight, 0) * 100,
   );
-  const topDriver = researchSignal === 0
+  const topDriver = featurePressure === 0
     ? 'None'
     : drivers
       .map((driver) => ({ ...driver, weighted: driver.value * driver.weight }))
@@ -91,7 +91,8 @@ export function buildPromptFeatureVector(params: {
       ...languageLikelihood,
       normalizedSuspicion: languageSuspicion,
     },
-    researchSignal,
+    featurePressure,
+    researchSignal: featurePressure,
     topDriver,
     detectionFlags: sanitization?.redactions ?? [],
     redactions: sanitization?.redactions ?? [],

@@ -9,7 +9,7 @@ The system is model-neutral. It does not assume a fixed Gemini, OpenAI, or open-
 ## 2. Model Boundaries
 
 - **Local sanitizer:** TypeScript policy engine that runs before external inference and enforces PII/secret redaction, entropy thresholds, regex rules, blocked keywords, forbidden phrases, language recovery, and obfuscation detection.
-- **Safeguard judge:** OpenAI-compatible API endpoint called by the backend `/v1/intercept` gateway. It receives the visible Firewall Prompt, guardrails policy, relevant Knowledge Base context, and a backend-owned structured JSON verdict contract.
+- **Safeguard judge:** OpenAI-compatible API endpoint called by the backend `/v1/intercept` gateway. It receives the editable Safeguard Effective Prompt and a backend-owned structured JSON verdict contract.
 - **Downstream responder:** Separate responder model called only after local checks and the safeguard judge return a clean forwarding decision. It receives the Downstream Responder Prompt as its instruction.
 - **Sam Spade CTF:** Governed by the shared review/audit path. Clean gameplay replies now use the live downstream responder after local sanitizer and safeguard approval when responder routing is enabled, with admin-managed Sam Spade persona and scenario prompts appended to the responder instruction. When responder routing is disabled, clean gameplay replies use local responder passthrough after safeguard approval. Sensitive redaction placeholders are blocked before gameplay/responder inference and are masked as `Bad content.` on the CTF surface.
 
@@ -25,7 +25,7 @@ Analyst Chat and Responder runtime configuration are intentionally separate.
 
 The safeguard path expects structured decisions such as `ALLOW_AND_FORWARD`, `BLOCK`, `QUEUE_FOR_REVIEW`, and `FAIL_SECURE`. The backend maps these decisions into Counter-Spy.ai outcomes such as `CLEAN`, `SUSPICIOUS`, `ADVERSARIAL`, or `PENDING_REVIEW` before audit and metrics processing.
 
-The visible Firewall Prompt remains the reviewable policy baseline, including forbidden-category and gibberish/obfuscation guidance. Runtime inspection now uses a generated Safeguard Effective Prompt that combines that visible prompt with active guardrails policy, forbidden phrases, Knowledge Base excerpts, the backend-owned JSON verdict contract, and the neutral evidence contract. System Configuration previews and hashes that exact effective prompt.
+The Safeguard Effective Prompt is the reviewable policy baseline, including forbidden-category, gibberish/obfuscation guidance, and promoted few-shot examples. System Configuration previews, edits, and hashes that exact effective prompt.
 
 Audit and Metrics preserve backend safeguard attribution through `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, `backendReachedSafeguard`, `localPrecheckLatencyMs`, `backendSafeguardLatencyMs`, `backendGatewayLatencyMs`, and `responderLatencyMs`. These fields distinguish local pre-inference blocks from backend safeguard/model interventions and keep safeguard latency separate from local responder passthrough latency.
 

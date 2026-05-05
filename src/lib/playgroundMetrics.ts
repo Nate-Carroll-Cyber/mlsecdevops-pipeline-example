@@ -40,7 +40,9 @@ export interface PlaygroundMetricEntry extends AtlasTaxonomyFields {
   specialCharRatio?: number;
   avgWordsPerSentence?: number;
   featureVector?: PromptFeatureVector;
+  featurePressure?: number;
   researchSignal?: number;
+  topPressureDriver?: string;
   topResearchDriver?: string;
   obfuscationCategory?: string;
   obfuscationTechniqueId?: string;
@@ -118,6 +120,7 @@ export interface PromptFeatureVector {
     averageTokenLength: number;
     normalizedSuspicion: number;
   };
+  featurePressure: number;
   researchSignal: number;
   topDriver: string;
   detectionFlags: string[];
@@ -166,10 +169,18 @@ const PromptFeatureVectorSchema: z.ZodType<PromptFeatureVector> = z.object({
     averageTokenLength: z.number(),
     normalizedSuspicion: z.number(),
   }),
-  researchSignal: z.number(),
+  featurePressure: z.number().optional(),
+  researchSignal: z.number().optional(),
   topDriver: z.string(),
   detectionFlags: z.array(z.string()),
   redactions: z.array(z.string()),
+}).transform((featureVector) => {
+  const featurePressure = featureVector.featurePressure ?? featureVector.researchSignal ?? 0;
+  return {
+    ...featureVector,
+    featurePressure,
+    researchSignal: featurePressure,
+  };
 });
 
 const PlaygroundMetricEntrySchema = z.object({
@@ -197,7 +208,9 @@ const PlaygroundMetricEntrySchema = z.object({
   specialCharRatio: z.number().optional(),
   avgWordsPerSentence: z.number().optional(),
   featureVector: PromptFeatureVectorSchema.optional(),
+  featurePressure: z.number().optional(),
   researchSignal: z.number().optional(),
+  topPressureDriver: z.string().optional(),
   topResearchDriver: z.string().optional(),
   obfuscationCategory: z.string().optional(),
   obfuscationTechniqueId: z.string().optional(),
@@ -222,9 +235,46 @@ const PlaygroundMetricEntrySchema = z.object({
   localArchetype: z.enum(LOCAL_ARCHETYPES).optional(),
   taxonomyConfidence: z.number().optional(),
   taxonomyNotes: z.string().optional(),
+}).transform((entry) => {
+  const featurePressure = getFeaturePressure(entry);
+  const topPressureDriver = getTopPressureDriver(entry);
+
+  return {
+    ...entry,
+    featurePressure,
+    researchSignal: featurePressure,
+    topPressureDriver,
+    topResearchDriver: topPressureDriver,
+  };
 });
 
 const PlaygroundMetricEntriesSchema = z.array(PlaygroundMetricEntrySchema);
+
+export function getFeaturePressure(entry: {
+  featurePressure?: number;
+  researchSignal?: number;
+  featureVector?: {
+    featurePressure?: number;
+    researchSignal?: number;
+  };
+}): number | undefined {
+  return entry.featurePressure
+    ?? entry.researchSignal
+    ?? entry.featureVector?.featurePressure
+    ?? entry.featureVector?.researchSignal;
+}
+
+export function getTopPressureDriver(entry: {
+  topPressureDriver?: string;
+  topResearchDriver?: string;
+  featureVector?: {
+    topDriver?: string;
+  };
+}): string | undefined {
+  return entry.topPressureDriver
+    ?? entry.topResearchDriver
+    ?? entry.featureVector?.topDriver;
+}
 
 // Read and validate the local research log from browser storage.
 export function loadPlaygroundMetrics(): PlaygroundMetricEntry[] {
@@ -301,14 +351,14 @@ export function summarizePlaygroundMetrics(entries: PlaygroundMetricEntry[], day
   const adversarialCount = scopedEntries.filter((entry) => entry.detectionLevel >= 3).length;
   const syntacticTotal = scopedEntries.reduce((sum, entry) => sum + entry.syntacticScore, 0);
   const entropyTotal = scopedEntries.reduce((sum, entry) => sum + entry.entropy, 0);
-  const entriesWithResearchSignal = scopedEntries.filter((entry) => typeof entry.researchSignal === 'number');
-  const researchSignalTotal = entriesWithResearchSignal.reduce((sum, entry) => sum + (entry.researchSignal ?? 0), 0);
-  const highResearchSignalCount = entriesWithResearchSignal.filter((entry) => (entry.researchSignal ?? 0) >= 70).length;
+  const entriesWithResearchSignal = scopedEntries.filter((entry) => typeof getFeaturePressure(entry) === 'number');
+  const researchSignalTotal = entriesWithResearchSignal.reduce((sum, entry) => sum + (getFeaturePressure(entry) ?? 0), 0);
+  const highResearchSignalCount = entriesWithResearchSignal.filter((entry) => (getFeaturePressure(entry) ?? 0) >= 70).length;
   const lowLanguageLikelihoodCount = entriesWithResearchSignal.filter((entry) => entry.featureVector?.languageLikelihood.lowNaturalLanguageLikelihood).length;
   const obfuscationHeavyCount = entriesWithResearchSignal.filter((entry) => (entry.featureVector?.syntactic.raw.obfuscationBonus ?? 0) > 0).length;
   const instructionDenseCount = entriesWithResearchSignal.filter((entry) => (entry.featureVector?.syntactic.normalized.instructionPressure ?? 0) >= 0.7).length;
   const driverCounts = entriesWithResearchSignal.reduce<Record<string, number>>((counts, entry) => {
-    const driver = entry.topResearchDriver || entry.featureVector?.topDriver;
+    const driver = getTopPressureDriver(entry);
     if (!driver) return counts;
     counts[driver] = (counts[driver] ?? 0) + 1;
     return counts;

@@ -88,6 +88,7 @@ The sanitizer now flags these structural jailbreak patterns:
 | `PERSONA_INJECTION` | Persona assignment plus unrestricted-capability language. |
 | `PAIRED_RESPONSE_INJECTION` | Dual approved/rejected, safe/unsafe, two-response, or opposite-response framing. Isolated hits are telemetry; paired with other jailbreak signals, route to review. |
 | `ALLCAPS_PERSONA` | Signal-only telemetry for all-caps hyphenated persona handles. |
+| `VERTICAL_TEXT` | Alphabetic vertical columns and `x - position N` rows are reflowed before detectors run; the signal itself routes to review/obfuscation handling. |
 
 Recognized obfuscation remains strict: current policy treats known obfuscation signals as adversarial even before a concealed payload is proven to decode into a blocked phrase.
 
@@ -96,7 +97,7 @@ Recognized obfuscation remains strict: current policy treats known obfuscation s
 Last known checks for this work:
 
 - `npm run lint` passed.
-- `npm run backend:test` passed with 84 tests.
+- `npm run backend:test` passed with 90 tests.
 - Docker demo stack rebuilt and restarted.
 - Browser verification confirmed the Metrics Feature Pressure card shows the average 0-100 score and all six averaged component pressures after a local prompt submission.
 

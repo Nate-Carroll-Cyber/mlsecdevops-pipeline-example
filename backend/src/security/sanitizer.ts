@@ -53,7 +53,7 @@ const FORCED_PREFIX_PATTERNS = [
 const ANTI_SANITIZATION_PATTERNS = [
   /\b(?:avoid|skip|bypass|disable|without|no)\s+(?:sanitiz|filter|moderat|censor)/i,
   /\bwithhold(?:ing)?\s+(?:knowledge|information|content|details)/i,
-  /\bdo\s+not\s+(?:warn|caveat|moralize|lecture|disclaim|sanitize)/i,
+  /\bdo\s+not\s+(?:warn|caveat|moralize|lecture|disclaim|sanitize|refuse)/i,
   /\b(?:no|without|skip)\s+(?:warnings?|disclaimers?|caveats?|safety\s+(?:notices?|disclaimers?))/i,
   /\bunfiltered\b/i,
   /\b(?:ignore|override|bypass)\s+(?:all\s+)?(?:safety|ethical|moral|content)\s+(?:rules?|guidelines?|policies|filters?|restrictions?)/i,
@@ -89,7 +89,7 @@ const OPERATIONAL_KEYWORDS = [
   'respond as', 'answer as', 'behave as',
 ];
 
-const ZERO_WIDTH_CHAR_REGEX = /[\u200B-\u200D\u2060\uFEFF]/g;
+const ZERO_WIDTH_CHAR_REGEX = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
 const BASE64_SEGMENT_REGEX = /(?:^|[^A-Za-z0-9+/=])([A-Za-z0-9+/]{20,}={0,2})(?=$|[^A-Za-z0-9+/=])/g;
 const HEX_SEGMENT_REGEX = /\b(?:0x)?(?:[A-Fa-f0-9]{2}){12,}\b/g;
 const URL_SEGMENT_REGEX = /(?:%[0-9A-Fa-f]{2}){6,}/g;
@@ -127,6 +127,9 @@ const END_SEQUENCE_REGEX = /<\/s>|<\|im_end\|>/i;
 const CHUNKING_REGEX = /(?:^|\n)Part\s+\d+:\s+/i;
 const VARIABLE_EXPANSION_REGEX = /\blet\s+v\d+\s*=|console\.log\(/i;
 const VERTICAL_TEXT_REGEX = /^(?:.{1,2}\n){5,}.{1,2}$/m;
+const SHORT_LINE_MAX_CHARS = 3;
+const MIN_VERTICAL_RUN_LINES = 4;
+const POSITIONAL_ROW_REGEX = /^\s*(\S)\s*[-–—:]\s*position\s+\d+\s*$/i;
 const NON_ASCII_REGEX = /[^\x00-\x7F]/;
 const COMBINING_MARK_REGEX = /\p{M}/u;
 const SYMBOL_LIKE_REGEX = /[\p{S}\p{M}]/u;
@@ -170,6 +173,86 @@ function hasPersonaInjection(prompt: string): boolean {
 
 function hasPairedResponseInjection(prompt: string): boolean {
   return PAIRED_RESPONSE_REGEX.test(prompt);
+}
+
+interface ReflowedPrompt {
+  normalized: string;
+  reflowed: string;
+  hadVerticalRun: boolean;
+}
+
+function uniqueTextCandidates(candidates: string[]): string[] {
+  return [...new Set(candidates.filter((candidate) => candidate.trim().length > 0))];
+}
+
+function preNormalizeVerticalText(prompt: string): string {
+  return prompt
+    .normalize('NFKC')
+    .replace(ZERO_WIDTH_CHAR_REGEX, '')
+    .replace(/\r\n?/g, '\n');
+}
+
+function collapseVerticalRun(run: string[]): string {
+  return run
+    .map((line) => {
+      const trimmed = line.trim();
+      const positionalMatch = trimmed.match(POSITIONAL_ROW_REGEX);
+      if (positionalMatch?.[1]) return positionalMatch[1];
+      return trimmed === '' ? ' ' : trimmed;
+    })
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isVerticalRunLine(line: string): boolean {
+  const visible = line.trim();
+  return visible.length <= SHORT_LINE_MAX_CHARS || POSITIONAL_ROW_REGEX.test(visible);
+}
+
+function isAlphabeticVerticalLine(line: string): boolean {
+  const visible = line.trim();
+  const positionalMatch = visible.match(POSITIONAL_ROW_REGEX);
+  const candidate = positionalMatch?.[1] ?? visible;
+  return /\p{L}/u.test(candidate) && !/^\d+[\).]?$/.test(candidate);
+}
+
+function isSuspiciousVerticalRun(run: string[]): boolean {
+  const nonBlankLines = run.filter((line) => line.trim() !== '');
+  if (nonBlankLines.length === 0) return false;
+  const alphabeticLines = nonBlankLines.filter(isAlphabeticVerticalLine);
+  return alphabeticLines.length / nonBlankLines.length >= 0.6;
+}
+
+function reflowVerticalText(prompt: string): ReflowedPrompt {
+  const normalized = preNormalizeVerticalText(prompt);
+  const lines = normalized.split('\n');
+  const out: string[] = [];
+  let run: string[] = [];
+  let hadVerticalRun = false;
+
+  const flushRun = () => {
+    if (run.length >= MIN_VERTICAL_RUN_LINES && isSuspiciousVerticalRun(run)) {
+      const collapsed = collapseVerticalRun(run);
+      if (collapsed) out.push(collapsed);
+      hadVerticalRun = true;
+    } else {
+      out.push(...run);
+    }
+    run = [];
+  };
+
+  for (const line of lines) {
+    if (isVerticalRunLine(line)) {
+      run.push(line);
+    } else {
+      flushRun();
+      out.push(line);
+    }
+  }
+  flushRun();
+
+  return { normalized, reflowed: out.join('\n'), hadVerticalRun };
 }
 const COMPATIBILITY_GLYPH_REGEX = /[\u2460-\u24FF\u3200-\u32FF\uFF00-\uFFEF]/g;
 const CYRILLIC_CONFUSABLES: Record<string, string> = {
@@ -833,6 +916,12 @@ function extractTransformedSegments(prompt: string): { segments: string[]; signa
   const signals: ObfuscationSignal[] = [];
   const baselineNormalized = normalizeWithoutLeet(prompt);
   const policyNormalized = normalizeForPolicy(prompt);
+  const verticalReflow = reflowVerticalText(prompt);
+
+  if (verticalReflow.hadVerticalRun && verticalReflow.reflowed !== verticalReflow.normalized) {
+    segments.push(verticalReflow.reflowed);
+    signals.push('VERTICAL_TEXT');
+  }
 
   if (hasCompatibilityGlyphObfuscation(prompt)) {
     segments.push(baselineNormalized);
@@ -865,7 +954,7 @@ function detectStructuralObfuscation(prompt: string): ObfuscationSignal[] {
   if (END_SEQUENCE_REGEX.test(prompt)) signals.push('END_SEQUENCE');
   if (CHUNKING_REGEX.test(prompt)) signals.push('CHUNKING');
   if (VARIABLE_EXPANSION_REGEX.test(prompt)) signals.push('VARIABLE_EXPANSION');
-  if (VERTICAL_TEXT_REGEX.test(prompt)) signals.push('VERTICAL_TEXT');
+  if (VERTICAL_TEXT_REGEX.test(prompt) || reflowVerticalText(prompt).hadVerticalRun) signals.push('VERTICAL_TEXT');
   if (hasSymbolSubstitutionObfuscation(prompt)) signals.push('SYMBOL_SUBSTITUTION');
   return signals;
 }
@@ -911,11 +1000,16 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
   const blockedKeywordsToCheck = configuredBlockedKeywords.length > 0
     ? configuredBlockedKeywords
     : BLOCKED_KEYWORDS;
+  const verticalReflow = reflowVerticalText(prompt);
+  const detectorCandidates = verticalReflow.hadVerticalRun
+    ? uniqueTextCandidates([prompt, verticalReflow.normalized, verticalReflow.reflowed])
+    : [prompt];
   const entropyAnalysis = analyzeSlidingWindowEntropy(prompt, 35, 5, suspiciousEntropyThreshold);
   const entropyContextSuspicious = hasEntropyEscalationContext(prompt) ||
     entropyAnalysis.suspiciousChunks.some((chunk) => hasEntropyEscalationContext(chunk));
-  const syntacticScore = analyzeSyntacticComplexity(prompt);
-  const normalized = normalizeForPolicy(prompt);
+  const syntacticScore = Math.max(...detectorCandidates.map((candidate) => analyzeSyntacticComplexity(candidate)));
+  const normalizedCandidates = detectorCandidates.map((candidate) => normalizeForPolicy(candidate));
+  const normalized = normalizedCandidates[0] ?? normalizeForPolicy(prompt);
   const spellingNormalization = normalizeSpellingHeuristic(prompt);
   const normalizedSpellCorrected = normalizeForPolicy(spellingNormalization.text);
   const { decodedSegments, usedObfuscation, maxDecodeDepth, signals: decodedSignals } = extractDecodedSegments(prompt);
@@ -924,25 +1018,25 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
   const leetspeakDetected =
     hasLeetspeakObfuscation(prompt) || decodedSegments.some((segment) => hasLeetspeakObfuscation(segment));
   const languageSignals = detectLanguageSignals(prompt);
-  const externalCallDetected = EXTERNAL_CALL_REGEX.test(prompt);
-  const forcedPrefixDetected = hasForcedPrefix(prompt);
-  const antiSanitizationDetected = hasAntiSanitizationClause(prompt);
-  const personaInjectionDetected = hasPersonaInjection(prompt);
-  const pairedResponseDetected = hasPairedResponseInjection(prompt);
-  const allCapsPersonaDetected = ALLCAPS_PERSONA_REGEX.test(prompt);
+  const externalCallDetected = detectorCandidates.some((candidate) => EXTERNAL_CALL_REGEX.test(candidate));
+  const forcedPrefixDetected = detectorCandidates.some((candidate) => hasForcedPrefix(candidate));
+  const antiSanitizationDetected = detectorCandidates.some((candidate) => hasAntiSanitizationClause(candidate));
+  const personaInjectionDetected = detectorCandidates.some((candidate) => hasPersonaInjection(candidate));
+  const pairedResponseDetected = detectorCandidates.some((candidate) => hasPairedResponseInjection(candidate));
+  const allCapsPersonaDetected = detectorCandidates.some((candidate) => ALLCAPS_PERSONA_REGEX.test(candidate));
   const normalizedForeignRecovery = languageSignals.translatedCandidate ? normalizeForPolicy(languageSignals.translatedCandidate) : '';
   const normalizedDecodedSegments = decodedSegments.map((segment) => normalizeForPolicy(segment));
   let transformedSignalsUsed: ObfuscationSignal[] = [];
   let normalizedTransformedSegments: string[] = [];
   let decodeTelemetry = getDecodeTelemetry(usedObfuscation, maxDecodeDepth);
   const blockedKeywordHits = blockedKeywordsToCheck.filter((keyword) =>
-    normalized.includes(keyword) ||
+    normalizedCandidates.some((candidate) => candidate.includes(keyword)) ||
     normalizedDecodedSegments.some((segment) => segment.includes(keyword)) ||
     normalizedSpellCorrected.includes(keyword) ||
     (normalizedForeignRecovery ? normalizedForeignRecovery.includes(keyword) : false)
   );
   const spellingObfuscationDetected = spellingNormalization.changed && blockedKeywordHits.some((keyword) =>
-    !normalized.includes(keyword) && normalizedSpellCorrected.includes(keyword)
+    !normalizedCandidates.some((candidate) => candidate.includes(keyword)) && normalizedSpellCorrected.includes(keyword)
   );
   if (blockedKeywordHits.length === 0) {
     const rawTransformedAnalysis = extractTransformedSegments(prompt);
@@ -1031,13 +1125,13 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     detectionFlags.add('ALLCAPS_PERSONA');
     redactions.add('ALLCAPS_PERSONA');
   }
-  if (COORDINATE_CIPHER_REGEX.test(prompt)) {
+  if (detectorCandidates.some((candidate) => COORDINATE_CIPHER_REGEX.test(candidate))) {
     detectionFlags.add('COORDINATE_CIPHER');
     redactions.add('COORDINATE_CIPHER');
   }
 
   const forbiddenTopicDetected = configuredForbiddenTopics.some((topic) =>
-    normalized.includes(topic) ||
+    normalizedCandidates.some((candidate) => candidate.includes(topic)) ||
     normalizedDecodedSegments.some((segment) => segment.includes(topic)) ||
     normalizedTransformedSegments.some((segment) => segment.includes(topic)) ||
     normalizedSpellCorrected.includes(topic) ||
@@ -1058,7 +1152,10 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
         flags = rule.substring(rule.lastIndexOf('/') + 1) || 'gi';
       }
       const regex = new RegExp(pattern, flags);
-      if (regex.test(prompt)) {
+      if (detectorCandidates.some((candidate) => {
+        regex.lastIndex = 0;
+        return regex.test(candidate);
+      })) {
         regexMatchDetected = true;
         detectionFlags.add('REGEX_MATCH');
         redactions.add('REGEX_MATCH');
@@ -1113,7 +1210,7 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
         leetspeakDetected
       )
     ) ||
-    COORDINATE_CIPHER_REGEX.test(prompt) ||
+    detectorCandidates.some((candidate) => COORDINATE_CIPHER_REGEX.test(candidate)) ||
     prompt.length > 2000
   ) {
     verdict = 'SUSPICIOUS';

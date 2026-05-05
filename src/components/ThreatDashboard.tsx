@@ -18,6 +18,7 @@ import { detectThreatSpikes, ThreatLog } from '../lib/anomalyDetector';
 import { calculateFalsePositiveMetrics, AuditLogMetrics } from '../lib/metrics';
 import { ATLAS_TACTICS, ATLAS_TECHNIQUE_DEFINITIONS } from '../lib/atlasTaxonomy';
 import { SUSPICIOUS_ENTROPY_THRESHOLD } from '../lib/sanitizer';
+import { getFeaturePressure, getTopPressureDriver } from '../lib/playgroundMetrics';
 // Import icons from Lucide React
 import { AlertTriangle, Activity, UserCheck, ShieldX, PauseOctagon, PlayCircle } from 'lucide-react';
 // Import charting components from Recharts
@@ -319,15 +320,15 @@ function calculateObfuscationSignalMetrics(logs: any[]) {
 }
 
 function calculateFeaturePressureMetrics(logs: any[]) {
-  const featureLogs = logs.filter((log) => typeof log.researchSignal === 'number' && log.featureVector);
-  const researchSignalTotal = featureLogs.reduce((sum, log) => sum + Number(log.researchSignal || 0), 0);
+  const featureLogs = logs.filter((log) => typeof getFeaturePressure(log) === 'number' && log.featureVector);
+  const researchSignalTotal = featureLogs.reduce((sum, log) => sum + Number(getFeaturePressure(log) || 0), 0);
   const averagePressure = (selector: (log: any) => number | undefined) => {
     if (featureLogs.length === 0) return 0;
     const total = featureLogs.reduce((sum, log) => sum + Number(selector(log) || 0), 0);
     return parseFloat(((total / featureLogs.length) * 100).toFixed(1));
   };
   const driverCounts = featureLogs.reduce<Record<string, number>>((counts, log) => {
-    const driver = log.topResearchDriver || log.featureVector?.topDriver;
+    const driver = getTopPressureDriver(log);
     if (!driver || driver === 'None') return counts;
     counts[driver] = (counts[driver] ?? 0) + 1;
     return counts;
@@ -345,7 +346,7 @@ function calculateFeaturePressureMetrics(logs: any[]) {
     averageObfuscationPressure: averagePressure((log) => log.featureVector?.syntactic?.normalized?.obfuscationPressure),
     averageEntropyPressure: averagePressure((log) => log.featureVector?.entropy?.normalizedPressure),
     averageNgramObfuscationSignal: averagePressure((log) => log.featureVector?.languageLikelihood?.normalizedSuspicion),
-    highResearchSignalCount: featureLogs.filter((log) => Number(log.researchSignal || 0) >= 70).length,
+    highResearchSignalCount: featureLogs.filter((log) => Number(getFeaturePressure(log) || 0) >= 70).length,
     topResearchDriver: Object.entries(driverCounts).sort((left, right) => right[1] - left[1])[0]?.[0] ?? 'None',
     lowNgramLikelihoodCount: featureLogs.filter((log) => log.featureVector?.languageLikelihood?.lowNaturalLanguageLikelihood).length,
     obfuscationHeavyCount: featureLogs.filter((log) => Number(log.featureVector?.syntactic?.raw?.obfuscationBonus || 0) > 0).length,
@@ -755,7 +756,9 @@ export function ThreatDashboard({
           detectionFlags: doc.data().detectionFlags || [],
           suspiciousChunks: doc.data().suspiciousChunks || [],
           featureVector: doc.data().featureVector || undefined,
+          featurePressure: doc.data().featurePressure ?? undefined,
           researchSignal: doc.data().researchSignal ?? undefined,
+          topPressureDriver: doc.data().topPressureDriver || undefined,
           topResearchDriver: doc.data().topResearchDriver || undefined,
           sanitizedPrompt: doc.data().sanitizedPrompt || '',
           source: doc.data().source || 'analyst_chat',

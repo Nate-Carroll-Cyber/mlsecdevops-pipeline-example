@@ -35,7 +35,7 @@ const SENSITIVE_PATTERNS = [
   // Regex to match standard email addresses
   { name: 'EMAIL', regex: /[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/g },
   // Regex to match various phone number formats
-  { name: 'PHONE', regex: /(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g },
+  { name: 'PHONE', regex: /(?<!\d)(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/g },
   // Regex to match US street addresses and states
   { name: 'ADDRESS', regex: /\b\d{1,5}\s+[\w\s]{1,30}(?:street|st|avenue|ave|road|rd|highway|hwy|boulevard|blvd|lane|ln|drive|dr|court|ct|way|place|pl|circle|cir)\b\.?(?:\s*(?:apt|apartment|suite|ste|unit|#)\s*\w+)?\s*,?\s*(?:[\w\s]+,\s*)?(?:AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|ME|MD|MA|MI|MN|MS|MO|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WV|WI|WY|Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming)?\s*\d{5}(?:-\d{4})?\b/gi },
   // Regex to match US ZIP codes
@@ -48,12 +48,8 @@ const SENSITIVE_PATTERNS = [
   { name: 'PRIVATE_KEY', regex: /-----BEGIN (RSA )?PRIVATE KEY-----/g },
   // Regex to match IPv4 addresses
   { name: 'IP_ADDRESS', regex: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g },
-  // Regex to match Credit Card numbers
-  { name: 'CREDIT_CARD', regex: /\b(?:\d[ -]*?){13,16}\b/g },
   // Regex to match US Social Security Numbers
   { name: 'SSN', regex: /\b\d{3}-\d{2}-\d{4}\b/g },
-  // Regex to match generic 32-64 character hex API keys
-  { name: 'API_KEY', regex: /\b[0-9a-fA-F]{32,64}\b/g },
   // Regex to match JSON Web Tokens (JWT)
   { name: 'JWT', regex: /\beyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\b/g },
   // Regex to match the specific Counter-Spy Canary Token
@@ -89,6 +85,16 @@ export const SUSPICIOUS_ENTROPY_THRESHOLD = 3.6;
 const SCRIPT_TAG_REGEX = /<script\b[^>]*(?:>[\s\S]*?<\/script>|\s*\/?>)/gi;
 const URL_WITH_SCHEME_REGEX = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>"']+/gi;
 const JAVASCRIPT_URI_REGEX = /\bjavascript:[^\s<>"']*/gi;
+const CREDIT_CARD_PATTERN = /(?<![A-Za-z0-9])(?:\d[ -]?){12,18}\d(?![A-Za-z0-9])/g;
+const CREDIT_CARD_IIN_PREFIXES = /^(?:4|5[1-5]|2[2-7]|3[47]|3(?:0[0-5]|[68])|6(?:011|5)|35(?:2[89]|[3-8])|62)/;
+const VALID_CREDIT_CARD_LENGTHS = new Set([13, 14, 15, 16, 19]);
+
+interface CreditCardMatch {
+  start: number;
+  end: number;
+  raw: string;
+  digits: string;
+}
 
 // Enum defining the severity levels of detected threats
 export enum DetectionLevel {
@@ -156,6 +162,54 @@ function calculateEntropy(str: string): number {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function passesLuhn(digits: string): boolean {
+  let sum = 0;
+  let alternate = false;
+
+  for (let index = digits.length - 1; index >= 0; index -= 1) {
+    let value = digits.charCodeAt(index) - 48;
+    if (alternate) {
+      value *= 2;
+      if (value > 9) value -= 9;
+    }
+    sum += value;
+    alternate = !alternate;
+  }
+
+  return sum % 10 === 0;
+}
+
+function findCreditCards(text: string): CreditCardMatch[] {
+  const matches: CreditCardMatch[] = [];
+
+  for (const match of text.matchAll(CREDIT_CARD_PATTERN)) {
+    const raw = match[0];
+    const digits = raw.replace(/[ -]/g, '');
+    if (!VALID_CREDIT_CARD_LENGTHS.has(digits.length)) continue;
+    if (!CREDIT_CARD_IIN_PREFIXES.test(digits)) continue;
+    if (!passesLuhn(digits)) continue;
+
+    const start = match.index ?? 0;
+    matches.push({
+      start,
+      end: start + raw.length,
+      raw,
+      digits,
+    });
+  }
+
+  return matches;
+}
+
+function redactCreditCardMatches(text: string): string {
+  return findCreditCards(text)
+    .sort((a, b) => b.start - a.start)
+    .reduce((next, match) =>
+      `${next.slice(0, match.start)}[REDACTED_CREDIT_CARD]${next.slice(match.end)}`,
+      text,
+    );
 }
 
 function redactPolicyMatchedContent(
@@ -488,6 +542,14 @@ export function sanitizeInput(
     }
   }
 
+  const creditCardMatches = findCreditCards(input);
+  if (creditCardMatches.length > 0) {
+    if (!redactions.includes('CREDIT_CARD')) redactions.push('CREDIT_CARD');
+    if (guardrails.piiRedaction) {
+      sanitized = redactCreditCardMatches(sanitized);
+    }
+  }
+
   // Preserve already-redacted placeholders as sensitive signals so imported or
   // replayed examples still register as containing protected material.
   for (const match of input.matchAll(REDACTED_PLACEHOLDER_REGEX)) {
@@ -776,6 +838,17 @@ export function sanitizeInput(
 	    transformedSignalsUsed.length > 0 ||
     lowNaturalLanguageLikelihoodDetected ||
     coordinateCipherDetected;
+  const pigLatinDetected = structuralSignals.includes('PIG_LATIN');
+  const nonPigLatinStructuralSignals = structuralSignals.filter((signal) => signal !== 'PIG_LATIN');
+  const adversarialObfuscationSignalDetected =
+    obfuscationAnalysis.usedObfuscation ||
+    obfuscationAnalysis.signals.length > 0 ||
+    nonPigLatinStructuralSignals.length > 0 ||
+    leetspeakDetected ||
+    spellingObfuscationDetected ||
+    transformedSignalsUsed.length > 0 ||
+    (lowNaturalLanguageLikelihoodDetected && !pigLatinDetected) ||
+    coordinateCipherDetected;
 
   // Complexity analysis runs after the earlier normalization stages so the final
   // severity can reflect both structural suspicion and explicit policy hits.
@@ -830,7 +903,7 @@ export function sanitizeInput(
   let detectionLevel = DetectionLevel.CLEAN;
   // Promote to adversarial if entropy exceeds the configured ceiling, if
   // syntactic score is extremely high, or if any recognized obfuscation family fires.
-  if ((guardrails.entropyFilter && entropy > adversarialEntropyThreshold) || syntacticAnalysis.score >= 90 || obfuscationSignalDetected) {
+  if ((guardrails.entropyFilter && entropy > adversarialEntropyThreshold) || syntacticAnalysis.score >= 90 || adversarialObfuscationSignalDetected) {
     // Escalate to ADVERSARIAL level
     detectionLevel = DetectionLevel.ADVERSARIAL;
   // Else if a probing attempt was detected
@@ -981,6 +1054,14 @@ export function sanitizeOutput(
         // Replace all occurrences of the pattern with a redaction placeholder
         sanitized = sanitized.replace(pattern.regex, `[REDACTED_${pattern.name}]`);
       }
+    }
+  }
+
+  const creditCardMatches = findCreditCards(output);
+  if (creditCardMatches.length > 0) {
+    if (!redactions.includes('CREDIT_CARD')) redactions.push('CREDIT_CARD');
+    if (guardrails.piiRedaction) {
+      sanitized = redactCreditCardMatches(sanitized);
     }
   }
 

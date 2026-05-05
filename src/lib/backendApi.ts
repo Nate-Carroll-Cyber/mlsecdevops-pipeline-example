@@ -5,6 +5,8 @@
  */
 import { z } from 'zod';
 
+const BACKEND_INTERCEPT_TIMEOUT_MS = 45_000;
+
 // Zod schemas keep backend responses honest before they enter React state.
 const BackendInterceptResponseSchema = z.object({
   requestId: z.string(),
@@ -282,15 +284,13 @@ export async function interceptPrompt(input: {
     regexRules?: string[];
   };
 }): Promise<BackendInterceptResponse> {
-  const response = await fetch(resolveBackendUrl('/v1/intercept'), {
+  const { response, payload } = await fetchJsonWithTimeout('/v1/intercept', {
     method: 'POST',
     headers: {
       'content-type': 'application/json',
     },
     body: JSON.stringify(input),
-  });
-
-  const payload: unknown = await response.json();
+  }, BACKEND_INTERCEPT_TIMEOUT_MS);
 
   if (!response.ok) {
     const interceptPayload = BackendInterceptResponseSchema.safeParse(payload);

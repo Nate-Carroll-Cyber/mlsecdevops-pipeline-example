@@ -408,6 +408,10 @@ const OBFUSCATION_FLAG_LABELS: Record<string, string> = {
   URL_ENCODING: 'URL Encoding',
   HTML_ENTITIES: 'HTML Entities',
   UNICODE_ESCAPES: 'Unicode Escapes',
+  BINARY_ENCODING: 'Binary Encoding',
+  ASCII_DECIMAL: 'ASCII Decimal',
+  A1Z26: 'A1Z26',
+  PIG_LATIN: 'Pig Latin',
   COMPATIBILITY_GLYPHS: 'Compatibility Glyphs',
   SYMBOL_SUBSTITUTION: 'Symbol Substitution',
   LEETSPEAK: 'Leetspeak',
@@ -430,6 +434,10 @@ const STORED_OBFUSCATION_FLAGS = [
   'URL_ENCODING',
   'HTML_ENTITIES',
   'UNICODE_ESCAPES',
+  'BINARY_ENCODING',
+  'ASCII_DECIMAL',
+  'A1Z26',
+  'PIG_LATIN',
   'COMPATIBILITY_GLYPHS',
   'SYMBOL_SUBSTITUTION',
   'LEETSPEAK',
@@ -1864,13 +1872,13 @@ export default function App() {
 
   const activateGlobalPause = async (reason: string) => {
     const nextGovernanceConfig: GovernanceConfig = {
-      ...governanceConfig,
+      ...governanceConfigRef.current,
       isHitlActive: false,
       isGlobalPause: true,
     };
+    setGovernanceConfig(nextGovernanceConfig);
 
     if (localReviewMode) {
-      setGovernanceConfig(nextGovernanceConfig);
       console.warn('Global System Pause activated in local review mode.', reason);
       return;
     }
@@ -3576,6 +3584,8 @@ export default function App() {
             const forwardedPromptHash = await sha256Hex(backendResponse.sanitizedPrompt);
             rawResponse = backendResponse.status === 'CLEAN'
               ? backendResponse.responder?.response || 'Backend accepted the prompt but returned no responder text.'
+              : backendResponse.status === 'SHIELD_ERROR'
+                ? `SAFEGUARD FAIL-SECURE: ${backendResponse.safeguards.analystReasoning}`
               : `Backend intercepted the prompt: ${backendResponse.safeguards.analystReasoning}`;
             const responderUsage = backendResponse.responder?.usage;
             const contextWindowLimit = Number.isFinite(parsedContextWindowLimit) && parsedContextWindowLimit > 0
@@ -3594,6 +3604,9 @@ export default function App() {
               backendGatewayLatencyMs: backendResponse.safeguards.gatewayLatencyMs ?? backendResponse.safeguards.latencyMs,
 	            };
 	            setLastBackendSafeguardOutcome(backendSafeguardOutcome);
+            if (backendResponse.status === 'SHIELD_ERROR') {
+              await activateGlobalPause(`Automatic Global System Pause triggered by safeguard failure: ${backendResponse.safeguards.analystReasoning}`);
+            }
 	            responderAuditPatch = {
 	              judgeDecision: backendResponse.safeguards.verdict,
 	              ...backendSafeguardOutcome,
@@ -3605,6 +3618,7 @@ export default function App() {
               responderModel: backendResponse.responder?.modelId,
 	              responderStatus: backendResponse.responder?.status ?? (backendResponse.status === 'CLEAN' ? 'NO_RESPONDER_TEXT' : backendResponse.status),
               responderLatencyMs: backendResponse.responder?.latencyMs,
+              ...(backendResponse.status === 'SHIELD_ERROR' ? { status: 'PENDING_REVIEW' as const } : {}),
               promptTokens: responderUsage?.promptTokens,
               completionTokens: responderUsage?.completionTokens,
               totalTokens: responderUsage?.totalTokens,
@@ -3612,7 +3626,9 @@ export default function App() {
               contextWindowUtilization,
             };
             responderRunBase = {
-	              status: backendResponse.responder?.status === 'DISABLED_LOCAL_ONLY'
+	              status: backendResponse.status === 'SHIELD_ERROR'
+                  ? 'error'
+                  : backendResponse.responder?.status === 'DISABLED_LOCAL_ONLY'
 	                ? 'disabled_local_only'
 	                : backendResponse.responder ? 'completed' : 'not_configured',
               timestamp: new Date().toISOString(),
@@ -3630,6 +3646,7 @@ export default function App() {
               completionTokens: responderUsage?.completionTokens,
               totalTokens: responderUsage?.totalTokens,
               contextWindowUtilization,
+              ...(backendResponse.status === 'SHIELD_ERROR' ? { error: backendResponse.safeguards.analystReasoning } : {}),
             };
 	            if (auditLogId) {
               const telemetryPatch: Partial<AuditLog> = { ...responderAuditPatch };
@@ -3667,11 +3684,62 @@ export default function App() {
 		              : await generateSecurityAdvice(sanitization.sanitized, messages, "", finalSystemPrompt);
 		          }
         } catch (backendError) {
-          console.warn('Backend intercept unavailable, falling back to local response path.', backendError);
+          console.warn('Backend intercept unavailable.', backendError);
           const backendMessage = backendError instanceof Error ? backendError.message : 'Backend inference is unavailable for this session.';
           if (options?.source === 'bulk_ingest') {
             bulkBackendErrorRef.current = backendMessage;
           }
+          const isBackendTimeout = /timed out|timeout|abort/i.test(backendMessage);
+          if (activeGuardrails.safeguardLlm && isBackendTimeout) {
+            await activateGlobalPause(`Automatic Global System Pause triggered by backend safeguard timeout: ${backendMessage}`);
+            const timeoutFlags = Array.from(new Set([...sanitization.redactions, 'SAFEGUARD_TIMEOUT', 'FAIL_SECURE']));
+            responderAuditPatch = {
+              judgeDecision: 'ADVERSARIAL',
+              backendGatewayStatus: 'SHIELD_ERROR',
+              backendSafeguardVerdict: 'ADVERSARIAL',
+              backendSafeguardReasoning: backendMessage,
+              backendReachedSafeguard: true,
+              localPrecheckLatencyMs: sanitization.latencyMs,
+              detectionFlags: timeoutFlags,
+              status: 'PENDING_REVIEW',
+            };
+            if (auditLogId) {
+              patchCurrentAuditLog(responderAuditPatch);
+              if (!useLocalAuditSurface) {
+                try {
+                  await updateDoc(doc(db, 'audit_logs', auditLogId), {
+                    judgeDecision: 'ADVERSARIAL',
+                    backendGatewayStatus: 'SHIELD_ERROR',
+                    backendSafeguardVerdict: 'ADVERSARIAL',
+                    backendSafeguardReasoning: backendMessage,
+                    backendReachedSafeguard: true,
+                    localPrecheckLatencyMs: sanitization.latencyMs,
+                    detectionFlags: timeoutFlags,
+                    status: 'PENDING_REVIEW',
+                  });
+                } catch (error) {
+                  console.error('Failed to update audit log for safeguard timeout', error);
+                }
+              }
+            }
+            setLastBackendSafeguardOutcome({
+              backendGatewayStatus: 'SHIELD_ERROR',
+              backendSafeguardVerdict: 'ADVERSARIAL',
+              backendSafeguardReasoning: backendMessage,
+              backendReachedSafeguard: true,
+              localPrecheckLatencyMs: sanitization.latencyMs,
+            });
+            setLastResponderRun({
+              status: 'error',
+              timestamp: new Date().toISOString(),
+              modelId: displayedResponderModelId,
+              provider: displayedResponderProvider,
+              baseUrl: displayedResponderBaseUrl,
+              localPrecheckLatencyMs: sanitization.latencyMs,
+              error: backendMessage,
+            });
+            rawResponse = `SAFEGUARD FAIL-SECURE: ${backendMessage}`;
+          } else {
 	          setLastResponderRun({
 		            status: 'error',
 		            timestamp: new Date().toISOString(),
@@ -3683,6 +3751,7 @@ export default function App() {
 		          rawResponse = localReviewMode
 		              ? `Backend inference is unavailable for this session. ${backendMessage}`
 		              : await generateSecurityAdvice(sanitization.sanitized, messages, "", finalSystemPrompt);
+          }
         }
         
         const rawResponseForDecisioning = rawResponse;

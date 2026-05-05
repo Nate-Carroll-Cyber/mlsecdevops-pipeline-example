@@ -31,6 +31,7 @@ const EnvSchema = z.object({
   SAFEGUARDS_MODEL_ID: z.string().min(1).default('gpt-5.4-mini'),
   SAFEGUARDS_API_BASE_URL: z.string().url().optional(),
   SAFEGUARDS_API_KEY: z.string().optional(),
+  SAFEGUARDS_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(120_000).default(30_000),
   RESPONDER_PROVIDER: z.enum(['openai_compatible', 'gemini']).optional(),
   RESPONDER_API_BASE_URL: z.string().url().optional(),
   RESPONDER_API_KEY: z.string().optional(),
@@ -72,6 +73,7 @@ const allowedOrigins = (
   .map((origin) => origin.trim())
   .filter(Boolean);
 const safeguardsModelId = env.SAFEGUARDS_MODEL_ID;
+const safeguardsTimeoutMs = env.SAFEGUARDS_TIMEOUT_MS;
 const responderModelId = env.LLM_MODEL_ID || env.RESPONDER_MODEL_ID;
 const responderProvider = env.RESPONDER_PROVIDER || 'openai_compatible';
 const defaultGeminiResponderModelId = 'gemini-2.5-flash';
@@ -100,6 +102,13 @@ class UpstreamResponderError extends Error {
     super(message);
     this.name = 'UpstreamResponderError';
     this.status = status;
+  }
+}
+
+class SafeguardTimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Safeguard LLM timed out after ${timeoutMs}ms.`);
+    this.name = 'SafeguardTimeoutError';
   }
 }
 
@@ -285,30 +294,43 @@ Deterministic preprocessing evidence. This is not a verdict:
 - Global entropy: ${riskEvidence.globalEntropy.toFixed(3)}
 - Syntactic score: ${riskEvidence.syntacticScore.toFixed(1)}`;
 
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-    },
-    body: JSON.stringify(
-      endpoint.endsWith('/responses')
-        ? {
-            model: modelId,
-            instructions,
-            input,
-            store: false,
-          }
-        : {
-            model: modelId,
-            messages: [
-              { role: 'system', content: instructions },
-              { role: 'user', content: input },
-            ],
-            temperature: 0,
-          },
-    ),
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), safeguardsTimeoutMs);
+  let response: globalThis.Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'content-type': 'application/json',
+        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+      },
+      body: JSON.stringify(
+        endpoint.endsWith('/responses')
+          ? {
+              model: modelId,
+              instructions,
+              input,
+              store: false,
+            }
+          : {
+              model: modelId,
+              messages: [
+                { role: 'system', content: instructions },
+                { role: 'user', content: input },
+              ],
+              temperature: 0,
+            },
+      ),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') {
+      throw new SafeguardTimeoutError(safeguardsTimeoutMs);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
 
   if (!response.ok) {
     const upstreamError = await response.text();
@@ -1218,12 +1240,35 @@ app.post('/v1/intercept', async (req: Request, res: Response<InterceptResponse |
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Safeguard request failed.';
+    const safeguardLatencyMs = Date.now() - gatewayStartedAt;
+    const shieldResponse: Omit<InterceptResponse, 'responder'> = {
+      ...baseResponse,
+      status: 'SHIELD_ERROR',
+      detectionFlags: Array.from(new Set([
+        ...baseResponse.detectionFlags,
+        error instanceof SafeguardTimeoutError ? 'SAFEGUARD_TIMEOUT' : 'SAFEGUARD_ERROR',
+        'FAIL_SECURE',
+      ])),
+      safeguards: {
+        ...baseResponse.safeguards,
+        verdict: 'ADVERSARIAL',
+        analystReasoning: error instanceof SafeguardTimeoutError
+          ? 'Safeguard LLM timed out; traffic failed closed and requires manual review.'
+          : 'Safeguard LLM failed; traffic failed closed and requires manual review.',
+        latencyMs: safeguardLatencyMs,
+        localPrecheckLatencyMs: sanitization.latencyMs,
+        safeguardLatencyMs,
+        gatewayLatencyMs: Date.now() - gatewayStartedAt,
+      },
+    };
     log('warn', 'safeguard_failed', {
       requestId,
       error: message,
       modelId: typeof input.metadata?.safeguardModelId === 'string' ? input.metadata.safeguardModelId : safeguardsModelId,
+      gatewayAction: shieldResponse.status,
+      latencyMs: safeguardLatencyMs,
     });
-    res.status(502).json({ error: message });
+    res.status(202).json(shieldResponse);
     return;
   }
 

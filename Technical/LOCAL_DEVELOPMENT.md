@@ -97,6 +97,7 @@ Backend env option:
 - `SAFEGUARDS_API_BASE_URL`
 - `SAFEGUARDS_API_KEY`
 - `SAFEGUARDS_MODEL_ID`
+- `SAFEGUARDS_TIMEOUT_MS` (optional; default `30000`, bounded to 1s-120s)
 
 Purpose of the UI fields under Analyst Chat **System Status** settings:
 
@@ -104,7 +105,7 @@ Purpose of the UI fields under Analyst Chat **System Status** settings:
 - **Safeguard Model ID**: Browser-local model override for the firewall judge.
 - **Safeguard API Key**: Browser-memory-only key override sent to the local backend with Analyst Chat intercept requests. It is not written to localStorage.
 
-The safeguard judge must return a structured JSON verdict with exactly `{"verdict":"CLEAN|SUSPICIOUS|ADVERSARIAL","analystReasoning":"brief reason"}`. Legacy decision-shaped payloads such as `ALLOW_AND_FORWARD`, malformed JSON, or non-JSON output are no longer normalized into an allow path; they fail secure to `SUSPICIOUS` / `QUEUED`. If the safeguard judge is unavailable or rejects the request, `/v1/intercept` fails closed and does not call the downstream responder.
+The safeguard judge must return a structured JSON verdict with exactly `{"verdict":"CLEAN|SUSPICIOUS|ADVERSARIAL","analystReasoning":"brief reason"}`. Legacy decision-shaped payloads such as `ALLOW_AND_FORWARD`, malformed JSON, or non-JSON output are no longer normalized into an allow path; they fail secure to `SUSPICIOUS` / `QUEUED`. If the safeguard judge times out, is unavailable, or rejects the request, `/v1/intercept` returns structured `SHIELD_ERROR` telemetry, does not call the downstream responder, and the frontend activates Global System Pause. The browser also aborts a stuck `/v1/intercept` call after 45s as a backup.
 
 ### Optional: Live Downstream LLM Testing
 
@@ -223,7 +224,7 @@ Safeguard observability note: every safeguard call emits structured JSON log eve
 
 Detection signal note: the Metrics **Detection Signals** card is a prompt-count rollup by detection family. Local-review and Firestore-backed views share the same aggregation helpers. **Forbidden Phrase Hits** includes both `FORBIDDEN_TOPIC` and future `FORBIDDEN_PHRASE` flags, and **Obfuscation Hits** counts any stored obfuscation technique shown in prompt details rather than only `OBFUSCATED_INSTRUCTION`.
 
-Sanitizer note: the current runtime now treats any recognized obfuscation signal as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. It also flags forced-prefix injection, anti-sanitization/no-disclaimer clauses, persona assignment plus unrestricted-capability language, and all-caps hyphenated persona handles (`ALLCAPS_PERSONA` is telemetry-only). If you are testing encoded, transformed, or cipher-like prompts, expect the local firewall to block them at the highest severity even before a decoded policy phrase is confirmed. Entropy also follows the shared live policy: `<= 3.6` stays allowed on entropy grounds, `> 3.6` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
+Sanitizer note: the current runtime treats recognized decode/structural obfuscation signals as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. Covered local test families include byte-delimited Hex, binary, ASCII decimal, A1Z26, URL/HTML/unicode escapes, leetspeak, ROT13, reverse text, NATO phonetic, Morse, vertical reflow, and recursive decode chains. Pig Latin is the exception: it is detected as `PIG_LATIN` and routed to `Suspicious` review without decoding unless another stronger signal fires. The sanitizer also flags forced-prefix injection, anti-sanitization/no-disclaimer clauses, persona assignment plus unrestricted-capability language, and all-caps hyphenated persona handles (`ALLCAPS_PERSONA` is telemetry-only). Entropy follows the shared live policy: `<= 3.6` stays allowed on entropy grounds, `> 3.6` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
 
 Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`.
 

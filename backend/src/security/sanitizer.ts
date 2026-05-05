@@ -28,15 +28,20 @@ interface SensitivePattern {
   regex: RegExp;
 }
 
+interface CreditCardMatch {
+  start: number;
+  end: number;
+  raw: string;
+  digits: string;
+}
+
 const SENSITIVE_PATTERNS: SensitivePattern[] = [
   { name: 'EMAIL', regex: /[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/g },
-  { name: 'PHONE', regex: /(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/g },
+  { name: 'PHONE', regex: /(?<!\d)(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/g },
   { name: 'AWS_KEY', regex: /AKIA[0-9A-Z]{16}/g },
   { name: 'PRIVATE_KEY', regex: /-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g },
   { name: 'IP_ADDRESS', regex: /\b(?:\d{1,3}\.){3}\d{1,3}\b/g },
-  { name: 'CREDIT_CARD', regex: /\b(?:\d[ -]*?){13,16}\b/g },
   { name: 'SSN', regex: /\b\d{3}-\d{2}-\d{4}\b/g },
-  { name: 'API_KEY', regex: /\b[0-9a-fA-F]{32,64}\b/g },
   { name: 'JWT', regex: /\beyJ[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\.[A-Za-z0-9-_]+\b/g },
   { name: 'CANARY_TOKEN', regex: /COUNTERSPY_CANARY_TOKEN_[0-9a-fA-F-]{36}/g },
   { name: 'SECRET_KEY', regex: /(?:secret[-_]?key|password|passwd|api[-_]?key|token)(?:\s+is\s+|\s*[:=]\s*)([^\s]+)/gi },
@@ -44,6 +49,9 @@ const SENSITIVE_PATTERNS: SensitivePattern[] = [
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
 const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
+const CREDIT_CARD_PATTERN = /(?<![A-Za-z0-9])(?:\d[ -]?){12,18}\d(?![A-Za-z0-9])/g;
+const CREDIT_CARD_IIN_PREFIXES = /^(?:4|5[1-5]|2[2-7]|3[47]|3(?:0[0-5]|[68])|6(?:011|5)|35(?:2[89]|[3-8])|62)/;
+const VALID_CREDIT_CARD_LENGTHS = new Set([13, 14, 15, 16, 19]);
 const FORCED_PREFIX_PATTERNS = [
   /^\s*(?:always\s+)?(?:start|begin|open)(?:\s+(?:your\s+)?(?:response|reply|message|answer))?\s+(?:with|by)\b/i,
   /^\s*(?:respond|reply|answer)\s+only\s+with\b/i,
@@ -91,7 +99,21 @@ const OPERATIONAL_KEYWORDS = [
 
 const ZERO_WIDTH_CHAR_REGEX = /[\u200B-\u200F\u202A-\u202E\u2060-\u206F\uFEFF]/g;
 const BASE64_SEGMENT_REGEX = /(?:^|[^A-Za-z0-9+/=])([A-Za-z0-9+/]{20,}={0,2})(?=$|[^A-Za-z0-9+/=])/g;
-const HEX_SEGMENT_REGEX = /\b(?:0x)?(?:[A-Fa-f0-9]{2}){12,}\b/g;
+const HEX_SEGMENT_PATTERNS = [
+  /\b[0-9a-fA-F]{16,}\b/g,
+  /(?:0x[0-9a-fA-F]{2}[\s,]*){8,}/g,
+  /(?:\\x[0-9a-fA-F]{2}){8,}/g,
+  /(?:\b[0-9a-fA-F]{2}\b[\s,]+){7,}\b[0-9a-fA-F]{2}\b/g,
+];
+const BINARY_SEGMENT_PATTERNS = [
+  /(?:[01]{8}[\s,;|]+){7,}[01]{8}/g,
+  /(?:[01]{8}\n+){7,}[01]{8}/g,
+  /(?<![01])[01]{64,}(?![01])/g,
+];
+const ASCII_DECIMAL_SEGMENT_REGEX =
+  /(?:\b(?:[3-9]\d|1[01]\d|12[0-6])\b[\s,;]+){7,}\b(?:[3-9]\d|1[01]\d|12[0-6])\b/g;
+const A1Z26_SEGMENT_REGEX =
+  /(?<![0-9])(?:(?:0|0?[1-9]|1[0-9]|2[0-6])[\s\-.,/]+){7,}(?:0|0?[1-9]|1[0-9]|2[0-6])(?![0-9])/g;
 const URL_SEGMENT_REGEX = /(?:%[0-9A-Fa-f]{2}){6,}/g;
 const HTML_ENTITY_SEGMENT_REGEX = /(?:&#(?:x[0-9A-Fa-f]+|\d+);){4,}/g;
 const UNICODE_ESCAPE_SEGMENT_REGEX = /(?:(?:\\u[0-9A-Fa-f]{4})|(?:\\x[0-9A-Fa-f]{2})){2,}/g;
@@ -101,6 +123,28 @@ const BRAILLE_SEGMENT_REGEX = /(?:[\u2800-\u28FF]+\s*){2,}/gu;
 const REGIONAL_INDICATOR_SEGMENT_REGEX = /(?:[\u{1F1E6}-\u{1F1FF}]\s*){2,}/gu;
 const MAX_DECODE_DEPTH = 3;
 const MAX_DECODE_SEGMENTS = 24;
+const MIN_BINARY_BYTES = 8;
+const MAX_BINARY_BYTES = 4096;
+const BINARY_PRINTABLE_THRESHOLD = 0.85;
+const MIN_A1Z26_LETTERS = 8;
+const MAX_A1Z26_LETTERS = 2048;
+const MIN_PIG_LATIN_TOKENS = 8;
+const PIG_LATIN_RATIO_THRESHOLD = 0.4;
+const COMMON_BIGRAMS = new Set([
+  'th', 'he', 'in', 'er', 'an', 're', 'on', 'at', 'en', 'nd', 'ti', 'es', 'or', 'te', 'of',
+  'ed', 'is', 'it', 'al', 'ar', 'st', 'to', 'nt', 'ng', 'se', 'ha', 'as', 'ou', 'io', 'le',
+  've', 'co', 'me', 'de', 'hi', 'ri', 'ro', 'ic', 'ne', 'ea', 'ra', 'ce', 'li', 'ch', 'll',
+  'be', 'ma', 'si', 'om', 'ur', 'ca', 'el', 'ta', 'la', 'ns', 'di', 'fo',
+]);
+const COMMON_AY_WORDS = new Set([
+  'day', 'way', 'say', 'may', 'play', 'stay', 'pay', 'ray', 'gay', 'lay',
+  'bay', 'hay', 'jay', 'nay', 'tray', 'spray', 'stray', 'today', 'away',
+  'okay', 'anyway', 'display', 'betray', 'delay', 'essay', 'decay', 'relay',
+  'subway', 'halfway', 'highway', 'doorway', 'runway', 'midway', 'always',
+  'sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday',
+  'yesterday', 'everyday', 'someday', 'holiday', 'birthday', 'yay', 'hooray',
+  'hurray',
+]);
 const SUSPICIOUS_ENTROPY_THRESHOLD = 4.0;
 const ADVERSARIAL_ENTROPY_THRESHOLD = 4.8;
 type DecodeTelemetry = 'plain_text' | 'single_hop_decode' | 'recursive_decode';
@@ -108,6 +152,10 @@ type ObfuscationSignal =
   | 'URL_ENCODING'
   | 'HTML_ENTITIES'
   | 'UNICODE_ESCAPES'
+  | 'BINARY_ENCODING'
+  | 'ASCII_DECIMAL'
+  | 'A1Z26'
+  | 'PIG_LATIN'
   | 'COMPATIBILITY_GLYPHS'
   | 'SYMBOL_SUBSTITUTION'
   | 'LEETSPEAK'
@@ -173,6 +221,54 @@ function hasPersonaInjection(prompt: string): boolean {
 
 function hasPairedResponseInjection(prompt: string): boolean {
   return PAIRED_RESPONSE_REGEX.test(prompt);
+}
+
+function passesLuhn(digits: string): boolean {
+  let sum = 0;
+  let alternate = false;
+
+  for (let index = digits.length - 1; index >= 0; index -= 1) {
+    let value = digits.charCodeAt(index) - 48;
+    if (alternate) {
+      value *= 2;
+      if (value > 9) value -= 9;
+    }
+    sum += value;
+    alternate = !alternate;
+  }
+
+  return sum % 10 === 0;
+}
+
+function findCreditCards(text: string): CreditCardMatch[] {
+  const matches: CreditCardMatch[] = [];
+
+  for (const match of text.matchAll(CREDIT_CARD_PATTERN)) {
+    const raw = match[0];
+    const digits = raw.replace(/[ -]/g, '');
+    if (!VALID_CREDIT_CARD_LENGTHS.has(digits.length)) continue;
+    if (!CREDIT_CARD_IIN_PREFIXES.test(digits)) continue;
+    if (!passesLuhn(digits)) continue;
+
+    const start = match.index ?? 0;
+    matches.push({
+      start,
+      end: start + raw.length,
+      raw,
+      digits,
+    });
+  }
+
+  return matches;
+}
+
+function redactCreditCardMatches(text: string): string {
+  return findCreditCards(text)
+    .sort((a, b) => b.start - a.start)
+    .reduce((next, match) =>
+      `${next.slice(0, match.start)}[REDACTED_CREDIT_CARD]${next.slice(match.end)}`,
+      text,
+    );
 }
 
 interface ReflowedPrompt {
@@ -669,8 +765,10 @@ function decodeBase64Segment(segment: string): string | null {
 }
 
 function decodeHexSegment(segment: string): string | null {
-  const normalizedSegment = segment.startsWith('0x') ? segment.slice(2) : segment;
-  if (normalizedSegment.length % 2 !== 0 || normalizedSegment.length < 24) return null;
+  const normalizedSegment = segment
+    .replace(/(?:0x|\\x)/gi, '')
+    .replace(/[^0-9a-fA-F]/g, '');
+  if (normalizedSegment.length % 2 !== 0 || normalizedSegment.length < 16) return null;
 
   try {
     const decoded = Buffer.from(normalizedSegment, 'hex').toString('utf8');
@@ -683,6 +781,66 @@ function decodeHexSegment(segment: string): string | null {
   } catch {
     return null;
   }
+}
+
+function decodeBinarySegment(segment: string): string | null {
+  const normalizedSegment = segment.replace(/[^01]/g, '');
+  if (normalizedSegment.length < MIN_BINARY_BYTES * 8) return null;
+  if (normalizedSegment.length > MAX_BINARY_BYTES * 8) return null;
+  if (normalizedSegment.length % 8 !== 0) return null;
+
+  let decoded = '';
+  for (let index = 0; index < normalizedSegment.length; index += 8) {
+    decoded += String.fromCharCode(parseInt(normalizedSegment.slice(index, index + 8), 2));
+  }
+
+  const printableRatio = decoded.split('').filter((char) => {
+    const code = char.charCodeAt(0);
+    return code === 9 || code === 10 || code === 13 || (code >= 32 && code < 127);
+  }).length / decoded.length;
+
+  return printableRatio >= BINARY_PRINTABLE_THRESHOLD ? decoded : null;
+}
+
+function decodeAsciiDecimalSegment(segment: string): string | null {
+  const values = segment.match(/\b(?:[3-9]\d|1[01]\d|12[0-6])\b/g) || [];
+  if (values.length < 8) return null;
+
+  const decoded = values.map((value) => String.fromCharCode(parseInt(value, 10))).join('');
+  const printableRatio = decoded.split('').filter((char) => {
+    const code = char.charCodeAt(0);
+    return code === 9 || code === 10 || code === 13 || (code >= 32 && code < 127);
+  }).length / decoded.length;
+
+  return printableRatio >= 0.85 ? decoded : null;
+}
+
+function englishBigramScore(value: string): number {
+  const compact = value.toLowerCase().replace(/[^a-z]/g, '');
+  if (compact.length < 2) return 0;
+  let hits = 0;
+  for (let index = 0; index < compact.length - 1; index += 1) {
+    if (COMMON_BIGRAMS.has(compact.slice(index, index + 2))) hits += 1;
+  }
+  return hits / (compact.length - 1);
+}
+
+function decodeA1Z26Segment(segment: string): string | null {
+  const tokens = segment.match(/\b(?:0|0?[1-9]|1[0-9]|2[0-6])\b/g);
+  if (!tokens) return null;
+
+  const values = tokens.map((token) => parseInt(token, 10));
+  if (values.some((value) => value < 0 || value > 26)) return null;
+
+  const letterCount = values.filter((value) => value > 0).length;
+  if (letterCount < MIN_A1Z26_LETTERS || letterCount > MAX_A1Z26_LETTERS) return null;
+
+  const decoded = values
+    .map((value) => (value === 0 ? ' ' : String.fromCharCode(96 + value)))
+    .join('')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return englishBigramScore(decoded) >= 0.3 ? decoded : null;
 }
 
 function decodeUrlSegment(segment: string): string | null {
@@ -795,13 +953,55 @@ function extractDecodedSegments(prompt: string): {
       usedObfuscation = true;
     }
 
-    const hexMatches = current.value.match(HEX_SEGMENT_REGEX) || [];
+    const hexMatches = HEX_SEGMENT_PATTERNS.flatMap((pattern) => current.value.match(pattern) || []);
     for (const match of hexMatches) {
       if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
       const decoded = decodeHexSegment(match);
       if (!decoded || seenSegments.has(decoded)) continue;
       seenSegments.add(decoded);
       decodedSegments.push(decoded);
+      const nextDepth = current.depth + 1;
+      queue.push({ value: decoded, depth: nextDepth });
+      maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
+      usedObfuscation = true;
+    }
+
+    const binaryMatches = BINARY_SEGMENT_PATTERNS.flatMap((pattern) => current.value.match(pattern) || []);
+    for (const match of binaryMatches) {
+      if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
+      const decoded = decodeBinarySegment(match);
+      if (!decoded || seenSegments.has(decoded)) continue;
+      seenSegments.add(decoded);
+      decodedSegments.push(decoded);
+      signals.add('BINARY_ENCODING');
+      const nextDepth = current.depth + 1;
+      queue.push({ value: decoded, depth: nextDepth });
+      maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
+      usedObfuscation = true;
+    }
+
+    const asciiDecimalMatches = current.value.match(ASCII_DECIMAL_SEGMENT_REGEX) || [];
+    for (const match of asciiDecimalMatches) {
+      if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
+      const decoded = decodeAsciiDecimalSegment(match);
+      if (!decoded || seenSegments.has(decoded)) continue;
+      seenSegments.add(decoded);
+      decodedSegments.push(decoded);
+      signals.add('ASCII_DECIMAL');
+      const nextDepth = current.depth + 1;
+      queue.push({ value: decoded, depth: nextDepth });
+      maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
+      usedObfuscation = true;
+    }
+
+    const a1z26Matches = current.value.match(A1Z26_SEGMENT_REGEX) || [];
+    for (const match of a1z26Matches) {
+      if (decodedSegments.length >= MAX_DECODE_SEGMENTS) break;
+      const decoded = decodeA1Z26Segment(match);
+      if (!decoded || seenSegments.has(decoded)) continue;
+      seenSegments.add(decoded);
+      decodedSegments.push(decoded);
+      signals.add('A1Z26');
       const nextDepth = current.depth + 1;
       queue.push({ value: decoded, depth: nextDepth });
       maxDecodeDepth = Math.max(maxDecodeDepth, nextDepth);
@@ -949,12 +1149,35 @@ function extractTransformedSegments(prompt: string): { segments: string[]; signa
   return { segments, signals };
 }
 
+function detectPigLatin(prompt: string): { score: number; isPigLatin: boolean; suspiciousTokens: string[] } {
+  const tokens = prompt
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .filter((token) => token.length >= 3);
+
+  if (tokens.length < MIN_PIG_LATIN_TOKENS) {
+    return { score: 0, isPigLatin: false, suspiciousTokens: [] };
+  }
+
+  const suspiciousTokens = tokens.filter((token) =>
+    /[a-z]{3,}ay$/.test(token) && !COMMON_AY_WORDS.has(token)
+  );
+  const score = suspiciousTokens.length / tokens.length;
+
+  return {
+    score,
+    isPigLatin: score >= PIG_LATIN_RATIO_THRESHOLD,
+    suspiciousTokens,
+  };
+}
+
 function detectStructuralObfuscation(prompt: string): ObfuscationSignal[] {
   const signals: ObfuscationSignal[] = [];
   if (END_SEQUENCE_REGEX.test(prompt)) signals.push('END_SEQUENCE');
   if (CHUNKING_REGEX.test(prompt)) signals.push('CHUNKING');
   if (VARIABLE_EXPANSION_REGEX.test(prompt)) signals.push('VARIABLE_EXPANSION');
   if (VERTICAL_TEXT_REGEX.test(prompt) || reflowVerticalText(prompt).hadVerticalRun) signals.push('VERTICAL_TEXT');
+  if (detectPigLatin(prompt).isPigLatin) signals.push('PIG_LATIN');
   if (hasSymbolSubstitutionObfuscation(prompt)) signals.push('SYMBOL_SUBSTITUTION');
   return signals;
 }
@@ -976,6 +1199,12 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
       detectionFlags.add(pattern.name);
       sanitized = sanitized.replace(pattern.regex, `[REDACTED_${pattern.name}]`);
     }
+  }
+
+  if (findCreditCards(prompt).length > 0) {
+    redactions.add('CREDIT_CARD');
+    detectionFlags.add('CREDIT_CARD');
+    sanitized = redactCreditCardMatches(sanitized);
   }
 
   for (const match of prompt.matchAll(REDACTED_PLACEHOLDER_REGEX)) {

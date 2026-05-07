@@ -13,6 +13,25 @@ const BackendInterceptResponseSchema = z.object({
   status: z.enum(['CLEAN', 'QUEUED', 'INTERCEPTED', 'SHIELD_ERROR']),
   sanitizedPrompt: z.string(),
   detectionFlags: z.array(z.string()),
+  instructionSimilarity: z.object({
+    highestRisk: z.enum(['medium', 'high']),
+    matchCount: z.number(),
+    topMatch: z.object({
+      targetId: z.string(),
+      targetHash: z.string(),
+      source: z.enum(['analyst_chat', 'bulk_ingest', 'ctf_chat', 'ctf_solve', 'playground', 'system']),
+      targetVerdict: z.enum(['CLEAN', 'SUSPICIOUS', 'ADVERSARIAL']).nullable(),
+      risk: z.enum(['low', 'medium', 'high']),
+      matchReasons: z.array(z.string()),
+      hammingDistance: z.number(),
+      hammingDistance2gram: z.number(),
+      hammingDistance4gram: z.number(),
+      cosineSimilarity: z.number().nullable(),
+      maxChunkSimilarity: z.number().nullable(),
+      attentionPooledChunkSimilarity: z.number().nullable(),
+      sandwichDelta: z.number().nullable(),
+    }).optional(),
+  }).optional(),
   safeguards: z.object({
     modelId: z.string(),
     verdict: z.enum(['CLEAN', 'SUSPICIOUS', 'ADVERSARIAL']),
@@ -24,6 +43,11 @@ const BackendInterceptResponseSchema = z.object({
     localPrecheckLatencyMs: z.number().optional(),
     safeguardLatencyMs: z.number().optional(),
     gatewayLatencyMs: z.number().optional(),
+    usage: z.object({
+      promptTokens: z.number().optional(),
+      completionTokens: z.number().optional(),
+      totalTokens: z.number().optional(),
+    }).optional(),
   }),
   responder: z.object({
     provider: z.enum(['openai_compatible', 'gemini']).optional(),
@@ -136,6 +160,25 @@ export interface BackendInterceptResponse {
   status: 'CLEAN' | 'QUEUED' | 'INTERCEPTED' | 'SHIELD_ERROR';
   sanitizedPrompt: string;
   detectionFlags: string[];
+  instructionSimilarity?: {
+    highestRisk: 'medium' | 'high';
+    matchCount: number;
+    topMatch?: {
+      targetId: string;
+      targetHash: string;
+      source: 'analyst_chat' | 'bulk_ingest' | 'ctf_chat' | 'ctf_solve' | 'playground' | 'system';
+      targetVerdict: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL' | null;
+      risk: 'low' | 'medium' | 'high';
+      matchReasons: string[];
+      hammingDistance: number;
+      hammingDistance2gram: number;
+      hammingDistance4gram: number;
+      cosineSimilarity: number | null;
+      maxChunkSimilarity: number | null;
+      attentionPooledChunkSimilarity: number | null;
+      sandwichDelta: number | null;
+    };
+  };
   safeguards: {
     modelId: string;
     verdict: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL';
@@ -147,6 +190,11 @@ export interface BackendInterceptResponse {
     localPrecheckLatencyMs?: number;
     safeguardLatencyMs?: number;
     gatewayLatencyMs?: number;
+    usage?: {
+      promptTokens?: number;
+      completionTokens?: number;
+      totalTokens?: number;
+    };
   };
   responder?: {
     provider?: 'openai_compatible' | 'gemini';

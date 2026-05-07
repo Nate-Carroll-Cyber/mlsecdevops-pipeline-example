@@ -4,6 +4,7 @@
 | :--- | :--- | :--- |
 | v2.0 | 2026-04-21 | Promotion to Beta: stabilized local demo stack, guarded backend responder path, Lara translation modes, Sam Spade governed intake, and layered defense funnel metrics. |
 | v2.1 | 2026-04-25 | Runtime sync: backend safeguard attribution is now structured in audit/metrics records, and blocked Sam Spade CTF content is masked as `Bad content.` on gameplay surfaces. |
+| v2.2 | 2026-05-07 | Instruction similarity monitor: backend pgvector memory now detects exact, loose-hash, SimHash, and semantic prompt matches before responder forwarding. Adversarial fingerprint reuse blocks; semantic overlap routes to suspicious review. The local demo database is clean on Postgres container recreation. |
 
 ---
 
@@ -141,6 +142,9 @@ Not every flagged log is suitable for the Golden Set. To ensure high-quality tra
 | `SYNTACTIC_PROBE` | High density of imperative constraints detected. | Check for "Ignore previous instructions" patterns. |
 | `PII_LEAK` | Redactor identified emails, keys, or SSNs. | Ensure redaction was successful; block if sensitive. |
 | `REGEX_BYPASS` | Input matched a known injection pattern. | Review the specific regex rule triggered in the log. |
+| `INSTRUCTION_SIMILARITY_MATCH` | Backend instruction memory found an exact, loose-hash, SimHash, or semantic match before responder forwarding. Fingerprint matches against stored adversarial records block; semantic matches queue as suspicious review. | For semantic matches, review the matched prompt family and decide whether to label or promote it. For adversarial fingerprint matches, verify the stored hash lineage and leave the block in place unless the source label was wrong. |
+
+Similarity Monitor reason labels map to specific backend criteria. `Exact Sha256` and `Loose Sha256` are strict equality checks against stored hashes. `Simhash 2gram`, `Simhash 3gram`, and `Simhash 4gram` indicate structural fingerprint proximity within the configured Hamming threshold (`<= 12` by default). `Embedding`, `Chunk Embedding`, `Attention Pool`, and `Sandwich Delta` are semantic/chunk signals and should be treated as review evidence unless a later deterministic rule is promoted.
 
 ---
 

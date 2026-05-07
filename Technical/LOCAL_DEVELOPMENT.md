@@ -203,8 +203,26 @@ This starts:
 
 - `counter-spy-backend` on `http://localhost:18080`
 - `counter-spy-frontend` on `http://localhost:3000`
+- `counter-spy-postgres` on host port `15432` for pgvector-backed instruction similarity memory
 
 The frontend uses Vite's proxy layer inside the container to reach the backend cleanly, so browser requests stay same-origin for `/v1/*` and `/healthz`.
+
+The instruction-monitor database is intentionally ephemeral in the demo stack. `counter-spy-postgres` stores `/var/lib/postgresql/data` on tmpfs, so `docker compose -f docker-compose.demo.yml up --build --force-recreate -d` recreates a clean database. The backend initializes the pgvector schema lazily on first use. Sam Spade session data is different: it remains in the named Docker SQLite volume so CTF sessions can survive normal backend/frontend rebuilds.
+
+Useful instruction-monitor env vars:
+
+- `INSTRUCTION_MONITOR_ENABLED`
+- `INSTRUCTION_MONITOR_DATABASE_URL`
+- `INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS`
+- `INSTRUCTION_MONITOR_EMBEDDINGS_ENABLED`
+- `INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL`
+- `INSTRUCTION_MONITOR_EMBEDDINGS_API_KEY`
+- `INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID`
+- `INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS`
+
+Normal frontend submissions do not generate embeddings in the browser. The backend generates whole-prompt and chunk embeddings when a valid OpenAI-compatible embeddings provider is configured through `INSTRUCTION_MONITOR_EMBEDDINGS_*` or the existing LLM/responder fallback variables. API callers can still supply `metadata.instructionEmbedding` or `metadata.instructionChunks` explicitly for controlled tests.
+
+Instruction-monitor routing note: exact SHA-256, loose SHA-256, and SimHash matches preserve the stored verdict. If the matched stored instruction was `ADVERSARIAL`, the new candidate is still blocked as `ADVERSARIAL`. Semantic whole-prompt or chunk-embedding matches are intentionally routed as `SUSPICIOUS` / review so analysts can validate overlap before promoting it into a deterministic block pattern.
 
 If you want Lara translation available in that Docker demo, make sure `.env.demo.local` exists before you bring the stack up.
 
@@ -224,9 +242,11 @@ Safeguard observability note: every safeguard call emits structured JSON log eve
 
 Detection signal note: the Metrics **Detection Signals** card is a prompt-count rollup by detection family. Local-review and Firestore-backed views share the same aggregation helpers. **Forbidden Phrase Hits** includes both `FORBIDDEN_TOPIC` and future `FORBIDDEN_PHRASE` flags, and **Obfuscation Hits** counts any stored obfuscation technique shown in prompt details rather than only `OBFUSCATED_INSTRUCTION`.
 
+Analyst Chat UI note: the Last Execution Results rail presents the local `Adversarial` / `Suspicious` alert first, followed by backend safeguard/monitor and Similarity Monitor evidence, then `Detections` badges. Shared help/info icons are hidden while modal overlays are open except when the icon is inside the active dialog content.
+
 Sanitizer note: the current runtime treats recognized decode/structural obfuscation signals as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. Covered local test families include byte-delimited Hex, binary, ASCII decimal, A1Z26, URL/HTML/unicode escapes, leetspeak, ROT13, reverse text, NATO phonetic, Morse, vertical reflow, and recursive decode chains. Pig Latin is the exception: it is detected as `PIG_LATIN` and routed to `Suspicious` review without decoding unless another stronger signal fires. The sanitizer also flags forced-prefix injection, anti-sanitization/no-disclaimer clauses, persona assignment plus unrestricted-capability language, and all-caps hyphenated persona handles (`ALLCAPS_PERSONA` is telemetry-only). Entropy follows the shared live policy: `<= 3.6` stays allowed on entropy grounds, `> 3.6` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
 
-Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`.
+Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`. The pgvector instruction-monitor database is not stored in a named volume in the demo stack.
 
 Note: in the current demo build, Sam Spade clean turns use the same governed path as Analyst Chat after local sanitizer and safeguard approval. When responder routing is enabled, the backend assembles the active Downstream Responder Prompt with admin-managed Sam Spade persona and scenario prompts before calling the responder. When responder routing is disabled, the safeguard verdict and latency are retained and the turn uses local responder passthrough. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.
 

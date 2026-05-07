@@ -1443,7 +1443,7 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     prompt.length > 2000
   ) {
     verdict = 'SUSPICIOUS';
-    reasons.push('prompt matched suspicious firewall criteria');
+    reasons.push('The prompt matched suspicious firewall criteria.');
   } else if (
     usedObfuscation ||
     obfuscationSignals.length > 0 ||
@@ -1451,13 +1451,13 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     transformedSignalsUsed.includes('COMPATIBILITY_GLYPHS')
   ) {
     verdict = 'SUSPICIOUS';
-    reasons.push('prompt used obfuscation or concealment techniques');
+    reasons.push('The prompt used obfuscation or concealment techniques.');
   } else if (languageSignals.isForeignLanguage || spellingObfuscationDetected) {
-    reasons.push('prompt triggered lightweight language or spelling recovery analysis');
+    reasons.push('The prompt triggered lightweight language or spelling recovery analysis.');
   } else if (redactions.size > 0) {
-    reasons.push('sensitive data was redacted before routing');
+    reasons.push('Sensitive data was redacted before routing.');
   } else {
-    reasons.push('no active firewall criteria matched');
+    reasons.push('No active firewall criteria matched.');
   }
 
   const latencyMs = performance.now() - start;

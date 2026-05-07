@@ -23,9 +23,11 @@ Analyst Chat and Responder runtime configuration are intentionally separate.
 
 ## 4. Decision Contract
 
-The safeguard path expects structured decisions such as `ALLOW_AND_FORWARD`, `BLOCK`, `QUEUE_FOR_REVIEW`, and `FAIL_SECURE`. The backend maps these decisions into Counter-Spy.ai outcomes such as `CLEAN`, `SUSPICIOUS`, `ADVERSARIAL`, or `PENDING_REVIEW` before audit and metrics processing.
+The safeguard path expects one structured JSON verdict contract: `{"verdict":"CLEAN|SUSPICIOUS|ADVERSARIAL","analystReasoning":"brief reason"}`. Legacy decision-shaped responses such as `ALLOW_AND_FORWARD`, `BLOCK`, `QUEUE_FOR_REVIEW`, or `FAIL_SECURE` are not accepted as allow-path output; malformed or schema-mismatched safeguard responses fail secure to `SUSPICIOUS` / `QUEUED`.
 
-The visible Firewall Prompt remains the reviewable policy baseline, including forbidden-category and gibberish/obfuscation guidance. Runtime inspection now uses a generated Safeguard Effective Prompt that combines that visible prompt with active guardrails policy, forbidden phrases, Knowledge Base excerpts, the backend-owned JSON verdict contract, and the neutral evidence contract. System Configuration previews and hashes that exact effective prompt.
+The instruction similarity monitor runs before responder forwarding. Exact SHA-256, loose SHA-256, and SimHash matches against stored adversarial instructions retain `ADVERSARIAL` severity and block. Semantic whole-prompt or chunk-embedding matches are `SUSPICIOUS` review evidence rather than automatic adversarial blocks.
+
+The Safeguard Effective Prompt is the reviewable policy baseline, including forbidden-category, gibberish/obfuscation guidance, and promoted few-shot examples. System Configuration previews, edits, and hashes that exact effective prompt.
 
 Audit and Metrics preserve backend safeguard attribution through `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, `backendReachedSafeguard`, `localPrecheckLatencyMs`, `backendSafeguardLatencyMs`, `backendGatewayLatencyMs`, and `responderLatencyMs`. These fields distinguish local pre-inference blocks from backend safeguard/model interventions and keep safeguard latency separate from local responder passthrough latency.
 

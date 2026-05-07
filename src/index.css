@@ -50,6 +50,19 @@
 .markdown-body code {
   @apply bg-muted px-1.5 py-0.5 rounded-md font-mono text-[11px] text-muted-foreground;
 }
+
+body:has([data-slot="dialog-overlay"]) [data-help-tooltip-root] {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+body:has([data-slot="dialog-overlay"]) [data-slot="dialog-content"] [data-help-tooltip-root] {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";

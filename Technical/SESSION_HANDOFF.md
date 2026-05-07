@@ -7,7 +7,11 @@ This page captures the current implementation state so a future Codex session ca
 - The Docker demo stack is the active local test path:
   - Frontend: `http://localhost:3000`
   - Backend health: `http://127.0.0.1:18080/healthz`
+  - pgvector Postgres: `localhost:15432`
   - Rebuild command: `docker compose -f /Users/nate/Documents/Counter-Spy.ai/docker-compose.demo.yml up --build -d`
+- The instruction similarity monitor is enabled in the demo backend and uses `counter-spy-postgres`. The Postgres data directory is tmpfs-backed, so recreating the container starts with a clean instruction database. Sam Spade SQLite data still persists in its named Docker volume.
+- Similarity routing now separates fingerprint and semantic evidence: exact/loose SHA-256 or SimHash matches against stored `ADVERSARIAL` records remain adversarial blocks, while semantic whole-prompt or chunk-embedding matches are suspicious review events.
+- Analyst Chat Last Execution Results now orders local verdict alert first, then backend safeguard/monitor and Similarity Monitor detail, then `Detections` badges. Shared help/info icons are hidden while modal overlays are active except inside the open dialog content.
 - The Safeguard LLM may be disabled during feature testing. Feature-vector extraction must still run because it is calculated before any Safeguard LLM forwarding.
 - Local review mode stores telemetry in memory. After a refresh, the Metrics card may show no feature-vector audit events until a new prompt is submitted.
 
@@ -60,6 +64,7 @@ The Metrics view has a **Feature Pressure** card.
 | Frontend deterministic sanitizer | `src/lib/sanitizer.ts` |
 | Backend deterministic sanitizer | `backend/src/security/sanitizer.ts` |
 | Safeguard orchestration and observability | `backend/src/server.ts` |
+| Instruction similarity monitor | `backend/src/services/instruction-monitor/` |
 
 ## Safeguard Contract and Observability
 
@@ -117,7 +122,7 @@ Last known checks for this work:
 - `npm run test` passed with 112 tests after binary, ASCII decimal, A1Z26, Pig Latin, credit-card, and safeguard timeout/fail-secure changes.
 - `npm run lint` passed.
 - `git diff --check` passed.
-- Docker demo stack is pending rebuild after this documentation pass.
+- Docker demo stack includes backend, frontend, and pgvector Postgres. Recreate Postgres when a clean instruction database is needed.
 
 ## Docs Updated
 

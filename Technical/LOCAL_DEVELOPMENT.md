@@ -220,7 +220,7 @@ Useful instruction-monitor env vars:
 - `INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID`
 - `INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS`
 
-Normal frontend submissions do not generate embeddings in the browser. The backend generates whole-prompt and chunk embeddings when a valid OpenAI-compatible embeddings provider is configured through `INSTRUCTION_MONITOR_EMBEDDINGS_*` or the existing LLM/responder fallback variables. API callers can still supply `metadata.instructionEmbedding` or `metadata.instructionChunks` explicitly for controlled tests.
+Normal frontend submissions do not generate embeddings in the browser. The backend generates whole-prompt and chunk embeddings when a dedicated local/OpenAI-compatible embeddings provider is configured through `INSTRUCTION_MONITOR_EMBEDDINGS_*`, or when the local LM Studio safeguard base URL is available. Embeddings do not inherit the generic responder or OpenAI LLM endpoint. API callers can still supply `metadata.instructionEmbedding` or `metadata.instructionChunks` explicitly for controlled tests.
 
 Instruction-monitor routing note: exact SHA-256, loose SHA-256, and SimHash matches preserve the stored verdict. If the matched stored instruction was `ADVERSARIAL`, the new candidate is still blocked as `ADVERSARIAL`. Semantic whole-prompt or chunk-embedding matches are intentionally routed as `SUSPICIOUS` / review so analysts can validate overlap before promoting it into a deterministic block pattern.
 

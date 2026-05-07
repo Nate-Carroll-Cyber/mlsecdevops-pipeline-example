@@ -124,7 +124,7 @@ External services must authenticate with the Counter-Spy gateway using **Bearer 
 | `sessionId` | `string` | The identifier for the current interaction session. |
 | `metadata` | `object` | Optional key-value pairs, including browser-local safeguard Base URL, safeguard Model ID, memory-only safeguard API key override, `providerLlmRoutingEnabled` for direct/API local-only callers, `responderLlmRoutingEnabled`, responder provider, responder Base URL, responder Model ID, memory-only responder API key override, the active downstream responder prompt, and Sam Spade responder persona/scenario prompts for `ctf_chat` traffic. |
 
-When the instruction monitor is enabled, API callers may provide `metadata.instructionEmbedding` and `metadata.instructionChunks` with precomputed vectors. Normal frontend submissions can omit these values; the backend generates whole-prompt and chunk embeddings when `INSTRUCTION_MONITOR_EMBEDDINGS_*` or compatible fallback provider settings are available.
+When the instruction monitor is enabled, API callers may provide `metadata.instructionEmbedding` and `metadata.instructionChunks` with precomputed vectors. Normal frontend submissions can omit these values; the backend generates whole-prompt and chunk embeddings when `INSTRUCTION_MONITOR_EMBEDDINGS_*` or the local LM Studio safeguard base URL is available. Embeddings do not inherit the generic responder or OpenAI LLM endpoint.
 
 **Safeguard Judge Input Contract:**
 

@@ -60,7 +60,7 @@ const EnvSchema = z.object({
     .transform((value) => value === undefined ? true : value.toLowerCase() !== 'false'),
   INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL: z.string().url().optional(),
   INSTRUCTION_MONITOR_EMBEDDINGS_API_KEY: z.string().optional(),
-  INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID: z.string().min(1).default('text-embedding-3-small'),
+  INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID: z.string().min(1).default('gpt-oss-safeguard-20b'),
   INSTRUCTION_MONITOR_EMBEDDINGS_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(60_000).default(15_000),
   INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS: z.coerce.number().int().min(0).max(32).default(8),
 });
@@ -170,13 +170,60 @@ function getOpenAiCompatibleEndpoint(baseUrl: string) {
         : `${normalizedBaseUrl}/chat/completions`;
 }
 
-function getOpenAiCompatibleEmbeddingsEndpoint(baseUrl: string) {
+function getOpenAiCompatibleEmbeddingsEndpoint(baseUrl: string, options?: { postToRoot?: boolean }) {
   const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
+  if (options?.postToRoot) {
+    const rootBaseUrl = normalizedBaseUrl
+      .replace(/\/chat\/completions$/, '')
+      .replace(/\/embeddings$/, '');
+    return `${rootBaseUrl}/`;
+  }
   return normalizedBaseUrl.endsWith('/embeddings')
     ? normalizedBaseUrl
+    : normalizedBaseUrl.endsWith('/chat/completions')
+      ? normalizedBaseUrl.replace(/\/chat\/completions$/, '/embeddings')
     : normalizedBaseUrl.endsWith('/v1')
       ? `${normalizedBaseUrl}/embeddings`
       : `${normalizedBaseUrl}/embeddings`;
+}
+
+function isLocalOpenAiCompatibleBaseUrl(baseUrl: string | undefined): boolean {
+  if (!baseUrl) return false;
+  try {
+    const parsedUrl = new URL(baseUrl);
+    return parsedUrl.hostname === 'localhost' ||
+      parsedUrl.hostname === '127.0.0.1' ||
+      parsedUrl.hostname.startsWith('192.168.') ||
+      parsedUrl.hostname.startsWith('10.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(parsedUrl.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function getInstructionEmbeddingsRuntimeConfig(): {
+  baseUrl?: string;
+  apiKey?: string;
+  modelId?: string;
+  source: 'explicit' | 'local_safeguard' | 'disabled';
+} {
+  if (env.INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL) {
+    return {
+      baseUrl: env.INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL,
+      apiKey: env.INSTRUCTION_MONITOR_EMBEDDINGS_API_KEY,
+      modelId: env.INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID,
+      source: 'explicit',
+    };
+  }
+  if (isLocalOpenAiCompatibleBaseUrl(env.SAFEGUARDS_API_BASE_URL)) {
+    return {
+      baseUrl: env.SAFEGUARDS_API_BASE_URL,
+      apiKey: env.INSTRUCTION_MONITOR_EMBEDDINGS_API_KEY || env.SAFEGUARDS_API_KEY,
+      modelId: env.INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID || safeguardsModelId,
+      source: 'local_safeguard',
+    };
+  }
+  return { source: 'disabled' };
 }
 
 function extractOpenAiCompatibleText(payload: {
@@ -536,9 +583,8 @@ async function generateInstructionMonitorEmbeddings(text: string): Promise<{
   chunks?: InstructionChunkInput[];
 } | undefined> {
   if (!env.INSTRUCTION_MONITOR_EMBEDDINGS_ENABLED) return undefined;
-  const baseUrl = env.INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL || env.LLM_API_BASE_URL || env.RESPONDER_API_BASE_URL;
-  const apiKey = env.INSTRUCTION_MONITOR_EMBEDDINGS_API_KEY || env.LLM_API_KEY || env.RESPONDER_API_KEY;
-  if (!baseUrl || !apiKey) return undefined;
+  const embeddingsRuntime = getInstructionEmbeddingsRuntimeConfig();
+  if (!embeddingsRuntime.baseUrl || !embeddingsRuntime.modelId) return undefined;
 
   const chunkTexts = env.INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS > 0
     ? chunkText(text).filter((chunk) => chunk.trim()).slice(0, env.INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS)
@@ -548,15 +594,17 @@ async function generateInstructionMonitorEmbeddings(text: string): Promise<{
   const timeout = setTimeout(() => controller.abort(), env.INSTRUCTION_MONITOR_EMBEDDINGS_TIMEOUT_MS);
 
   try {
-    const response = await fetch(getOpenAiCompatibleEmbeddingsEndpoint(baseUrl), {
+    const response = await fetch(getOpenAiCompatibleEmbeddingsEndpoint(embeddingsRuntime.baseUrl, {
+      postToRoot: embeddingsRuntime.source === 'local_safeguard',
+    }), {
       method: 'POST',
       signal: controller.signal,
       headers: {
         'content-type': 'application/json',
-        authorization: `Bearer ${apiKey}`,
+        ...(embeddingsRuntime.apiKey ? { authorization: `Bearer ${embeddingsRuntime.apiKey}` } : {}),
       },
       body: JSON.stringify({
-        model: env.INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID,
+        model: embeddingsRuntime.modelId,
         input: inputs,
       }),
     });
@@ -564,7 +612,8 @@ async function generateInstructionMonitorEmbeddings(text: string): Promise<{
     if (!response.ok) {
       log('warn', 'instruction_embedding_provider_rejected', {
         status: response.status,
-        modelId: env.INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID,
+        modelId: embeddingsRuntime.modelId,
+        source: embeddingsRuntime.source,
       });
       return undefined;
     }
@@ -596,7 +645,8 @@ async function generateInstructionMonitorEmbeddings(text: string): Promise<{
         : 'Instruction embedding request failed.';
     log('warn', 'instruction_embedding_failed', {
       error: message,
-      modelId: env.INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID,
+      modelId: embeddingsRuntime.modelId,
+      source: embeddingsRuntime.source,
     });
     return undefined;
   } finally {
@@ -1402,6 +1452,7 @@ app.use((req: Request, res: Response, next) => {
 });
 
 app.get('/healthz', (_req: Request, res: Response) => {
+  const embeddingsRuntime = getInstructionEmbeddingsRuntimeConfig();
   res.status(200).json({
     ok: true,
     service: 'counter-spy-backend',
@@ -1430,11 +1481,12 @@ app.get('/healthz', (_req: Request, res: Response) => {
       embeddingDimensions: instructionMonitorConfig.INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS,
       embeddings: {
         enabled: env.INSTRUCTION_MONITOR_EMBEDDINGS_ENABLED,
-        configured: Boolean(
-          (env.INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL || env.LLM_API_BASE_URL || env.RESPONDER_API_BASE_URL) &&
-          (env.INSTRUCTION_MONITOR_EMBEDDINGS_API_KEY || env.LLM_API_KEY || env.RESPONDER_API_KEY)
-        ),
-        modelId: env.INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID,
+        configured: Boolean(embeddingsRuntime.baseUrl),
+        source: embeddingsRuntime.source,
+        baseUrl: embeddingsRuntime.baseUrl ? getOpenAiCompatibleEmbeddingsEndpoint(embeddingsRuntime.baseUrl, {
+          postToRoot: embeddingsRuntime.source === 'local_safeguard',
+        }) : null,
+        modelId: embeddingsRuntime.modelId || null,
         maxChunks: env.INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS,
       },
     },

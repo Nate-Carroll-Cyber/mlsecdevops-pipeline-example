@@ -214,6 +214,7 @@ function getBackendSafeguardVerdict(log: any): string | undefined {
 
 function reachedBackendSafeguard(log: any): boolean {
   if (log.backendReachedSafeguard === true) return true;
+  if (log.backendReachedSafeguard === false) return false;
   if (getBackendGatewayStatus(log)) return true;
   if (getBackendSafeguardVerdict(log)) return true;
   if (typeof log.responderStatus === 'string' && log.responderStatus.trim()) return true;

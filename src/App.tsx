@@ -4958,6 +4958,13 @@ export default function App() {
                               : backendStatus === 'CLEAN'
                                 ? 'border-green-500/30 bg-green-500/10 text-green-600'
                                 : 'border-amber-500/30 bg-amber-500/10 text-amber-600';
+                          const flaggedChunksClass = backendUltimateDetectionLevel === DetectionLevel.ADVERSARIAL
+                            ? 'border-destructive/30 bg-destructive/10 text-destructive'
+                            : backendUltimateDetectionLevel === DetectionLevel.SUSPICIOUS
+                              ? 'border-amber-500/30 bg-amber-500/10 text-amber-600'
+                              : backendUltimateDetectionLevel === DetectionLevel.INFORMATIONAL
+                                ? 'border-sky-500/30 bg-sky-500/10 text-sky-600'
+                                : 'border-green-500/30 bg-green-500/10 text-green-600';
                           const hasSemanticSimilarity = Boolean(
                             similarityTopMatch?.matchReasons?.some((reason) =>
                               ['embedding', 'chunk_embedding', 'attention_pool', 'sandwich_delta'].includes(reason)
@@ -5149,12 +5156,12 @@ export default function App() {
                                   </div>
                                   {/* Flagged Chunks Display */}
                                   {displaySanitization!.suspiciousChunks && displaySanitization!.suspiciousChunks.length > 0 && (
-                                    <div className="mt-2 p-2 bg-destructive/10 border border-destructive/20 rounded-md">
-                                      <p className="text-[10px] font-semibold text-destructive mb-1 flex items-center gap-1.5">
+                                    <div className={`mt-2 rounded-md border p-2 ${flaggedChunksClass}`}>
+                                      <p className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold">
                                         Flagged Chunks:
                                         <HelpTooltip text="Prompt segments that crossed the entropy threshold and may contain encoded, compressed, or obfuscated content." />
                                       </p>
-                                      <ul className="list-disc pl-3 text-[10px] text-muted-foreground break-all">
+                                      <ul className="list-disc pl-3 text-[10px] opacity-80 break-all">
                                         {displaySanitization!.suspiciousChunks.map((chunk, idx) => (
                                           <li key={idx}>"{chunk}"</li>
                                         ))}

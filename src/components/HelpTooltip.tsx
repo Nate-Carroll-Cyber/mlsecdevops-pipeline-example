@@ -15,7 +15,7 @@ export function HelpTooltip({ text, widthClassName = 'w-56', align = 'center' }:
         : 'left-1/2 -translate-x-1/2';
 
   return (
-    <span className="group relative z-[60] inline-flex items-center">
+    <span data-help-tooltip-root className="group relative inline-flex items-center">
       <button
         type="button"
         className="inline-flex h-4 w-4 items-center justify-center rounded-full text-muted-foreground/70 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
@@ -24,7 +24,7 @@ export function HelpTooltip({ text, widthClassName = 'w-56', align = 'center' }:
         <Info className="h-3.5 w-3.5" />
       </button>
       <span
-        className={`pointer-events-none absolute top-[calc(100%+8px)] z-[70] hidden rounded-md border border-border bg-popover px-3 py-2 text-[11px] font-normal normal-case leading-relaxed text-popover-foreground shadow-md group-hover:block group-focus-within:block ${alignmentClassName} ${widthClassName}`}
+        className={`pointer-events-none absolute top-[calc(100%+8px)] z-20 hidden rounded-md border border-border bg-popover px-3 py-2 text-[11px] font-normal normal-case leading-relaxed text-popover-foreground shadow-md group-hover:block group-focus-within:block ${alignmentClassName} ${widthClassName}`}
       >
         {text}
       </span>

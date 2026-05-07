@@ -1,6 +1,6 @@
 # Technical Reference & Architecture Specification: Counter-Spy.ai
 
-**Version:** v2.1  
+**Version:** v2.2
 **Status:** Beta / Promotion to Beta  
 **Classification:** Proprietary / AppSec Engineering  
 
@@ -11,15 +11,15 @@
 Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure Large Language Model (LLM) interactions. This multi-stage defense-in-depth strategy ensures that adversarial payloads are neutralized at the edge before reaching high-compute inference engines.
 
 ### 1.0 Current Beta Implementation
-The current Beta is a React/Vite/Firebase application with a TypeScript/Express backend gateway. Governance is still enforced first by local TypeScript sanitization logic in the client, while backend routes now own the secure intercept path, downstream responder handoff, manual Lara translation proxying, and the Sam Spade CTF API. Firebase Authentication still provides user identity and Firestore still stores audit logs, knowledge-base content, and synchronized governance configuration.
+The current Beta is a React/Vite/Firebase application with a TypeScript/Express backend gateway. Governance is still enforced first by local TypeScript sanitization logic in the client, while backend routes now own the secure intercept path, pgvector-backed instruction similarity memory, downstream responder handoff, manual Lara translation proxying, and the Sam Spade CTF API. Firebase Authentication still provides user identity and Firestore still stores audit logs, knowledge-base content, and synchronized governance configuration.
 
 ### 1.1 Logical Flow
 The system bifurcates the request lifecycle into two distinct phases:
 1.  **The Shield (Local Sanitization & Governance):** A low-latency engine that performs heuristic analysis, PII redaction, and policy enforcement.
-2.  **The Sword (Backend-Mediated Inference):** The backend `/v1/intercept` route calls an OpenAI-compatible safeguard judge before any downstream responder receives a prompt. Analyst Chat safeguard configuration remains separate from responder configuration, allowing Counter-Spy.ai to sit between different frontier model providers. Credentials can remain backend-owned, while the UI can select a safeguard provider preset (`LM_STUDIO` or `OPENAI`), provide browser-local Base URL / Model ID / memory-only API key overrides for the safeguard judge, and manage separate provider settings for clean responder traffic.
+2.  **The Sword (Backend-Mediated Inference):** The backend `/v1/intercept` route runs deterministic prechecks, compares clean candidates against the pgvector-backed instruction similarity monitor when enabled, and calls an OpenAI-compatible safeguard judge before any downstream responder receives a prompt. Analyst Chat safeguard configuration remains separate from responder configuration, allowing Counter-Spy.ai to sit between different frontier model providers. Credentials can remain backend-owned, while the UI can select a safeguard provider preset (`LM_STUDIO` or `OPENAI`), provide browser-local Base URL / Model ID / memory-only API key overrides for the safeguard judge, and manage separate provider settings for clean responder traffic.
     *   **Current prompt-contract note:** The firewall stage is guided by one editable Safeguard Effective Prompt stored in System Configuration. That prompt contains the runtime JSON verdict contract, backend-owned neutral evidence contract, forbidden-category guidance, and promoted few-shot examples. System Configuration displays and hashes that exact prompt so reviewable config and runtime payload stay aligned. The current recommended effective prompt hash is `89ab9212ae0d97bac17e2072ec5851e76a3991b766602c9f5e5bcca127499a9d`. The safeguard judge receives the effective prompt plus a candidate prompt after deterministic normalization/redaction and neutral preprocessing evidence, not the local sanitizer's final verdict or reasoning. Only prompts the safeguard judge returns as `CLEAN` are forwarded to the responder model with the active Downstream Responder Prompt as its instruction when responder routing is enabled; otherwise clean traffic returns local responder passthrough. Legacy decision-shaped safeguard payloads, malformed JSON, and non-JSON outputs are treated as `SUSPICIOUS` and queued for review rather than normalized into an allow path. Safeguard upstream calls are bounded by `SAFEGUARDS_TIMEOUT_MS` (default 30s); timeout or provider failure returns structured `SHIELD_ERROR` fail-secure telemetry instead of an unstructured transport error.
     *   **Current forbidden-category note:** Configured forbidden phrases are enforced locally and included in the Safeguard Effective Prompt, which remains the reviewable source for baseline category and gibberish guidance.
-    *   **Current telemetry and gating note:** When the provider returns usage metadata, the gateway surfaces prompt/completion/total token counts. The browser can also apply an operator-supplied max context window as a pre-submit gate in Analyst Chat and the Prompt Playground, then reuse that same value to compute post-run context utilization for audit review.
+    *   **Current telemetry and gating note:** When the responder provider returns usage metadata, the gateway surfaces prompt/completion/total token counts. When responder routing is disabled for local passthrough review, the gateway also surfaces OpenAI-compatible safeguard judge usage from LM Studio/OpenAI-style payloads so safeguard token consumption is not lost. The browser can apply an operator-supplied max context window as a pre-submit gate in Analyst Chat and the Prompt Playground, then reuse that same value with either responder or safeguard usage to compute post-run context utilization for audit review.
 *   **Manual Translation Gateway (`/v1/translate`)**:
     *   Owns Lara Translate access for the Playground.
     *   Runs only when an analyst explicitly triggers the Normalize - Translate pipeline.
@@ -40,6 +40,7 @@ The Beta implementation adheres to a **Fail-Secure** philosophy across all criti
 | :--- | :--- | :--- | :--- |
 | **Shield Engine** | Timeout / 5xx Error | **Fail-Secure** | Request is blocked; user receives a 503 Service Unavailable. |
 | **Safeguard Judge** | Timeout / provider failure | **Fail-Secure** | Backend returns `202` with `SHIELD_ERROR`, `SAFEGUARD_TIMEOUT` or `SAFEGUARD_ERROR`, and `FAIL_SECURE`; the frontend marks the audit record `PENDING_REVIEW` and activates Global System Pause. |
+| **Instruction Similarity Monitor** | Database unavailable or embedding provider failure | **Best-Effort / Hash Fallback** | The gateway logs the monitor failure and continues with deterministic prechecks plus safeguard evaluation. If embeddings fail but the database is reachable, exact/loose hash and SimHash comparison still run. |
 | **Frontend Intercept Call** | Backend route hangs beyond 45s | **Fail-Secure** | Browser aborts `/v1/intercept`, activates Global System Pause, records `SHIELD_ERROR`/`SAFEGUARD_TIMEOUT`, and does not run local fallback inference. |
 | **Governance Sync** | Database Connection Loss | **Best-Effort Sync** | The app keeps its current in-memory/default governance state. It does not automatically force `isGlobalPause: true` on startup or sync failure. |
 | **Sanitization** | ReDoS / Logic Error | **Fail-Secure** | If sanitization latency exceeds 1,000ms, the triggering request is blocked before inference, logged as `Adversarial` with `ReDoS_ATTEMPT_DETECTED`, and automatic Global System Pause is activated for subsequent traffic. |
@@ -141,6 +142,8 @@ Future external services would authenticate with the Counter-Spy gateway using *
 | `sessionId` | `string` | The identifier for the current interaction session. |
 | `metadata` | `object` | Optional key-value pairs, including browser-local safeguard Base URL, safeguard Model ID, memory-only safeguard API key override, `providerLlmRoutingEnabled` for direct/API local-only callers, `responderLlmRoutingEnabled`, responder provider, responder Base URL, responder Model ID, memory-only responder API key override, the active downstream responder prompt, and Sam Spade responder persona/scenario prompts for `ctf_chat` traffic. |
 
+When the instruction monitor is enabled, API callers may provide `metadata.instructionEmbedding` and `metadata.instructionChunks` with precomputed embedding vectors. Normal frontend submissions can omit these values; the backend generates whole-prompt and chunk embeddings when `INSTRUCTION_MONITOR_EMBEDDINGS_*` or compatible fallback provider settings are available.
+
 **Safeguard Judge Input Contract:**
 
 The backend sends a candidate prompt after deterministic normalization/redaction and states that the candidate is not guaranteed safe. It then sends neutral preprocessing evidence: detection flags, redaction labels, decode telemetry, suspicious chunk count, max entropy, global entropy, and syntactic score. Local sanitizer verdict and reasoning remain response/audit telemetry only and are not sent to the safeguard judge.
@@ -166,7 +169,9 @@ Decision-shaped payloads such as `ALLOW_AND_FORWARD`, `BLOCK`, `QUEUE_FOR_REVIEW
 | `502` | `RESPONDER_ERROR` | Downstream responder failure after safeguard approval. This is surfaced separately from safeguard failure. |
 | `503` | `SHIELD_ERROR` | Reserved for future Shield Engine transport failures outside the structured safeguard timeout path. |
 
-Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, retry marker, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records or structured gateway logs. Local responder passthrough is represented with responder status `DISABLED_LOCAL_ONLY` and model `local-responder-passthrough`.
+Downstream responder outputs are output-sanitized before display. Safeguard telemetry and responder telemetry such as provider, model ID, status, latency, prompt hash, retry marker, token usage, prompt profile, context utilization, and output-sanitization flags are normalized back into Counter-Spy.ai audit records or structured gateway logs. Local responder passthrough is represented with responder status `DISABLED_LOCAL_ONLY` and model `local-responder-passthrough`; in that mode, OpenAI-compatible safeguard usage is used as the audit token source when present.
+
+Instruction similarity hits are reported through `INSTRUCTION_SIMILARITY_MATCH` plus `INSTRUCTION_SIMILARITY_MEDIUM` or `INSTRUCTION_SIMILARITY_HIGH`. The routing policy separates deterministic fingerprint evidence from semantic evidence. Exact SHA-256, loose SHA-256, and SimHash matches against a stored `ADVERSARIAL` instruction retain the adversarial rating and return `backendGatewayStatus: INTERCEPTED` with `backendSafeguardVerdict: ADVERSARIAL`. Semantic whole-prompt or chunk-embedding matches route to `backendGatewayStatus: QUEUED` with `backendSafeguardVerdict: SUSPICIOUS`, so analysts review semantic overlap before it becomes a block rule. Backend reasoning names the strongest match family and stored prompt hash without exposing stored raw prompt text.
 
 ### 5.3 Backend Safeguard Attribution Fields
 When a prompt reaches `/v1/intercept`, the frontend persists a structured backend outcome alongside the normal audit fields:
@@ -191,6 +196,15 @@ Every safeguard decision emits structured JSON logs for metric extraction:
 *   `safeguard_decision` with prompt hash, retry marker, response shape, judge verdict, gateway action, divergence boolean, optional raw reasoning trace when the provider exposes it, and safeguard latency.
 
 The expected mapping is `CLEAN -> CLEAN`, `SUSPICIOUS -> QUEUED`, and `ADVERSARIAL -> INTERCEPTED`. Any non-zero divergence on adversarial or suspicious traffic indicates the orchestration layer is overriding the judge and should be investigated as a correctness issue.
+
+### 5.5 Instruction Similarity Monitor
+The v2.2 backend instruction monitor stores observed prompt fingerprints in PostgreSQL with pgvector. Each record includes strict SHA-256, loose stopword-stripped SHA-256, 2/3/4-gram SimHash values, an optional whole-prompt embedding, and optional overlapping chunk embeddings with heuristic instruction-intent scores.
+
+`compare()` uses separate query paths for exact/loose hash lookup, SimHash Hamming distance, whole-prompt ANN search, and chunk ANN search. Chunk ANN work is concurrency-capped so long documents do not overwhelm the database pool. Results merge by stored instruction id, and classification preserves signal intent: adversarial fingerprint reuse blocks, while semantic overlap queues for review. `observe()` is transactional and idempotent: duplicate instruction ids do not attach new chunks to an old parent record.
+
+The UI surfaces match reasons directly from the backend comparison result. `Exact Sha256` and `Loose Sha256` are equality checks against strict and stopword-stripped hashes. `Simhash 2gram`, `Simhash 3gram`, and `Simhash 4gram` fire when the corresponding 64-bit SimHash Hamming distance is at or below the configured threshold (`12` by default). `Embedding` and `Chunk Embedding` require whole-prompt or overlapping-chunk cosine similarity at or above the semantic threshold (`0.78` by default). `Attention Pool` uses instruction-intent-weighted chunk similarity (`> 0.70` risk threshold), and `Sandwich Delta` identifies a high-similarity chunk hidden inside a lower-similarity whole prompt (`> 0.20` delta with chunk similarity above `0.72`).
+
+The local Docker demo uses `pgvector/pgvector:pg16` with a tmpfs PostgreSQL data directory. Recreating the Postgres container starts the instruction database fresh, which is useful for test runs; production deployments should replace tmpfs with managed persistent storage and migrations.
 
 ---
 

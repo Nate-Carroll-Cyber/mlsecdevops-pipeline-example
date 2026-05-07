@@ -290,6 +290,20 @@ function hasAnyObfuscationSignal(log: any): boolean {
   return getObfuscationTechniques(log).length > 0;
 }
 
+function hasInstructionSimilaritySignal(log: any): boolean {
+  return getDetectionFlags(log).includes('INSTRUCTION_SIMILARITY_MATCH') || Boolean(log.instructionSimilarity);
+}
+
+function hasSemanticSimilaritySignal(log: any): boolean {
+  const topMatch = log.instructionSimilarity?.topMatch;
+  return hasInstructionSimilaritySignal(log) && Boolean(
+    topMatch?.matchReasons?.some((reason: string) => reason === 'embedding' || reason === 'chunk_embedding' || reason === 'attention_pool' || reason === 'sandwich_delta') ||
+    typeof topMatch?.cosineSimilarity === 'number' ||
+    typeof topMatch?.maxChunkSimilarity === 'number' ||
+    typeof topMatch?.attentionPooledChunkSimilarity === 'number'
+  );
+}
+
 function calculateDetectionSignalMetrics(logs: any[]) {
   return {
     piiHits: logs.filter((log) => hasAnySignal(log, PII_DETECTION_FLAGS)).length,
@@ -298,6 +312,8 @@ function calculateDetectionSignalMetrics(logs: any[]) {
     keywordHits: logs.filter(hasKeywordSignal).length,
     topicHits: logs.filter(hasForbiddenPhraseSignal).length,
     obfuscatedHits: logs.filter(hasAnyObfuscationSignal).length,
+    instructionSimilarityHits: logs.filter(hasInstructionSimilaritySignal).length,
+    semanticSimilarityHits: logs.filter(hasSemanticSimilaritySignal).length,
     foreignLanguageHits: logs.filter((log) => getDetectionFlags(log).includes('FOREIGN_LANGUAGE')).length,
     spellingObfuscationHits: logs.filter((log) => getDetectionFlags(log).includes('SPELLING_OBFUSCATION')).length,
   };
@@ -1517,6 +1533,14 @@ export function ThreatDashboard({
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Obfuscation Hits</span>
                 <span className="font-semibold text-fuchsia-400">{operationalMetrics.detectionSignals.obfuscatedHits}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Similarity Matches</span>
+                <span className="font-semibold text-purple-400">{operationalMetrics.detectionSignals.instructionSimilarityHits}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Semantic Matches</span>
+                <span className="font-semibold text-indigo-300">{operationalMetrics.detectionSignals.semanticSimilarityHits}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Foreign / Mixed Language</span>

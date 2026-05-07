@@ -56,6 +56,7 @@ import {
   interceptPrompt,
   sendSamSpadeMessage,
   solveSamSpadeCase,
+  type BackendInterceptResponse,
   type BackendHealthResponse,
   type SamSpadeReviewArtifact,
   type SamSpadeSession,
@@ -185,6 +186,7 @@ interface AuditLog extends AtlasTaxonomyFields {
   backendSafeguardVerdict?: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL';
   backendSafeguardReasoning?: string;
   backendReachedSafeguard?: boolean;
+  instructionSimilarity?: BackendInterceptResponse['instructionSimilarity'];
   localPrecheckLatencyMs?: number;
   backendSafeguardLatencyMs?: number;
   backendGatewayLatencyMs?: number;
@@ -245,7 +247,7 @@ type ResponderRunTelemetry = {
 type BackendSafeguardExecution = Pick<
   AuditLog,
   'backendGatewayStatus' | 'backendSafeguardVerdict' | 'backendSafeguardReasoning' | 'backendReachedSafeguard'
-  | 'localPrecheckLatencyMs' | 'backendSafeguardLatencyMs' | 'backendGatewayLatencyMs'
+  | 'instructionSimilarity' | 'localPrecheckLatencyMs' | 'backendSafeguardLatencyMs' | 'backendGatewayLatencyMs'
 >;
 
 const PII_OR_SECRET_REDACTIONS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'AWS_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'SECRET_KEY'];
@@ -366,6 +368,7 @@ const AuditLogSchema = z.object({
   backendSafeguardVerdict: z.enum(['CLEAN', 'SUSPICIOUS', 'ADVERSARIAL']).optional(),
   backendSafeguardReasoning: z.string().optional(),
   backendReachedSafeguard: z.boolean().optional(),
+  instructionSimilarity: z.any().optional(),
   localPrecheckLatencyMs: z.number().optional(),
   backendSafeguardLatencyMs: z.number().optional(),
   backendGatewayLatencyMs: z.number().optional(),
@@ -1426,7 +1429,7 @@ async function buildPlaygroundMetricEntry(
   backendOutcome?: Pick<
     AuditLog,
     'backendGatewayStatus' | 'backendSafeguardVerdict' | 'backendSafeguardReasoning' | 'backendReachedSafeguard'
-    | 'localPrecheckLatencyMs' | 'backendSafeguardLatencyMs' | 'backendGatewayLatencyMs'
+    | 'instructionSimilarity' | 'localPrecheckLatencyMs' | 'backendSafeguardLatencyMs' | 'backendGatewayLatencyMs'
   >,
 ): Promise<PlaygroundMetricEntry> {
   const promptHash = await sha256Hex(prompt);
@@ -1453,6 +1456,7 @@ async function buildPlaygroundMetricEntry(
     ...(backendOutcome?.backendSafeguardVerdict ? { backendSafeguardVerdict: backendOutcome.backendSafeguardVerdict } : {}),
     ...(backendOutcome?.backendSafeguardReasoning ? { backendSafeguardReasoning: backendOutcome.backendSafeguardReasoning } : {}),
     ...(backendOutcome?.backendReachedSafeguard !== undefined ? { backendReachedSafeguard: backendOutcome.backendReachedSafeguard } : {}),
+    ...(backendOutcome?.instructionSimilarity ? { instructionSimilarity: backendOutcome.instructionSimilarity } : {}),
     ...(backendOutcome?.localPrecheckLatencyMs !== undefined ? { localPrecheckLatencyMs: backendOutcome.localPrecheckLatencyMs } : {}),
     ...(backendOutcome?.backendSafeguardLatencyMs !== undefined ? { backendSafeguardLatencyMs: backendOutcome.backendSafeguardLatencyMs } : {}),
     ...(backendOutcome?.backendGatewayLatencyMs !== undefined ? { backendGatewayLatencyMs: backendOutcome.backendGatewayLatencyMs } : {}),
@@ -1486,6 +1490,18 @@ function formatLatencyMs(value?: number): string {
   if (value === undefined || Number.isNaN(value)) return '--';
   if (value >= 1000) return `${(value / 1000).toFixed(2)}s`;
   return `${Math.round(value)}ms`;
+}
+
+function formatSimilarityPercent(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) return 'n/a';
+  return `${Math.round(value * 100)}%`;
+}
+
+function formatInstructionSimilarityReason(reason: string) {
+  return reason
+    .split('_')
+    .map((part) => part ? `${part[0]?.toUpperCase() ?? ''}${part.slice(1)}` : '')
+    .join(' ');
 }
 
 function loadResponderTelemetryConfig(): ResponderTelemetryConfig {
@@ -3495,12 +3511,88 @@ export default function App() {
         }
       };
 
+      const observeLocalDecisionWithBackendMonitor = async (): Promise<Partial<AuditLog> | null> => {
+        if (!activeGuardrails.safeguardLlm) return null;
+        try {
+          const monitorResponse = await interceptPrompt({
+            prompt: textToProcess,
+            userId: profile.uid,
+            sessionId,
+            metadata: {
+              localReviewMode,
+              source: options?.source || 'analyst_chat',
+              providerLlmRoutingEnabled: false,
+              responderLlmRoutingEnabled: false,
+            },
+            tuning: {
+              entropyThreshold: governanceConfig.entropyThreshold,
+              syntacticThreshold: governanceConfig.syntacticThreshold,
+              blockedKeywords: keywords,
+              forbiddenTopics: topics,
+              regexRules: regexes,
+            },
+          });
+          const patch: Partial<AuditLog> = {
+            judgeDecision: monitorResponse.safeguards.verdict,
+            backendGatewayStatus: monitorResponse.status,
+            backendSafeguardVerdict: monitorResponse.safeguards.verdict,
+            backendSafeguardReasoning: monitorResponse.safeguards.analystReasoning,
+            backendReachedSafeguard: false,
+            instructionSimilarity: monitorResponse.instructionSimilarity,
+            localPrecheckLatencyMs: monitorResponse.safeguards.localPrecheckLatencyMs ?? monitorResponse.safeguards.latencyMs,
+            backendGatewayLatencyMs: monitorResponse.safeguards.gatewayLatencyMs ?? monitorResponse.safeguards.latencyMs,
+            detectionFlags: Array.from(new Set([
+              ...sanitization.redactions,
+              ...monitorResponse.detectionFlags,
+            ])),
+          };
+          setLastBackendSafeguardOutcome({
+            backendGatewayStatus: patch.backendGatewayStatus,
+            backendSafeguardVerdict: patch.backendSafeguardVerdict,
+            backendSafeguardReasoning: patch.backendSafeguardReasoning,
+            backendReachedSafeguard: false,
+            instructionSimilarity: patch.instructionSimilarity,
+            localPrecheckLatencyMs: patch.localPrecheckLatencyMs,
+            backendGatewayLatencyMs: patch.backendGatewayLatencyMs,
+          });
+          if (monitorResponse.instructionSimilarity && options?.source !== 'bulk_ingest') {
+            toast.warning(`Similarity monitor match: ${monitorResponse.instructionSimilarity.highestRisk} risk`);
+          }
+          return patch;
+        } catch (error) {
+          console.warn('Backend instruction monitor observation failed.', error);
+          return null;
+        }
+      };
+
       // 3. Generate Advice
       let responseText = "";
       let responderAuditPatch: Partial<AuditLog> = {};
       let responderRunBase: ResponderRunTelemetry | null = null;
       const startTime = performance.now();
       const currentGovernanceConfig = governanceConfigRef.current;
+      const applyBackendMonitorPatch = async (patch: Partial<AuditLog> | null) => {
+        if (!patch || !auditLogId) return;
+        responderAuditPatch = { ...responderAuditPatch, ...patch };
+        patchCurrentAuditLog(patch);
+        if (!useLocalAuditSurface) {
+          try {
+            await updateDoc(doc(db, 'audit_logs', auditLogId), {
+              ...(patch.judgeDecision ? { judgeDecision: patch.judgeDecision } : {}),
+              ...(patch.backendGatewayStatus ? { backendGatewayStatus: patch.backendGatewayStatus } : {}),
+              ...(patch.backendSafeguardVerdict ? { backendSafeguardVerdict: patch.backendSafeguardVerdict } : {}),
+              ...(patch.backendSafeguardReasoning ? { backendSafeguardReasoning: patch.backendSafeguardReasoning } : {}),
+              ...(patch.backendReachedSafeguard !== undefined ? { backendReachedSafeguard: patch.backendReachedSafeguard } : {}),
+              ...(patch.instructionSimilarity ? { instructionSimilarity: patch.instructionSimilarity } : {}),
+              ...(patch.localPrecheckLatencyMs !== undefined ? { localPrecheckLatencyMs: patch.localPrecheckLatencyMs } : {}),
+              ...(patch.backendGatewayLatencyMs !== undefined ? { backendGatewayLatencyMs: patch.backendGatewayLatencyMs } : {}),
+              ...(patch.detectionFlags ? { detectionFlags: patch.detectionFlags } : {}),
+            });
+          } catch (error) {
+            console.error('Failed to update audit log with backend monitor observation', error);
+          }
+        }
+      };
       
       // Check for Global Pause
       if (currentGovernanceConfig.isGlobalPause) {
@@ -3537,6 +3629,7 @@ export default function App() {
             } catch (e) { console.error(e); }
           }
         }
+        await applyBackendMonitorPatch(await observeLocalDecisionWithBackendMonitor());
       // Check if the input was flagged as adversarial or suspicious
       } else if (sanitization.isPotentiallyAdversarial) {
         if (sanitization.detectionLevel === DetectionLevel.ADVERSARIAL) {
@@ -3547,6 +3640,7 @@ export default function App() {
           responseText = "SUSPICIOUS DETECTION TRIGGERED: This request violates security governance policies. Blocked keywords, topics, or high entropy detected. Action logged and escalated.";
         }
         setLatency(null);
+        await applyBackendMonitorPatch(await observeLocalDecisionWithBackendMonitor());
       // If all checks pass, generate the response using the configured backend or local fallback
       } else {
         let rawResponse = "";
@@ -3587,7 +3681,7 @@ export default function App() {
               : backendResponse.status === 'SHIELD_ERROR'
                 ? `SAFEGUARD FAIL-SECURE: ${backendResponse.safeguards.analystReasoning}`
               : `Backend intercepted the prompt: ${backendResponse.safeguards.analystReasoning}`;
-            const responderUsage = backendResponse.responder?.usage;
+            const responderUsage = backendResponse.responder?.usage ?? backendResponse.safeguards.usage;
             const contextWindowLimit = Number.isFinite(parsedContextWindowLimit) && parsedContextWindowLimit > 0
               ? parsedContextWindowLimit
               : undefined;
@@ -3599,6 +3693,7 @@ export default function App() {
 	              backendSafeguardVerdict: backendResponse.safeguards.verdict,
 	              backendSafeguardReasoning: backendResponse.safeguards.analystReasoning,
 			              backendReachedSafeguard: true,
+              instructionSimilarity: backendResponse.instructionSimilarity,
               localPrecheckLatencyMs: backendResponse.safeguards.localPrecheckLatencyMs ?? sanitization.latencyMs,
               backendSafeguardLatencyMs: backendResponse.safeguards.safeguardLatencyMs ?? backendResponse.safeguards.latencyMs,
               backendGatewayLatencyMs: backendResponse.safeguards.gatewayLatencyMs ?? backendResponse.safeguards.latencyMs,
@@ -3659,6 +3754,7 @@ export default function App() {
                     ...(telemetryPatch.backendSafeguardVerdict ? { backendSafeguardVerdict: telemetryPatch.backendSafeguardVerdict } : {}),
                     ...(telemetryPatch.backendSafeguardReasoning ? { backendSafeguardReasoning: telemetryPatch.backendSafeguardReasoning } : {}),
                     ...(telemetryPatch.backendReachedSafeguard !== undefined ? { backendReachedSafeguard: telemetryPatch.backendReachedSafeguard } : {}),
+                    ...(telemetryPatch.instructionSimilarity ? { instructionSimilarity: telemetryPatch.instructionSimilarity } : {}),
                     ...(telemetryPatch.localPrecheckLatencyMs !== undefined ? { localPrecheckLatencyMs: telemetryPatch.localPrecheckLatencyMs } : {}),
                     ...(telemetryPatch.backendSafeguardLatencyMs !== undefined ? { backendSafeguardLatencyMs: telemetryPatch.backendSafeguardLatencyMs } : {}),
                     ...(telemetryPatch.backendGatewayLatencyMs !== undefined ? { backendGatewayLatencyMs: telemetryPatch.backendGatewayLatencyMs } : {}),
@@ -3863,6 +3959,7 @@ export default function App() {
           ...(responderAuditPatch.backendSafeguardVerdict ? { backendSafeguardVerdict: responderAuditPatch.backendSafeguardVerdict } : {}),
           ...(responderAuditPatch.backendSafeguardReasoning ? { backendSafeguardReasoning: responderAuditPatch.backendSafeguardReasoning } : {}),
           ...(responderAuditPatch.backendReachedSafeguard !== undefined ? { backendReachedSafeguard: responderAuditPatch.backendReachedSafeguard } : {}),
+          ...(responderAuditPatch.instructionSimilarity ? { instructionSimilarity: responderAuditPatch.instructionSimilarity } : {}),
           ...(responderAuditPatch.localPrecheckLatencyMs !== undefined ? { localPrecheckLatencyMs: responderAuditPatch.localPrecheckLatencyMs } : {}),
           ...(responderAuditPatch.backendSafeguardLatencyMs !== undefined ? { backendSafeguardLatencyMs: responderAuditPatch.backendSafeguardLatencyMs } : {}),
           ...(responderAuditPatch.backendGatewayLatencyMs !== undefined ? { backendGatewayLatencyMs: responderAuditPatch.backendGatewayLatencyMs } : {}),
@@ -3900,6 +3997,7 @@ export default function App() {
             backendSafeguardVerdict: responderAuditPatch.backendSafeguardVerdict,
             backendSafeguardReasoning: responderAuditPatch.backendSafeguardReasoning,
             backendReachedSafeguard: responderAuditPatch.backendReachedSafeguard,
+            instructionSimilarity: responderAuditPatch.instructionSimilarity,
             localPrecheckLatencyMs: responderAuditPatch.localPrecheckLatencyMs,
             backendSafeguardLatencyMs: responderAuditPatch.backendSafeguardLatencyMs,
             backendGatewayLatencyMs: responderAuditPatch.backendGatewayLatencyMs,
@@ -4105,7 +4203,7 @@ export default function App() {
                 className="w-16 h-16 object-contain"
               />
               <CardTitle className="text-xl font-sans font-semibold tracking-tight flex items-baseline gap-0.5">
-                Counter-Spy<span className="text-primary">.ai</span> <span className="text-[10px] opacity-50 ml-2 font-mono">v2.1</span>
+                Counter-Spy<span className="text-primary">.ai</span> <span className="text-[10px] opacity-50 ml-2 font-mono">v2.2</span>
               </CardTitle>
             </div>
             <CardDescription className="text-sm font-semibold text-slate-200">
@@ -4843,38 +4941,114 @@ export default function App() {
 	                        (() => {
 	                          const displaySanitization = sanitizationPreview || lastExecutedSanitization;
 	                          const displayBackendOutcome = sanitizationPreview ? null : lastBackendSafeguardOutcome;
-	                          const backendStatus = displayBackendOutcome?.backendGatewayStatus;
-	                          const backendStatusLabel = getBackendGatewayStatusLabel(backendStatus);
+                          const backendStatus = displayBackendOutcome?.backendGatewayStatus;
+                          const backendStatusLabel = getBackendGatewayStatusLabel(backendStatus);
+                          const similaritySummary = displayBackendOutcome?.instructionSimilarity;
+                          const similarityTopMatch = similaritySummary?.topMatch;
 	                          const backendRequiresReview = displayBackendOutcome
-	                            ? isBackendSafeguardIntervention(displayBackendOutcome)
+	                            ? isBackendSafeguardIntervention(displayBackendOutcome) || Boolean(similaritySummary)
 	                            : false;
+                          const backendReachedSafeguard = displayBackendOutcome?.backendReachedSafeguard !== false;
+                          const backendVerdictLevel = mapBackendSafeguardVerdictToDetectionLevel(displayBackendOutcome?.backendSafeguardVerdict);
+                          const backendUltimateDetectionLevel = Math.max(displaySanitization!.detectionLevel, backendVerdictLevel);
+                          const backendAlertClass = backendUltimateDetectionLevel === DetectionLevel.ADVERSARIAL
+                            ? 'border-destructive/30 bg-destructive/10 text-destructive'
+                            : backendUltimateDetectionLevel === DetectionLevel.SUSPICIOUS
+                              ? 'border-amber-500/30 bg-amber-500/10 text-amber-600'
+                              : backendStatus === 'CLEAN'
+                                ? 'border-green-500/30 bg-green-500/10 text-green-600'
+                                : 'border-amber-500/30 bg-amber-500/10 text-amber-600';
+                          const hasSemanticSimilarity = Boolean(
+                            similarityTopMatch?.matchReasons?.some((reason) =>
+                              ['embedding', 'chunk_embedding', 'attention_pool', 'sandwich_delta'].includes(reason)
+                            ) ||
+                            typeof similarityTopMatch?.cosineSimilarity === 'number' ||
+                            typeof similarityTopMatch?.maxChunkSimilarity === 'number' ||
+                            typeof similarityTopMatch?.attentionPooledChunkSimilarity === 'number'
+                          );
 	                          const hasSensitiveDataExposure = displaySanitization!.redactions.some((redaction) => PII_OR_SECRET_REDACTIONS.includes(redaction));
 	                          return (
 	                            <>
+                              {/* Adversarial/Suspicious Alert Display */}
+                              {displaySanitization!.isPotentiallyAdversarial && (
+                                <Alert variant={displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL ? "destructive" : "default"} className={`rounded-xl p-3 ${displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL ? 'border-destructive/30 bg-destructive/10' : 'border-amber-500/30 bg-amber-500/10 text-amber-600'}`}>
+                                  <AlertTriangle className="w-4 h-4" />
+                                  <AlertTitle className="text-xs font-bold uppercase ml-2 flex items-center gap-1.5">
+                                    {displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL ? 'Adversarial Alert' : 'Suspicious Alert'}
+                                    <HelpTooltip text={displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL ? 'High-confidence malicious patterns were detected in the prompt.' : 'The prompt contains risky patterns that may require blocking or analyst review.'} />
+                                  </AlertTitle>
+                                  <AlertDescription className="text-[9px]">
+                                    {displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL
+                                      ? 'Input patterns suggest prompt injection or obfuscation.'
+                                      : 'Input contains blocked keywords, topics, or high entropy.'}
+                                  </AlertDescription>
+                                </Alert>
+                              )}
+
 	                              {displayBackendOutcome && (
-	                                <Alert className={`rounded-xl p-3 ${
-	                                  backendRequiresReview
-	                                    ? 'border-purple-500/30 bg-purple-500/10 text-purple-600'
-	                                    : backendStatus === 'CLEAN'
-	                                      ? 'border-green-500/30 bg-green-500/10 text-green-600'
-	                                      : 'border-amber-500/30 bg-amber-500/10 text-amber-600'
-	                                }`}>
+	                                <Alert className={`rounded-xl p-3 ${backendAlertClass}`}>
 	                                  <ShieldAlert className="w-4 h-4" />
 	                                  <AlertTitle className="ml-2 flex items-center gap-2 text-xs font-bold uppercase">
-	                                    Backend Safeguard
+	                                    {backendReachedSafeguard ? 'Backend Safeguard' : 'Backend Monitor'}
 	                                    <Badge variant="outline" className="border-current bg-background/40 px-1.5 py-0 text-[9px] uppercase">
 	                                      {backendRequiresReview ? 'Review' : backendStatusLabel}
 	                                    </Badge>
 	                                  </AlertTitle>
 	                                  <AlertDescription className="text-[9px]">
-	                                    {backendRequiresReview
-	                                      ? `Local gates passed; backend returned ${backendStatusLabel} and queued analyst review.`
-	                                      : backendStatus === 'CLEAN'
+                                      {!backendReachedSafeguard
+                                        ? `Local firewall decision was observed by the backend monitor; safeguard and responder calls were skipped.`
+	                                      : backendRequiresReview
+	                                        ? `Local gates passed; backend returned ${backendStatusLabel} and queued analyst review.`
+	                                        : backendStatus === 'CLEAN'
 	                                        ? 'Local gates passed; backend safeguard allowed the prompt to continue.'
 	                                        : `Backend safeguard returned ${backendStatusLabel}.`}
-	                                    {displayBackendOutcome.backendSafeguardReasoning
+	                                    {displayBackendOutcome.backendSafeguardReasoning && !similaritySummary
 	                                      ? ` ${displayBackendOutcome.backendSafeguardReasoning}`
 	                                      : ''}
+                                      {similaritySummary && (
+                                        <span className="mt-2 block rounded-lg border border-current/20 bg-background/30 p-2 text-[9px] text-current">
+                                          <span className="mb-1 flex items-center justify-between gap-2 font-bold uppercase">
+                                            <span>Similarity Monitor</span>
+                                            <span>{similaritySummary.highestRisk} risk / {similaritySummary.matchCount} match{similaritySummary.matchCount === 1 ? '' : 'es'}</span>
+                                          </span>
+                                          {displayBackendOutcome.backendSafeguardReasoning ? (
+                                            <span className="mb-1 block opacity-80">
+                                              {displayBackendOutcome.backendSafeguardReasoning}
+                                            </span>
+                                          ) : null}
+                                          {hasSemanticSimilarity ? (
+                                            <span className="grid grid-cols-2 gap-1">
+                                              <span>
+                                                <span className="block opacity-70">Semantic</span>
+                                                <span className="font-mono">{formatSimilarityPercent(similarityTopMatch?.cosineSimilarity)}</span>
+                                              </span>
+                                              <span>
+                                                <span className="block opacity-70">Chunk</span>
+                                                <span className="font-mono">{formatSimilarityPercent(similarityTopMatch?.attentionPooledChunkSimilarity ?? similarityTopMatch?.maxChunkSimilarity)}</span>
+                                              </span>
+                                            </span>
+                                          ) : (
+                                            <span className="mb-1 block text-[9px] opacity-80">
+                                              Fingerprint-only match.
+                                            </span>
+                                          )}
+                                          <span className="grid gap-1">
+                                            <span className="min-w-0">
+                                              <span className="block opacity-70">Stored hash</span>
+                                              <span className="block break-all font-mono" title={similarityTopMatch?.targetHash}>{similarityTopMatch?.targetHash ?? 'n/a'}</span>
+                                            </span>
+                                            <span>
+                                              <span className="block opacity-70">Stored verdict</span>
+                                              <span className="font-mono uppercase">{similarityTopMatch?.targetVerdict ?? 'n/a'}</span>
+                                            </span>
+                                          </span>
+                                          {similarityTopMatch?.matchReasons?.length ? (
+                                            <span className="mt-1 block opacity-80">
+                                              {similarityTopMatch.matchReasons.map(formatInstructionSimilarityReason).join(', ')}
+                                            </span>
+                                          ) : null}
+                                        </span>
+                                      )}
                                       {(displayBackendOutcome.localPrecheckLatencyMs !== undefined ||
                                         displayBackendOutcome.backendSafeguardLatencyMs !== undefined ||
                                         displayBackendOutcome.backendGatewayLatencyMs !== undefined) && (
@@ -4896,27 +5070,12 @@ export default function App() {
 	                                  </AlertDescription>
 	                                </Alert>
 	                              )}
-                              {/* Adversarial/Suspicious Alert Display */}
-                              {displaySanitization!.isPotentiallyAdversarial && (
-                                <Alert variant={displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL ? "destructive" : "default"} className={`rounded-xl p-3 ${displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL ? 'border-destructive/30 bg-destructive/10' : 'border-amber-500/30 bg-amber-500/10 text-amber-600'}`}>
-                                  <AlertTriangle className="w-4 h-4" />
-                                  <AlertTitle className="text-xs font-bold uppercase ml-2 flex items-center gap-1.5">
-                                    {displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL ? 'Adversarial Alert' : 'Suspicious Alert'}
-                                    <HelpTooltip text={displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL ? 'High-confidence malicious patterns were detected in the prompt.' : 'The prompt contains risky patterns that may require blocking or analyst review.'} />
-                                  </AlertTitle>
-                                  <AlertDescription className="text-[9px]">
-                                    {displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL
-                                      ? 'Input patterns suggest prompt injection or obfuscation.'
-                                      : 'Input contains blocked keywords, topics, or high entropy.'}
-                                  </AlertDescription>
-                                </Alert>
-                              )}
 
-                              {/* Redactions Display */}
+                              {/* Detections Display */}
                               <div className="space-y-2">
                                 <p className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
-                                  Redactions
-                                  <HelpTooltip text="Types of sensitive or blocked content detected and masked during sanitization." />
+                                  Detections
+                                  <HelpTooltip text="Sensitive-data, policy, and prompt-structure signals detected during sanitization." />
                                 </p>
                                 <div className="flex flex-wrap gap-1.5">
                                   {displaySanitization!.redactions.length > 0 ? (
@@ -6315,14 +6474,14 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
       {/* Full Prompt View Dialog */}
       {/* Full Prompt View Dialog */}
       <Dialog open={!!viewingPromptLog} onOpenChange={(open) => !open && setViewingPromptLog(null)}>
-        <DialogContent className="sm:max-w-[700px]">
+        <DialogContent className="flex max-h-[88vh] flex-col sm:max-w-[760px]">
           <DialogHeader>
             <DialogTitle>Prompt Details</DialogTitle>
             <DialogDescription>
               Full text of the logged prompt and captured response.
             </DialogDescription>
           </DialogHeader>
-          <div className="py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto py-4 pr-2">
             {viewingPromptLog && (
               <div className="mb-4 space-y-3">
                 <div>
@@ -6369,21 +6528,17 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
               </div>
             )}
             {/* Scrollable area for potentially long prompts and responses */}
-            <div className="max-h-[60vh] overflow-y-auto w-full rounded-md border p-4 bg-muted/50 space-y-4">
+            <div className="w-full rounded-md border bg-muted/50 p-4 space-y-4">
               <div className="space-y-2">
                 <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Prompt</p>
-                <pre className="text-sm whitespace-pre-wrap break-all font-mono text-foreground">
-                  {viewingPromptLog?.sanitizedPrompt}
-                </pre>
+                <pre className="max-h-44 max-w-full overflow-auto rounded-md bg-background/40 p-3 font-mono text-sm text-foreground whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{viewingPromptLog?.sanitizedPrompt}</pre>
               </div>
               <Separator />
               <div className="space-y-2">
                 <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
                   {getRecordedResponseLabel(viewingPromptLog?.response)}
                 </p>
-                <pre className="text-sm whitespace-pre-wrap break-all font-mono text-foreground">
-                  {viewingPromptLog?.response || 'No response recorded on this log entry.'}
-                </pre>
+                <pre className="max-h-56 max-w-full overflow-auto rounded-md bg-background/40 p-3 font-mono text-sm text-foreground whitespace-pre-wrap break-words [overflow-wrap:anywhere]">{viewingPromptLog?.response || 'No response recorded on this log entry.'}</pre>
               </div>
               {(viewingPromptLog?.response || viewingPromptLog?.totalTokens || viewingPromptLog?.contextWindowLimit) && (
                 <>

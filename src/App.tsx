@@ -54,6 +54,7 @@ import {
   checkBackendHealth,
   createSamSpadeSession,
   interceptPrompt,
+  observeReviewedAdversarialInstruction,
   sendSamSpadeMessage,
   solveSamSpadeCase,
   type BackendInterceptResponse,
@@ -190,6 +191,7 @@ interface AuditLog extends AtlasTaxonomyFields {
   localPrecheckLatencyMs?: number;
   backendSafeguardLatencyMs?: number;
   backendGatewayLatencyMs?: number;
+  instructionEmbeddingDurationMs?: number;
   forwardedPromptHash?: string;
   responderProvider?: 'openai_compatible' | 'gemini';
   responderModel?: string;
@@ -248,9 +250,10 @@ type BackendSafeguardExecution = Pick<
   AuditLog,
   'backendGatewayStatus' | 'backendSafeguardVerdict' | 'backendSafeguardReasoning' | 'backendReachedSafeguard'
   | 'instructionSimilarity' | 'localPrecheckLatencyMs' | 'backendSafeguardLatencyMs' | 'backendGatewayLatencyMs'
+  | 'instructionEmbeddingDurationMs'
 >;
 
-const PII_OR_SECRET_REDACTIONS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'AWS_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'SECRET_KEY'];
+const PII_OR_SECRET_REDACTIONS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'AWS_KEY', 'LLM_API_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'CANARY_EXFIL', 'SECRET_KEY'];
 const SAM_SPADE_BLOCKED_CONTENT_LABEL = 'Bad content.';
 const SANITIZATION_REDOS_LATENCY_THRESHOLD_MS = 1000;
 
@@ -372,6 +375,7 @@ const AuditLogSchema = z.object({
   localPrecheckLatencyMs: z.number().optional(),
   backendSafeguardLatencyMs: z.number().optional(),
   backendGatewayLatencyMs: z.number().optional(),
+  instructionEmbeddingDurationMs: z.number().optional(),
   forwardedPromptHash: z.string().optional(),
   responderProvider: z.enum(['openai_compatible', 'gemini']).optional(),
   responderModel: z.string().optional(),
@@ -1430,6 +1434,7 @@ async function buildPlaygroundMetricEntry(
     AuditLog,
     'backendGatewayStatus' | 'backendSafeguardVerdict' | 'backendSafeguardReasoning' | 'backendReachedSafeguard'
     | 'instructionSimilarity' | 'localPrecheckLatencyMs' | 'backendSafeguardLatencyMs' | 'backendGatewayLatencyMs'
+    | 'instructionEmbeddingDurationMs'
   >,
 ): Promise<PlaygroundMetricEntry> {
   const promptHash = await sha256Hex(prompt);
@@ -1460,6 +1465,7 @@ async function buildPlaygroundMetricEntry(
     ...(backendOutcome?.localPrecheckLatencyMs !== undefined ? { localPrecheckLatencyMs: backendOutcome.localPrecheckLatencyMs } : {}),
     ...(backendOutcome?.backendSafeguardLatencyMs !== undefined ? { backendSafeguardLatencyMs: backendOutcome.backendSafeguardLatencyMs } : {}),
     ...(backendOutcome?.backendGatewayLatencyMs !== undefined ? { backendGatewayLatencyMs: backendOutcome.backendGatewayLatencyMs } : {}),
+    ...(backendOutcome?.instructionEmbeddingDurationMs !== undefined ? { instructionEmbeddingDurationMs: backendOutcome.instructionEmbeddingDurationMs } : {}),
     taxonomyNotes: [`source=${source}`, batchId ? `batch=${batchId}` : null, expectedVerdict ? `expected=${expectedVerdict}` : null]
       .filter(Boolean)
       .join(' | '),
@@ -2249,6 +2255,45 @@ export default function App() {
   // Function to handle user logout
   const handleLogout = () => signOut(auth);
 
+  const observeReviewedAdversarialLog = async (log: AuditLog | null, logId: string, resultantSeverity: AuditLog['resultantSeverity']) => {
+    if (resultantSeverity !== 'Adversarial') return true;
+    const sanitizedPrompt = log?.sanitizedPrompt?.trim();
+    if (!sanitizedPrompt) {
+      toast.warning('Reviewed Adversarial log was marked, but no prompt text was available for pgvector.');
+      return false;
+    }
+
+    try {
+      const observation = await observeReviewedAdversarialInstruction({
+        logId,
+        sanitizedPrompt,
+        source: log?.source || 'analyst_chat',
+        detectionFlags: log?.detectionFlags || [],
+        labels: ['reviewed', 'adversarial'],
+        metadata: {
+          auditLogId: logId,
+          batchId: log?.batchId,
+          expectedVerdict: log?.expectedVerdict,
+          backendSafeguardVerdict: log?.backendSafeguardVerdict,
+          source: log?.source || 'analyst_chat',
+        },
+      });
+      if (observation.embeddingDurationMs !== undefined) {
+        const patch = { instructionEmbeddingDurationMs: observation.embeddingDurationMs };
+        setAuditLogs(prev => prev.map(entry => entry.id === logId ? { ...entry, ...patch } : entry));
+        setEphemeralAuditLogs(prev => prev.map(entry => entry.id === logId ? { ...entry, ...patch } : entry));
+        if (!localReviewMode) {
+          await updateDoc(doc(db, 'audit_logs', logId), patch);
+        }
+      }
+      return true;
+    } catch (error) {
+      console.error('Failed to store reviewed adversarial log in pgvector', error);
+      toast.warning('Log was reviewed, but pgvector ingestion failed.');
+      return false;
+    }
+  };
+
   // Function to handle an analyst reviewing an audit log
   const handleReviewLog = async (logId: string, resultantSeverity: 'Clean' | 'Informational' | 'Suspicious' | 'Adversarial') => {
     // Ensure only admins can review logs
@@ -2282,6 +2327,7 @@ export default function App() {
           };
         });
       }
+      await observeReviewedAdversarialLog(targetLog, logId, resultantSeverity);
       toast.success(`Log marked as reviewed (${resultantSeverity})`);
       return;
     }
@@ -2313,6 +2359,7 @@ export default function App() {
           };
         });
       }
+      await observeReviewedAdversarialLog(targetLog, logId, resultantSeverity);
       toast.success(`Log marked as reviewed (${resultantSeverity})`);
     } catch (error) {
       // Handle errors updating the log
@@ -2623,6 +2670,9 @@ export default function App() {
 
   // Lazily create or restore the Sam Spade session the first time the CTF tab is used.
   const ensureSamSpadeSession = async (): Promise<SamSpadeSession> => {
+    if (!profile) {
+      throw new Error('Sign in before starting Sam Spade.');
+    }
     if (samSpadeSession) {
       return samSpadeSession;
     }
@@ -2632,7 +2682,7 @@ export default function App() {
     }
 
     setSamSpadeStatus('connecting');
-    const sessionPromise = createSamSpadeSession({ caseId: 'case-067' })
+    const sessionPromise = createSamSpadeSession({ caseId: 'case-067', callerUserId: profile.uid })
       .then((session) => {
         setSamSpadeSession(session);
         setSamSpadeStatus('ready');
@@ -3541,11 +3591,15 @@ export default function App() {
             instructionSimilarity: monitorResponse.instructionSimilarity,
             localPrecheckLatencyMs: monitorResponse.safeguards.localPrecheckLatencyMs ?? monitorResponse.safeguards.latencyMs,
             backendGatewayLatencyMs: monitorResponse.safeguards.gatewayLatencyMs ?? monitorResponse.safeguards.latencyMs,
+            instructionEmbeddingDurationMs: monitorResponse.safeguards.instructionEmbeddingDurationMs,
             detectionFlags: Array.from(new Set([
               ...sanitization.redactions,
               ...monitorResponse.detectionFlags,
             ])),
           };
+          if (monitorResponse.governanceAction === 'GLOBAL_PAUSE') {
+            await activateGlobalPause(`Automatic Global System Pause triggered by backend local inspection: ${monitorResponse.safeguards.analystReasoning}`);
+          }
           setLastBackendSafeguardOutcome({
             backendGatewayStatus: patch.backendGatewayStatus,
             backendSafeguardVerdict: patch.backendSafeguardVerdict,
@@ -3554,6 +3608,7 @@ export default function App() {
             instructionSimilarity: patch.instructionSimilarity,
             localPrecheckLatencyMs: patch.localPrecheckLatencyMs,
             backendGatewayLatencyMs: patch.backendGatewayLatencyMs,
+            instructionEmbeddingDurationMs: patch.instructionEmbeddingDurationMs,
           });
           if (monitorResponse.instructionSimilarity && options?.source !== 'bulk_ingest') {
             toast.warning(`Similarity monitor match: ${monitorResponse.instructionSimilarity.highestRisk} risk`);
@@ -3586,6 +3641,7 @@ export default function App() {
               ...(patch.instructionSimilarity ? { instructionSimilarity: patch.instructionSimilarity } : {}),
               ...(patch.localPrecheckLatencyMs !== undefined ? { localPrecheckLatencyMs: patch.localPrecheckLatencyMs } : {}),
               ...(patch.backendGatewayLatencyMs !== undefined ? { backendGatewayLatencyMs: patch.backendGatewayLatencyMs } : {}),
+              ...(patch.instructionEmbeddingDurationMs !== undefined ? { instructionEmbeddingDurationMs: patch.instructionEmbeddingDurationMs } : {}),
               ...(patch.detectionFlags ? { detectionFlags: patch.detectionFlags } : {}),
             });
           } catch (error) {
@@ -3652,20 +3708,10 @@ export default function App() {
               sessionId,
 	              metadata: {
 	                localReviewMode,
-	                source: 'counter-spy-frontend',
+	                source: options?.source || 'analyst_chat',
 		                providerLlmRoutingEnabled: true,
 	                  responderLlmRoutingEnabled: effectiveResponderLlmRoutingEnabled,
-	                  safeguardSystemPrompt,
-	                  safeguardBaseUrl: safeguardBaseUrlOverride || undefined,
-	                  safeguardModelId: safeguardModelIdOverride || undefined,
-	                  safeguardApiKey: safeguardApiKeyOverride || undefined,
-	                  ...(effectiveResponderLlmRoutingEnabled ? {
-	                    finalSystemPrompt,
-	                    responderBaseUrl: responderBaseUrlOverride || undefined,
-	                    responderModelId: responderModelIdOverride || undefined,
-	                    responderProvider: responderProviderOverride || undefined,
-	                    responderApiKey: responderApiKeyOverride || undefined,
-	                  } : {}),
+                  ...(safeguardApiKeyOverride ? { safeguardApiKey: safeguardApiKeyOverride } : {}),
 	              },
               tuning: {
                 entropyThreshold: governanceConfig.entropyThreshold,
@@ -3697,10 +3743,14 @@ export default function App() {
               localPrecheckLatencyMs: backendResponse.safeguards.localPrecheckLatencyMs ?? sanitization.latencyMs,
               backendSafeguardLatencyMs: backendResponse.safeguards.safeguardLatencyMs ?? backendResponse.safeguards.latencyMs,
               backendGatewayLatencyMs: backendResponse.safeguards.gatewayLatencyMs ?? backendResponse.safeguards.latencyMs,
+              instructionEmbeddingDurationMs: backendResponse.safeguards.instructionEmbeddingDurationMs,
 	            };
 	            setLastBackendSafeguardOutcome(backendSafeguardOutcome);
             if (backendResponse.status === 'SHIELD_ERROR') {
               await activateGlobalPause(`Automatic Global System Pause triggered by safeguard failure: ${backendResponse.safeguards.analystReasoning}`);
+            }
+            if (backendResponse.governanceAction === 'GLOBAL_PAUSE') {
+              await activateGlobalPause(`Automatic Global System Pause triggered by backend gateway: ${backendResponse.safeguards.analystReasoning}`);
             }
 	            responderAuditPatch = {
 	              judgeDecision: backendResponse.safeguards.verdict,
@@ -3758,6 +3808,7 @@ export default function App() {
                     ...(telemetryPatch.localPrecheckLatencyMs !== undefined ? { localPrecheckLatencyMs: telemetryPatch.localPrecheckLatencyMs } : {}),
                     ...(telemetryPatch.backendSafeguardLatencyMs !== undefined ? { backendSafeguardLatencyMs: telemetryPatch.backendSafeguardLatencyMs } : {}),
                     ...(telemetryPatch.backendGatewayLatencyMs !== undefined ? { backendGatewayLatencyMs: telemetryPatch.backendGatewayLatencyMs } : {}),
+                    ...(telemetryPatch.instructionEmbeddingDurationMs !== undefined ? { instructionEmbeddingDurationMs: telemetryPatch.instructionEmbeddingDurationMs } : {}),
                     ...(telemetryPatch.detectionFlags ? { detectionFlags: telemetryPatch.detectionFlags } : {}),
                     ...(telemetryPatch.forwardedPromptHash ? { forwardedPromptHash: telemetryPatch.forwardedPromptHash } : {}),
                     ...(telemetryPatch.responderModel ? { responderModel: telemetryPatch.responderModel } : {}),
@@ -3963,6 +4014,7 @@ export default function App() {
           ...(responderAuditPatch.localPrecheckLatencyMs !== undefined ? { localPrecheckLatencyMs: responderAuditPatch.localPrecheckLatencyMs } : {}),
           ...(responderAuditPatch.backendSafeguardLatencyMs !== undefined ? { backendSafeguardLatencyMs: responderAuditPatch.backendSafeguardLatencyMs } : {}),
           ...(responderAuditPatch.backendGatewayLatencyMs !== undefined ? { backendGatewayLatencyMs: responderAuditPatch.backendGatewayLatencyMs } : {}),
+          ...(responderAuditPatch.instructionEmbeddingDurationMs !== undefined ? { instructionEmbeddingDurationMs: responderAuditPatch.instructionEmbeddingDurationMs } : {}),
           ...(responderAuditPatch.detectionFlags ? { detectionFlags: responderAuditPatch.detectionFlags } : {}),
           ...(responderAuditPatch.forwardedPromptHash ? { forwardedPromptHash: responderAuditPatch.forwardedPromptHash } : {}),
           ...(responderAuditPatch.responderModel ? { responderModel: responderAuditPatch.responderModel } : {}),
@@ -4001,6 +4053,7 @@ export default function App() {
             localPrecheckLatencyMs: responderAuditPatch.localPrecheckLatencyMs,
             backendSafeguardLatencyMs: responderAuditPatch.backendSafeguardLatencyMs,
             backendGatewayLatencyMs: responderAuditPatch.backendGatewayLatencyMs,
+            instructionEmbeddingDurationMs: responderAuditPatch.instructionEmbeddingDurationMs,
           },
         );
         const nextEntries = [...loadPlaygroundMetrics(), metricEntry];
@@ -4074,22 +4127,10 @@ export default function App() {
       const result = await sendSamSpadeMessage({
         sessionId: session.sessionId,
         prompt: submittedPrompt,
+        callerUserId: session.ownerUserId,
 	        metadata: {
 		          providerLlmRoutingEnabled: true,
 	            responderLlmRoutingEnabled: effectiveResponderLlmRoutingEnabled,
-	            safeguardSystemPrompt,
-	            safeguardBaseUrl: safeguardBaseUrlOverride || undefined,
-	            safeguardModelId: safeguardModelIdOverride || undefined,
-	            safeguardApiKey: safeguardApiKeyOverride || undefined,
-	            ...(effectiveResponderLlmRoutingEnabled ? {
-	              downstreamResponderPrompt,
-	              responderBaseUrl: responderBaseUrlOverride || undefined,
-	              responderModelId: responderModelIdOverride || undefined,
-	              responderProvider: responderProviderOverride || undefined,
-	              responderApiKey: responderApiKeyOverride || undefined,
-	              samSpadeResponderPersonaPrompt: systemConfig.samSpadePersonaPrompt,
-	              samSpadeResponderScenarioPrompt: systemConfig.samSpadeScenarioPrompt,
-	            } : {}),
 	        },
         tuning: {
           entropyThreshold: governanceConfig.entropyThreshold,
@@ -4155,6 +4196,7 @@ export default function App() {
       const result = await solveSamSpadeCase({
         sessionId: session.sessionId,
         theory: samSpadeTheory,
+        callerUserId: session.ownerUserId,
         tuning: {
           entropyThreshold: governanceConfig.entropyThreshold,
           syntacticThreshold: governanceConfig.syntacticThreshold,
@@ -5092,7 +5134,7 @@ export default function App() {
                                         variant="outline"
                                         className={`rounded-md text-[10px] uppercase px-1.5 py-0.5 ${
                                           r === 'REGEX_MATCH' ? 'border-amber-500 text-amber-600 bg-amber-500/10' :
-                                          ['EMAIL', 'AWS_KEY', 'SECRET_KEY', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'PHONE'].includes(r) ? 'border-blue-500 text-blue-600 bg-blue-500/10' :
+                                          ['EMAIL', 'AWS_KEY', 'LLM_API_KEY', 'SECRET_KEY', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'PHONE'].includes(r) ? 'border-blue-500 text-blue-600 bg-blue-500/10' :
                                           'border-destructive text-destructive bg-destructive/10'
                                         }`}
                                       >
@@ -6579,6 +6621,7 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
               {(viewingPromptLog?.localPrecheckLatencyMs !== undefined ||
                 viewingPromptLog?.backendSafeguardLatencyMs !== undefined ||
                 viewingPromptLog?.backendGatewayLatencyMs !== undefined ||
+                viewingPromptLog?.instructionEmbeddingDurationMs !== undefined ||
                 viewingPromptLog?.responderLatencyMs !== undefined) && (
                 <>
                   <Separator />
@@ -6594,6 +6637,10 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                     <div className="rounded-md border bg-background/60 p-3">
                       <div className="font-semibold uppercase tracking-wide text-muted-foreground">Gateway Latency</div>
                       <div className="mt-1 font-mono text-foreground">{formatLatencyMs(viewingPromptLog?.backendGatewayLatencyMs)}</div>
+                    </div>
+                    <div className="rounded-md border bg-background/60 p-3">
+                      <div className="font-semibold uppercase tracking-wide text-muted-foreground">Embedding Duration</div>
+                      <div className="mt-1 font-mono text-foreground">{formatLatencyMs(viewingPromptLog?.instructionEmbeddingDurationMs)}</div>
                     </div>
                     <div className="rounded-md border bg-background/60 p-3">
                       <div className="font-semibold uppercase tracking-wide text-muted-foreground">Responder Latency</div>

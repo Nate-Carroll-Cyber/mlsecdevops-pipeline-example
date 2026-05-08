@@ -6,7 +6,6 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     container_name: counter-spy-backend
-    user: "0:0"
     env_file:
       # Local-only demo secrets and provider creds. This file is gitignored.
       - .env.demo.local
@@ -17,8 +16,11 @@ services:
       LOG_LEVEL: info
       # Instruction similarity monitor backed by PostgreSQL + pgvector.
       INSTRUCTION_MONITOR_ENABLED: "true"
-      INSTRUCTION_MONITOR_DATABASE_URL: "postgres://counter_spy:counter_spy@counter-spy-postgres:5432/counter_spy"
-      INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS: "1536"
+      INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS: "${INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS:-768}"
+      INSTRUCTION_MONITOR_EMBEDDINGS_ENABLED: "${INSTRUCTION_MONITOR_EMBEDDINGS_ENABLED:-true}"
+      INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL: "${INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL:-http://192.168.0.183:11434/v1}"
+      INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID: "${INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID:-nomic-embed-text}"
+      INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS: "${INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS:-4}"
       # Default safeguard judge for local inspector-style review.
       SAFEGUARDS_API_BASE_URL: "http://192.168.0.183:1234/v1/chat/completions"
       SAFEGUARDS_MODEL_ID: "gpt-oss-safeguard-20b"
@@ -48,6 +50,7 @@ services:
     environment:
       # Frontend uses the backend container by service name through Vite's proxy.
       BACKEND_PROXY_TARGET: "http://counter-spy-backend:8080"
+      VITE_BACKEND_BEARER_TOKEN: "${VITE_BACKEND_BEARER_TOKEN:-local-demo-backend-token-123456}"
       DISABLE_HMR: "true"
     ports:
       - "3000:3000"
@@ -61,10 +64,27 @@ services:
     environment:
       POSTGRES_DB: counter_spy
       POSTGRES_USER: counter_spy
-      POSTGRES_PASSWORD: counter_spy
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env.demo.local and run docker compose with --env-file .env.demo.local}"
       PGDATA: /var/lib/postgresql/data/pgdata
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --auth-local=scram-sha-256 --data-checksums"
+    command:
+      - "postgres"
+      - "-c"
+      - "password_encryption=scram-sha-256"
+      - "-c"
+      - "log_connections=on"
+      - "-c"
+      - "log_disconnections=on"
+      - "-c"
+      - "log_statement=ddl"
+      - "-c"
+      - "log_min_duration_statement=250"
+      - "-c"
+      - "statement_timeout=10s"
+      - "-c"
+      - "max_connections=100"
     ports:
-      - "15432:5432"
+      - "127.0.0.1:15432:5432"
     tmpfs:
       - /var/lib/postgresql/data
     healthcheck:

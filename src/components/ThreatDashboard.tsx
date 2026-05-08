@@ -52,7 +52,7 @@ const emptySeverityHourlyData = Array(24).fill(0).map((_, hour) => ({
   clean: 0,
 }));
 const PII_DETECTION_FLAGS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN'];
-const SECRET_DETECTION_FLAGS = ['AWS_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'SECRET_KEY'];
+const SECRET_DETECTION_FLAGS = ['AWS_KEY', 'LLM_API_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'CANARY_EXFIL', 'SECRET_KEY'];
 const DIRECT_OBFUSCATION_FLAGS = ['URL_ENCODING', 'HTML_ENTITIES', 'UNICODE_ESCAPES', 'COMPATIBILITY_GLYPHS', 'SYMBOL_SUBSTITUTION', 'LEETSPEAK', 'ROT13', 'REVERSE_TEXT', 'NATO_PHONETIC', 'MORSE_CODE', 'BRAILLE', 'REGIONAL_INDICATORS', 'RECURSIVE_DECODE'];
 const STRUCTURAL_OBFUSCATION_FLAGS = ['END_SEQUENCE', 'CHUNKING', 'VARIABLE_EXPANSION', 'VERTICAL_TEXT'];
 const RESPONDER_INTERVENTION_FLAGS = ['RESPONDER_BLOCK', 'RESPONDER_REFUSAL', 'RESPONDER_QUEUE_FOR_REVIEW', 'RESPONDER_FAIL_SECURE'];
@@ -438,6 +438,13 @@ function createEmptySeverityCounts(): SeverityCounts {
   };
 }
 
+function formatMetricLatencyMs(value: unknown): string {
+  const duration = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(duration) || duration <= 0) return '--';
+  if (duration >= 1000) return `${(duration / 1000).toFixed(2)}s`;
+  return `${duration.toFixed(1).replace(/\.0$/, '')}ms`;
+}
+
 // Export the ThreatDashboard functional component
 export function ThreatDashboard({
   localReviewMode = false,
@@ -654,6 +661,18 @@ export function ThreatDashboard({
         const p95Index = latencyValues.length > 0 ? Math.max(0, Math.ceil(latencyValues.length * 0.95) - 1) : 0;
         const p95LatencyMs = latencyValues.length > 0 ? latencyValues[p95Index] : 0;
         const maxLatencyMs = latencyValues.length > 0 ? latencyValues[latencyValues.length - 1] : 0;
+        const embeddingDurationValues = filteredLogs
+          .map((log) => Number(log.instructionEmbeddingDurationMs || 0))
+          .filter((duration) => Number.isFinite(duration) && duration > 0)
+          .sort((a, b) => a - b);
+        const averageEmbeddingDurationMs = embeddingDurationValues.length > 0
+          ? embeddingDurationValues.reduce((sum, duration) => sum + duration, 0) / embeddingDurationValues.length
+          : 0;
+        const embeddingP95Index = embeddingDurationValues.length > 0
+          ? Math.max(0, Math.ceil(embeddingDurationValues.length * 0.95) - 1)
+          : 0;
+        const p95EmbeddingDurationMs = embeddingDurationValues.length > 0 ? embeddingDurationValues[embeddingP95Index] : 0;
+        const maxEmbeddingDurationMs = embeddingDurationValues.length > 0 ? embeddingDurationValues[embeddingDurationValues.length - 1] : 0;
         const redosTrips = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('ReDoS_ATTEMPT_DETECTED')).length;
         const highLatencyCount = filteredLogs.filter((log) => Number(log.latencyMs || 0) > 100).length;
         const detectionSignalMetrics = calculateDetectionSignalMetrics(filteredLogs);
@@ -706,6 +725,10 @@ export function ThreatDashboard({
             averageLatencyMs: parseFloat(averageLatencyMs.toFixed(1)),
             p95LatencyMs: parseFloat((p95LatencyMs ?? 0).toFixed(1)),
             maxLatencyMs: parseFloat((maxLatencyMs ?? 0).toFixed(1)),
+            embeddingSampleCount: embeddingDurationValues.length,
+            averageEmbeddingDurationMs: parseFloat(averageEmbeddingDurationMs.toFixed(1)),
+            p95EmbeddingDurationMs: parseFloat((p95EmbeddingDurationMs ?? 0).toFixed(1)),
+            maxEmbeddingDurationMs: parseFloat((maxEmbeddingDurationMs ?? 0).toFixed(1)),
           },
           resilience: {
             redosTrips,
@@ -793,6 +816,7 @@ export function ThreatDashboard({
           localPrecheckLatencyMs: doc.data().localPrecheckLatencyMs || undefined,
           backendSafeguardLatencyMs: doc.data().backendSafeguardLatencyMs || undefined,
           backendGatewayLatencyMs: doc.data().backendGatewayLatencyMs || undefined,
+          instructionEmbeddingDurationMs: doc.data().instructionEmbeddingDurationMs || undefined,
         }));
         allLogs = mergeLocalAuditLogOverlays(allLogs, localAuditLogs, yesterday);
 
@@ -881,6 +905,18 @@ export function ThreatDashboard({
           : 0;
         const p95LatencyMs = latencyValues.length > 0 ? latencyValues[p95Index] : 0;
         const maxLatencyMs = latencyValues.length > 0 ? latencyValues[latencyValues.length - 1] : 0;
+        const embeddingDurationValues = filteredLogs
+          .map((log) => Number(log.instructionEmbeddingDurationMs || 0))
+          .filter((duration) => Number.isFinite(duration) && duration > 0)
+          .sort((a, b) => a - b);
+        const averageEmbeddingDurationMs = embeddingDurationValues.length > 0
+          ? embeddingDurationValues.reduce((sum, duration) => sum + duration, 0) / embeddingDurationValues.length
+          : 0;
+        const embeddingP95Index = embeddingDurationValues.length > 0
+          ? Math.max(0, Math.ceil(embeddingDurationValues.length * 0.95) - 1)
+          : 0;
+        const p95EmbeddingDurationMs = embeddingDurationValues.length > 0 ? embeddingDurationValues[embeddingP95Index] : 0;
+        const maxEmbeddingDurationMs = embeddingDurationValues.length > 0 ? embeddingDurationValues[embeddingDurationValues.length - 1] : 0;
         const redosTrips = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('ReDoS_ATTEMPT_DETECTED')).length;
         const highLatencyCount = filteredLogs.filter((log) => Number(log.latencyMs || 0) > 100).length;
         const detectionSignalMetrics = calculateDetectionSignalMetrics(filteredLogs);
@@ -933,6 +969,10 @@ export function ThreatDashboard({
             averageLatencyMs: parseFloat(averageLatencyMs.toFixed(1)),
             p95LatencyMs: parseFloat((p95LatencyMs ?? 0).toFixed(1)),
             maxLatencyMs: parseFloat((maxLatencyMs ?? 0).toFixed(1)),
+            embeddingSampleCount: embeddingDurationValues.length,
+            averageEmbeddingDurationMs: parseFloat(averageEmbeddingDurationMs.toFixed(1)),
+            p95EmbeddingDurationMs: parseFloat((p95EmbeddingDurationMs ?? 0).toFixed(1)),
+            maxEmbeddingDurationMs: parseFloat((maxEmbeddingDurationMs ?? 0).toFixed(1)),
           },
           resilience: {
             redosTrips,
@@ -1371,21 +1411,40 @@ export function ThreatDashboard({
             <CardContent className="space-y-2 text-sm">
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Average</span>
-                <span className="font-semibold text-cyan-400">{operationalMetrics.latency.averageLatencyMs} ms</span>
+                <span className="font-semibold text-cyan-400">{formatMetricLatencyMs(operationalMetrics.latency.averageLatencyMs)}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="flex items-center gap-1 text-muted-foreground">
                   <span>P95</span>
                   <HelpTooltip text="Time under which 95% of prompt evaluations completed." />
                 </span>
-                <span className="font-semibold text-indigo-400">{operationalMetrics.latency.p95LatencyMs} ms</span>
+                <span className="font-semibold text-indigo-400">{formatMetricLatencyMs(operationalMetrics.latency.p95LatencyMs)}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="flex items-center gap-1 text-muted-foreground">
                   <span>Max</span>
                   <HelpTooltip text="Slowest prompt evaluation observed in the current dataset." />
                 </span>
-                <span className="font-semibold text-amber-500">{operationalMetrics.latency.maxLatencyMs} ms</span>
+                <span className="font-semibold text-amber-500">{formatMetricLatencyMs(operationalMetrics.latency.maxLatencyMs)}</span>
+              </div>
+              <div className="border-t border-border/70 pt-2" />
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-1 text-muted-foreground">
+                  <span>Embedding Avg</span>
+                  <HelpTooltip text="Average duration for backend instruction-monitor embedding calls recorded on audit logs." />
+                </span>
+                <span className="font-semibold text-emerald-400">{formatMetricLatencyMs(operationalMetrics.latency.averageEmbeddingDurationMs)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="flex items-center gap-1 text-muted-foreground">
+                  <span>Embedding P95</span>
+                  <HelpTooltip text="Time under which 95% of recorded embedding calls completed." />
+                </span>
+                <span className="font-semibold text-teal-300">{formatMetricLatencyMs(operationalMetrics.latency.p95EmbeddingDurationMs)}</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-muted-foreground">Embedding Samples</span>
+                <span className="font-semibold text-slate-100">{operationalMetrics.latency.embeddingSampleCount}</span>
               </div>
             </CardContent>
           </Card>

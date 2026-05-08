@@ -22,6 +22,9 @@ export type InstructionMonitorInput = {
   chunks?: InstructionChunkInput[];
   verdict?: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL';
   detectionFlags?: string[];
+  reviewed?: boolean;
+  labels?: string[];
+  metadata?: Record<string, unknown>;
 };
 
 export type InstructionRecord = {
@@ -38,6 +41,9 @@ export type InstructionRecord = {
   chunks?: InstructionChunkInput[];
   verdict?: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL';
   detectionFlags?: string[];
+  reviewed?: boolean;
+  labels?: string[];
+  metadata?: Record<string, unknown>;
 };
 
 export type InstructionMatch = {

@@ -408,25 +408,11 @@ export function SyntacticAnalyzer({
       }
 
       if (translationEnabled) {
-        const trimmedLaraBaseUrl = laraBaseUrl.trim();
-        const trimmedLaraAccessKeyId = laraAccessKeyId.trim();
-        const trimmedLaraApiKey = laraApiKey.trim();
         const translationResult = await translatePromptViaBackend({
           text: currentText,
           provider: TRANSLATION_PROVIDER,
           mode: translationMode,
           ...(translationMode === 'generate_foreign_variant' ? { targetLang: translationTargetLang } : {}),
-          ...(
-            trimmedLaraBaseUrl || trimmedLaraAccessKeyId || trimmedLaraApiKey
-              ? {
-                  runtimeConfig: {
-                    ...(trimmedLaraBaseUrl ? { baseUrl: trimmedLaraBaseUrl } : {}),
-                    ...(trimmedLaraAccessKeyId ? { accessKeyId: trimmedLaraAccessKeyId } : {}),
-                    ...(trimmedLaraApiKey ? { apiKey: trimmedLaraApiKey } : {}),
-                  },
-                }
-              : {}
-          ),
         });
         translated = translationResult;
         currentText = translationResult.text;

@@ -37,6 +37,7 @@ interface CreditCardMatch {
 
 const SENSITIVE_PATTERNS: SensitivePattern[] = [
   { name: 'EMAIL', regex: /[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/g },
+  { name: 'LLM_API_KEY', regex: /(?<![A-Za-z0-9])sk[-_](?:proj[-_]|svcacct[-_])?[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_-])/g },
   { name: 'PHONE', regex: /(?<!\d)(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/g },
   { name: 'AWS_KEY', regex: /AKIA[0-9A-Z]{16}/g },
   { name: 'PRIVATE_KEY', regex: /-----BEGIN (RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----/g },
@@ -46,6 +47,7 @@ const SENSITIVE_PATTERNS: SensitivePattern[] = [
   { name: 'CANARY_TOKEN', regex: /COUNTERSPY_CANARY_TOKEN_[0-9a-fA-F-]{36}/g },
   { name: 'SECRET_KEY', regex: /(?:secret[-_]?key|password|passwd|api[-_]?key|token)(?:\s+is\s+|\s*[:=]\s*)([^\s]+)/gi },
 ];
+const CANARY_EXFIL_FLAG = 'CANARY_EXFIL';
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
 const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
@@ -1197,6 +1199,10 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     if (prompt.match(pattern.regex)) {
       redactions.add(pattern.name);
       detectionFlags.add(pattern.name);
+      if (pattern.name === 'CANARY_TOKEN') {
+        redactions.add(CANARY_EXFIL_FLAG);
+        detectionFlags.add(CANARY_EXFIL_FLAG);
+      }
       sanitized = sanitized.replace(pattern.regex, `[REDACTED_${pattern.name}]`);
     }
   }
@@ -1212,6 +1218,10 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     if (placeholderName) {
       redactions.add(placeholderName);
       detectionFlags.add(placeholderName);
+      if (placeholderName === 'CANARY_TOKEN') {
+        redactions.add(CANARY_EXFIL_FLAG);
+        detectionFlags.add(CANARY_EXFIL_FLAG);
+      }
     }
   }
 
@@ -1410,7 +1420,7 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
   if (entropyAnalysis.maxEntropy > ADVERSARIAL_ENTROPY_THRESHOLD && entropyContextSuspicious) reasons.push('adversarial entropy threshold exceeded');
   if (syntacticScore >= 90) reasons.push('adversarial syntactic complexity threshold exceeded');
   if (redactions.has('CANARY_TOKEN')) reasons.push('canary token disclosure attempt detected');
-  if (redactions.has('PRIVATE_KEY') || redactions.has('AWS_KEY')) reasons.push('high-risk secret material detected');
+  if (redactions.has('PRIVATE_KEY') || redactions.has('AWS_KEY') || redactions.has('LLM_API_KEY')) reasons.push('high-risk secret material detected');
 
   if (reasons.length > 0) {
     verdict = 'ADVERSARIAL';
@@ -1462,7 +1472,7 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
 
   const latencyMs = performance.now() - start;
   if (latencyMs > SANITIZATION_REDOS_LATENCY_THRESHOLD_MS) {
-    detectionFlags.add('REDOS_ATTEMPT');
+    detectionFlags.add('ReDoS_ATTEMPT_DETECTED');
     verdict = 'ADVERSARIAL';
     reasons.push('sanitization latency exceeded fail-secure threshold');
   }

@@ -100,12 +100,118 @@ service cloud.firestore {
         data.role == resource.data.role;
     }
 
+    function hasNoServerOwnedAuditFields(data) {
+      return !data.keys().hasAny([
+        'backendGatewayStatus',
+        'backendSafeguardVerdict',
+        'backendSafeguardReasoning',
+        'backendReachedSafeguard',
+        'instructionSimilarity',
+        'localPrecheckLatencyMs',
+        'backendSafeguardLatencyMs',
+        'backendGatewayLatencyMs',
+        'instructionEmbeddingDurationMs',
+        'judgeDecision',
+        'forwardedPromptHash',
+        'responderModel',
+        'responderStatus',
+        'responderLatencyMs',
+        'reviewed',
+        'status',
+        'resultantSeverity',
+        'promoted'
+      ]);
+    }
+
+    function optionalString(data, field, maxSize) {
+      return !data.keys().hasAny([field]) || (data[field] is string && data[field].size() <= maxSize);
+    }
+
+    function optionalNumber(data, field) {
+      return !data.keys().hasAny([field]) || data[field] is number;
+    }
+
+    function optionalBool(data, field) {
+      return !data.keys().hasAny([field]) || data[field] is bool;
+    }
+
+    function optionalList(data, field, maxItems) {
+      return !data.keys().hasAny([field]) || (data[field] is list && data[field].size() <= maxItems);
+    }
+
+    function optionalMap(data, field) {
+      return !data.keys().hasAny([field]) || data[field] is map;
+    }
+
     function isValidAuditLog(data) {
-      return data.keys().hasAll(['userId', 'timestamp', 'sanitizedPrompt']) &&
+      return data.keys().hasOnly([
+          'userId',
+          'userRole',
+          'sessionId',
+          'timestamp',
+          'sanitizedPrompt',
+          'detectionFlags',
+          'obfuscationSummary',
+          'entropy',
+          'globalEntropy',
+          'suspiciousChunks',
+          'featureVector',
+          'featurePressure',
+          'researchSignal',
+          'topPressureDriver',
+          'topResearchDriver',
+          'escalationRecommended',
+          'detectionLevel',
+          'latencyMs',
+          'modelId',
+          'source',
+          'batchId',
+          'expectedVerdict',
+          'response',
+          'contextWindowLimit',
+          'contextWindowUtilization',
+          'atlasTactic',
+          'atlasTechniqueId',
+          'atlasTechniqueName',
+          'localArchetype',
+          'taxonomyConfidence',
+          'taxonomyNotes'
+        ]) &&
+        data.keys().hasAll(['userId', 'timestamp', 'sanitizedPrompt']) &&
+        hasNoServerOwnedAuditFields(data) &&
         data.userId == request.auth.uid &&
         data.timestamp is timestamp &&
         data.sanitizedPrompt is string &&
-        data.sanitizedPrompt.size() < 5000;
+        data.sanitizedPrompt.size() > 0 &&
+        data.sanitizedPrompt.size() < 5000 &&
+        optionalString(data, 'userRole', 64) &&
+        optionalString(data, 'sessionId', 128) &&
+        optionalList(data, 'detectionFlags', 40) &&
+        optionalString(data, 'obfuscationSummary', 1000) &&
+        optionalNumber(data, 'entropy') &&
+        optionalNumber(data, 'globalEntropy') &&
+        optionalList(data, 'suspiciousChunks', 50) &&
+        optionalMap(data, 'featureVector') &&
+        optionalMap(data, 'featurePressure') &&
+        optionalMap(data, 'researchSignal') &&
+        optionalString(data, 'topPressureDriver', 128) &&
+        optionalString(data, 'topResearchDriver', 128) &&
+        optionalBool(data, 'escalationRecommended') &&
+        optionalNumber(data, 'detectionLevel') &&
+        optionalNumber(data, 'latencyMs') &&
+        optionalString(data, 'modelId', 128) &&
+        optionalString(data, 'source', 64) &&
+        optionalString(data, 'batchId', 128) &&
+        optionalString(data, 'expectedVerdict', 32) &&
+        optionalString(data, 'response', 5000) &&
+        optionalNumber(data, 'contextWindowLimit') &&
+        optionalNumber(data, 'contextWindowUtilization') &&
+        optionalString(data, 'atlasTactic', 128) &&
+        optionalString(data, 'atlasTechniqueId', 64) &&
+        optionalString(data, 'atlasTechniqueName', 128) &&
+        optionalString(data, 'localArchetype', 128) &&
+        optionalNumber(data, 'taxonomyConfidence') &&
+        optionalString(data, 'taxonomyNotes', 1000);
     }
 
     // ===============================================================

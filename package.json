@@ -11,6 +11,7 @@
     "backend:check": "tsc -p backend/tsconfig.json --noEmit",
     "backend:test": "node --import tsx --test backend/test/*.test.ts src/lib/*.test.ts",
     "instruction-monitor:seed:core": "tsx backend/src/services/instruction-monitor/seed-core.ts",
+    "instruction-monitor:export:core": "tsx backend/src/services/instruction-monitor/export-core.ts",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",

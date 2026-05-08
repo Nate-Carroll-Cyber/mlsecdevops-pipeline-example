@@ -579,81 +579,112 @@ async function generateInstructionMonitorEmbeddings(text: string): Promise<{
   const chunkTexts = env.INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS > 0
     ? chunkText(text).filter((chunk) => chunk.trim()).slice(0, env.INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS)
     : [];
-  const inputs = [text, ...chunkTexts];
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), env.INSTRUCTION_MONITOR_EMBEDDINGS_TIMEOUT_MS);
   const startedAt = Date.now();
+  const endpoint = getOpenAiCompatibleEmbeddingsEndpoint(embeddingsRuntime.baseUrl);
+  const fetchEmbeddings = async (inputs: string[], label: 'whole_and_chunks' | 'chunks_only') => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), env.INSTRUCTION_MONITOR_EMBEDDINGS_TIMEOUT_MS);
+    try {
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        signal: controller.signal,
+        headers: {
+          'content-type': 'application/json',
+          ...(embeddingsRuntime.apiKey ? { authorization: `Bearer ${embeddingsRuntime.apiKey}` } : {}),
+        },
+        body: JSON.stringify({
+          model: embeddingsRuntime.modelId,
+          input: inputs,
+        }),
+      });
 
-  try {
-    const response = await fetch(getOpenAiCompatibleEmbeddingsEndpoint(embeddingsRuntime.baseUrl), {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'content-type': 'application/json',
-        ...(embeddingsRuntime.apiKey ? { authorization: `Bearer ${embeddingsRuntime.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: embeddingsRuntime.modelId,
-        input: inputs,
-      }),
-    });
+      if (!response.ok) {
+        log('warn', 'instruction_embedding_provider_rejected', {
+          status: response.status,
+          modelId: embeddingsRuntime.modelId,
+          source: embeddingsRuntime.source,
+          inputMode: label,
+          inputCount: inputs.length,
+        });
+        return undefined;
+      }
 
-    if (!response.ok) {
-      log('warn', 'instruction_embedding_provider_rejected', {
-        status: response.status,
+      const payload = await response.json() as {
+        data?: Array<{ index?: number; embedding?: unknown }>;
+      };
+      const embeddingsByIndex = new Map<number, number[]>();
+      for (const item of payload.data ?? []) {
+        const embedding = asNumberArray(item.embedding);
+        if (typeof item.index === 'number' && embedding) embeddingsByIndex.set(item.index, embedding);
+      }
+      return embeddingsByIndex;
+    } catch (error) {
+      const message = error instanceof Error && error.name === 'AbortError'
+        ? `Instruction embedding request timed out after ${env.INSTRUCTION_MONITOR_EMBEDDINGS_TIMEOUT_MS}ms.`
+        : error instanceof Error
+          ? error.message
+          : 'Instruction embedding request failed.';
+      log('warn', 'instruction_embedding_failed', {
+        error: message,
         modelId: embeddingsRuntime.modelId,
         source: embeddingsRuntime.source,
+        inputMode: label,
+        inputCount: inputs.length,
       });
       return undefined;
+    } finally {
+      clearTimeout(timeout);
     }
+  };
 
-    const payload = await response.json() as {
-      data?: Array<{ index?: number; embedding?: unknown }>;
-    };
-    const embeddingsByIndex = new Map<number, number[]>();
-    for (const item of payload.data ?? []) {
-      const embedding = asNumberArray(item.embedding);
-      if (typeof item.index === 'number' && embedding) embeddingsByIndex.set(item.index, embedding);
-    }
-
-    const embedding = embeddingsByIndex.get(0);
-    const chunks = chunkTexts.flatMap((chunk, index): InstructionChunkInput[] => {
-      const chunkEmbedding = embeddingsByIndex.get(index + 1);
+  const buildChunks = (embeddingsByIndex: Map<number, number[]>, indexOffset: number) => {
+    return chunkTexts.flatMap((chunk, index): InstructionChunkInput[] => {
+      const chunkEmbedding = embeddingsByIndex.get(index + indexOffset);
       return chunkEmbedding ? [{ text: chunk, embedding: chunkEmbedding }] : [];
     });
+  };
 
-    const durationMs = Date.now() - startedAt;
-    if (embedding) {
-      log('info', 'instruction_embedding_generated', {
-        modelId: embeddingsRuntime.modelId,
-        source: embeddingsRuntime.source,
-        inputCount: inputs.length,
-        embeddingDimensions: embedding.length,
-        chunkCount: chunks.length,
-        durationMs,
+  const batchedInputs = [text, ...chunkTexts];
+  const embeddingsByIndex = await fetchEmbeddings(batchedInputs, 'whole_and_chunks');
+  const embedding = embeddingsByIndex?.get(0);
+  let chunks = embeddingsByIndex ? buildChunks(embeddingsByIndex, 1) : [];
+
+  if (!chunks.length && chunkTexts.length) {
+    const chunkOnlyEmbeddingsByIndex = await fetchEmbeddings(chunkTexts, 'chunks_only');
+    if (chunkOnlyEmbeddingsByIndex) {
+      chunks = chunkTexts.flatMap((chunk, index): InstructionChunkInput[] => {
+        const chunkEmbedding = chunkOnlyEmbeddingsByIndex.get(index);
+        return chunkEmbedding ? [{ text: chunk, embedding: chunkEmbedding }] : [];
       });
+      if (chunks.length) {
+        log('info', 'instruction_chunk_embedding_generated_after_whole_prompt_failure', {
+          modelId: embeddingsRuntime.modelId,
+          source: embeddingsRuntime.source,
+          chunkCount: chunks.length,
+          durationMs: Date.now() - startedAt,
+        });
+      }
     }
+  }
 
-    return {
-      ...(embedding ? { embedding } : {}),
-      ...(chunks.length ? { chunks } : {}),
-      durationMs,
-    };
-  } catch (error) {
-    const message = error instanceof Error && error.name === 'AbortError'
-      ? `Instruction embedding request timed out after ${env.INSTRUCTION_MONITOR_EMBEDDINGS_TIMEOUT_MS}ms.`
-      : error instanceof Error
-        ? error.message
-        : 'Instruction embedding request failed.';
-    log('warn', 'instruction_embedding_failed', {
-      error: message,
+  const durationMs = Date.now() - startedAt;
+  if (embedding || chunks.length) {
+    log('info', 'instruction_embedding_generated', {
       modelId: embeddingsRuntime.modelId,
       source: embeddingsRuntime.source,
+      inputCount: batchedInputs.length,
+      ...(embedding ? { embeddingDimensions: embedding.length } : {}),
+      chunkCount: chunks.length,
+      durationMs,
+      embeddingMode: embedding ? 'whole_and_chunks' : 'chunks_only',
     });
-    return undefined;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  return {
+    ...(embedding ? { embedding } : {}),
+    ...(chunks.length ? { chunks } : {}),
+    durationMs,
+  };
 }
 
 async function evaluateInstructionSimilarity(args: {

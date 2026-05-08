@@ -30,13 +30,15 @@ Analysts should perform these tasks at the start of every shift:
 
 The **Metrics** tab is the primary interface for real-time situational awareness and your early-warning system for separating noise from targeted attacks.
 
-### 3.1 Threat Velocity & Z-Score
+### 3.1 Threat Velocity & Spike Indicators
 
 The dashboard tracks the rate of threats (Suspicious or Adversarial logs) over a rolling 24-hour window.
 
 **Threat Velocity** is expressed as a percentage change from the 24-hour baseline. A value of **+500%** indicates that current threat activity is five times higher than the recent baseline.
 
-**Z-Score** measures how many standard deviations the current threat rate is from the mean, calculated in real-time:
+**Current Beta note:** The Metrics surface provides real-time threat velocity and alert-severity visibility from audit records. The local anomaly helper currently computes a rolling spike ratio against a 24-hour hourly baseline, not a production incidenting service with PagerDuty/Slack delivery. If your deployment uses formal Z-score thresholds, calculate and alert on those in the production telemetry pipeline.
+
+**Production target:** A Z-score can measure how many standard deviations the current threat rate is from the mean:
 
 $$Z = \frac{x - \mu}{\sigma}$$
 
@@ -48,15 +50,15 @@ $$Z = \frac{x - \mu}{\sigma}$$
 
 **Alert Thresholds:**
 
-| Z-Score | Status | Required Action |
+| Indicator | Status | Required Action |
 | :--- | :--- | :--- |
-| < 1.0 | Normal | No action required. |
-| 1.0 – 3.0 | Active Interest | Monitor for repeated payloads from a single `userId`. |
-| > 2.0 | Statistically Significant | Increase monitoring cadence. |
-| > 5.0 | **Coordinated Incident** | Statistically impossible without automation. Evaluate Global System Pause. Notify Lead Architect. |
+| Low | Normal | No action required. |
+| Elevated | Active Interest | Monitor for repeated payloads from a single `userId`. |
+| Significant | Statistically Significant | Increase monitoring cadence. |
+| Critical | **Coordinated Incident** | Evaluate Global System Pause. Notify Lead Architect. |
 
 > [!IMPORTANT]
-> **Notification Escalation:** When a Z-Score exceeds **5.0**, a high-priority incident is created. In production, this triggers an automated alert to **PagerDuty** and the **#soc-alerts** Slack channel.
+> **Notification Escalation:** PagerDuty/Slack incident creation is a planned production integration, not current repo functionality. In the current Beta, operators should treat high spike indicators as a manual escalation trigger.
 
 > [!TIP]
 > Use the **Hide Simulated** toggle to filter out bulk ingest and test data, ensuring metrics reflect real-world user intent only.
@@ -92,7 +94,7 @@ Operator note: `Blocked Topics` metrics currently count normalized phrase-family
 ### 4.1 Review Process
 
 1. **Identify:** Locate logs with the purple `REVIEW` status in the queue.
-2. **Inspect:** Use the **Full Prompt Inspection** dialog to view the raw, un-redacted text.
+2. **Inspect:** Use the **Full Prompt Inspection** dialog to view the persisted sanitized prompt, response, detection flags, obfuscation telemetry, and backend timing fields. Raw un-redacted prompt storage is not enabled in the current Beta.
 3. **Cross-Reference:** Check the **Session ID** to identify whether this user has had multiple previous interceptions.
 4. **Verdict:** Assign a **Resultant Severity** using the Decision Tree below.
 
@@ -138,7 +140,7 @@ graph TD
 
 Activate the Global System Pause when **any** of the following conditions are met:
 
-1. **Z-Score > 5.0** sustained for more than 10 minutes.
+1. **Critical spike indicator** sustained for more than 10 minutes.
 2. **Canary Token Trigger:** The system detects `COUNTERSPY_CANARY_TOKEN` in a log, indicating a System Instruction breach.
 3. **Third-Party Outage:** AWS Bedrock or Gemini is experiencing a degraded state (503 errors).
 4. **Automatic ReDoS Trigger:** Sanitization latency exceeds 1,000ms, which blocks the triggering prompt, logs `ReDoS_ATTEMPT_DETECTED`, and flips `isGlobalPause` on for subsequent traffic.
@@ -152,7 +154,7 @@ Activate the Global System Pause when **any** of the following conditions are me
 2. **Verify:** Confirm that the attack vector (e.g., a specific regex bypass) has been patched in the **Knowledge Base**.
 3. **Tune:** Adjust Entropy or Complexity thresholds to catch the pattern that triggered the pause.
 4. **Resume:** Toggle the Global System Pause to **OFF**.
-5. **Monitor:** Remain on the Metrics tab and observe the Z-Score for a minimum of 15 minutes to confirm new thresholds are holding.
+5. **Monitor:** Remain on the Metrics tab and observe threat velocity for a minimum of 15 minutes to confirm new thresholds are holding.
 
 ---
 

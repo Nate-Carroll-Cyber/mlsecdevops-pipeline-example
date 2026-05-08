@@ -274,6 +274,8 @@ Current `core` seed status:
 - Fresh import check: first import inserted `151` records and `443` chunks; second import skipped all `151` records
 - Drift check: a changed seed record with recomputed hashes was refused without `--allow-seed-update`
 
+The source intake pass contained `163` reviewed adversarial rows before export. The `core` snapshot intentionally stores `151` unique normalized SHA-256 records after removing exact duplicates. A UI replay of the original pass can still show roughly `163` blocked or flagged items because duplicate prompts are covered by the same strict/loose hash and SimHash seed records; the lower seed-row count is expected and does not mean those duplicate prompts lost coverage.
+
 Recommended controlled-seed loop:
 
 1. Rebuild a clean pgvector database.

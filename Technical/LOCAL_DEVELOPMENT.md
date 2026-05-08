@@ -246,6 +246,8 @@ Import the current `core` seed:
 npm run instruction-monitor:seed:core
 ```
 
+The Docker demo imports the bundled `core` seed automatically on backend startup by default with `INSTRUCTION_MONITOR_SEED_CORE_ON_START=true`. The import is idempotent, so repeated container starts skip matching seed records. Set `INSTRUCTION_MONITOR_SEED_CORE_ON_START=false` when intentionally starting with an empty pgvector corpus for a new controlled intake run.
+
 The import verifies `embeddingDimensions`, `seedSnapshotHash`, and every `seedRecordHash`. Existing seed records with matching hashes are skipped. Changed seed records fail closed unless the operator explicitly runs:
 
 ```bash

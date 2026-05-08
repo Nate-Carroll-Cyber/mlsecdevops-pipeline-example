@@ -18,6 +18,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && apk add --no-cache su-exec
 COPY --from=build /app/backend/dist ./backend/dist
+COPY seeds ./seeds
 COPY backend/docker-entrypoint.sh /usr/local/bin/counter-spy-backend-entrypoint
 RUN chmod +x /usr/local/bin/counter-spy-backend-entrypoint
 # Expose a simple health endpoint for Docker/ECS style health checks.

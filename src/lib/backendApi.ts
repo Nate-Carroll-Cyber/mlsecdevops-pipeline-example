@@ -11,6 +11,7 @@ const BACKEND_INTERCEPT_TIMEOUT_MS = 45_000;
 const BackendInterceptResponseSchema = z.object({
   requestId: z.string(),
   status: z.enum(['CLEAN', 'QUEUED', 'INTERCEPTED', 'SHIELD_ERROR']),
+  governanceAction: z.literal('GLOBAL_PAUSE').optional(),
   sanitizedPrompt: z.string(),
   detectionFlags: z.array(z.string()),
   instructionSimilarity: z.object({
@@ -40,6 +41,7 @@ const BackendInterceptResponseSchema = z.object({
     globalEntropy: z.number(),
     syntacticScore: z.number(),
     latencyMs: z.number(),
+    instructionEmbeddingDurationMs: z.number().optional(),
     localPrecheckLatencyMs: z.number().optional(),
     safeguardLatencyMs: z.number().optional(),
     gatewayLatencyMs: z.number().optional(),
@@ -95,6 +97,14 @@ const BackendHealthResponseSchema = z.object({
   }).optional(),
 });
 
+const ReviewedAdversarialInstructionResponseSchema = z.object({
+  status: z.literal('OBSERVED'),
+  recordId: z.string(),
+  embedded: z.boolean(),
+  chunkCount: z.number(),
+  embeddingDurationMs: z.number().optional(),
+});
+
 const SamSpadeMessageSchema = z.object({
   id: z.string(),
   role: z.enum(['player', 'npc', 'system']),
@@ -131,6 +141,7 @@ const SamSpadeReviewArtifactSchema = z.object({
 const SamSpadeSessionSchema = z.object({
   sessionId: z.string(),
   caseId: z.string(),
+  ownerUserId: z.string(),
   status: z.enum(['ACTIVE', 'SOLVED', 'INTERCEPTED']),
   createdAt: z.string(),
   updatedAt: z.string(),
@@ -158,6 +169,7 @@ const SamSpadeSolveResponseSchema = z.object({
 export interface BackendInterceptResponse {
   requestId: string;
   status: 'CLEAN' | 'QUEUED' | 'INTERCEPTED' | 'SHIELD_ERROR';
+  governanceAction?: 'GLOBAL_PAUSE';
   sanitizedPrompt: string;
   detectionFlags: string[];
   instructionSimilarity?: {
@@ -187,6 +199,7 @@ export interface BackendInterceptResponse {
     globalEntropy: number;
     syntacticScore: number;
     latencyMs: number;
+    instructionEmbeddingDurationMs?: number;
     localPrecheckLatencyMs?: number;
     safeguardLatencyMs?: number;
     gatewayLatencyMs?: number;
@@ -242,6 +255,14 @@ export interface BackendHealthResponse {
   };
 }
 
+export interface ReviewedAdversarialInstructionResponse {
+  status: 'OBSERVED';
+  recordId: string;
+  embedded: boolean;
+  chunkCount: number;
+  embeddingDurationMs?: number;
+}
+
 export interface SamSpadeMessage {
   id: string;
   role: 'player' | 'npc' | 'system';
@@ -278,6 +299,7 @@ export interface SamSpadeReviewArtifact {
 export interface SamSpadeSession {
   sessionId: string;
   caseId: string;
+  ownerUserId: string;
   status: 'ACTIVE' | 'SOLVED' | 'INTERCEPTED';
   createdAt: string;
   updatedAt: string;
@@ -295,6 +317,35 @@ export function getBackendApiBaseUrl() {
 function resolveBackendUrl(path: string) {
   const apiBaseUrl = getBackendApiBaseUrl();
   return apiBaseUrl ? `${apiBaseUrl}${path}` : path;
+}
+
+type BackendRequestMetadata = {
+  localReviewMode?: boolean;
+  source?: 'analyst_chat' | 'bulk_ingest' | 'ctf_chat' | 'ctf_solve' | 'playground' | 'system';
+  providerLlmRoutingEnabled?: boolean;
+  responderLlmRoutingEnabled?: boolean;
+  safeguardApiKey?: string;
+  instructionEmbedding?: number[];
+  instructionChunks?: Array<{
+    text: string;
+    embedding: number[];
+    intentScore?: number;
+  }>;
+};
+
+type SamSpadeRequestMetadata = {
+  localReviewMode?: boolean;
+  providerLlmRoutingEnabled?: boolean;
+  responderLlmRoutingEnabled?: boolean;
+};
+
+function getProtectedHeaders(callerUserId?: string): HeadersInit {
+  const token = import.meta.env.VITE_BACKEND_BEARER_TOKEN?.trim();
+  return {
+    'content-type': 'application/json',
+    ...(token ? { authorization: `Bearer ${token}` } : {}),
+    ...(callerUserId ? { 'x-counter-spy-user-id': callerUserId } : {}),
+  };
 }
 
 async function fetchJsonWithTimeout(path: string, init?: RequestInit, timeoutMs: number = 10000) {
@@ -323,7 +374,7 @@ export async function interceptPrompt(input: {
   prompt: string;
   userId?: string;
   sessionId?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: BackendRequestMetadata;
   tuning?: {
     entropyThreshold?: number;
     syntacticThreshold?: number;
@@ -334,9 +385,7 @@ export async function interceptPrompt(input: {
 }): Promise<BackendInterceptResponse> {
   const { response, payload } = await fetchJsonWithTimeout('/v1/intercept', {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
+    headers: getProtectedHeaders(input.userId),
     body: JSON.stringify(input),
   }, BACKEND_INTERCEPT_TIMEOUT_MS);
 
@@ -367,17 +416,10 @@ export async function translatePromptViaBackend(input: {
   provider?: 'lara';
   mode?: 'recover_to_english' | 'generate_foreign_variant';
   targetLang?: string;
-  runtimeConfig?: {
-    baseUrl?: string;
-    accessKeyId?: string;
-    apiKey?: string;
-  };
 }): Promise<BackendTranslateResponse> {
   const response = await fetch(resolveBackendUrl('/v1/translate'), {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
+    headers: getProtectedHeaders(),
     body: JSON.stringify(input),
   });
 
@@ -403,16 +445,43 @@ export async function checkBackendHealth(): Promise<BackendHealthResponse> {
   return BackendHealthResponseSchema.parse(payload);
 }
 
+export async function observeReviewedAdversarialInstruction(input: {
+  logId: string;
+  sanitizedPrompt: string;
+  source?: 'analyst_chat' | 'bulk_ingest' | 'ctf_chat' | 'ctf_solve' | 'playground' | 'system';
+  detectionFlags?: string[];
+  labels?: string[];
+  metadata?: {
+    auditLogId?: string;
+    batchId?: string;
+    expectedVerdict?: string;
+    backendSafeguardVerdict?: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL';
+    source?: 'analyst_chat' | 'bulk_ingest' | 'ctf_chat' | 'ctf_solve' | 'playground' | 'system';
+  };
+}): Promise<ReviewedAdversarialInstructionResponse> {
+  const { response, payload } = await fetchJsonWithTimeout('/v1/instruction-monitor/reviewed-adversarial', {
+    method: 'POST',
+    headers: getProtectedHeaders(),
+    body: JSON.stringify(input),
+  }, BACKEND_INTERCEPT_TIMEOUT_MS);
+
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : 'Failed to store reviewed adversarial instruction.');
+  }
+
+  return ReviewedAdversarialInstructionResponseSchema.parse(payload);
+}
+
 // Start a fresh Sam Spade session.
 export async function createSamSpadeSession(input?: {
   caseId?: string;
+  callerUserId?: string;
 }): Promise<SamSpadeSession> {
   const { response, payload } = await fetchJsonWithTimeout('/v1/ctf/sam-spade/session', {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(input ?? {}),
+    headers: getProtectedHeaders(input?.callerUserId),
+    body: JSON.stringify(input?.caseId ? { caseId: input.caseId } : {}),
   });
   if (!response.ok) {
     const errorPayload = z.object({ error: z.string() }).safeParse(payload);
@@ -422,8 +491,10 @@ export async function createSamSpadeSession(input?: {
   return SamSpadeSessionResponseSchema.parse(payload).session;
 }
 
-export async function getSamSpadeSession(sessionId: string): Promise<SamSpadeSession> {
-  const { response, payload } = await fetchJsonWithTimeout(`/v1/ctf/sam-spade/session/${sessionId}`);
+export async function getSamSpadeSession(sessionId: string, callerUserId?: string): Promise<SamSpadeSession> {
+  const { response, payload } = await fetchJsonWithTimeout(`/v1/ctf/sam-spade/session/${sessionId}`, {
+    headers: getProtectedHeaders(callerUserId),
+  });
 
   if (!response.ok) {
     const errorPayload = z.object({ error: z.string() }).safeParse(payload);
@@ -436,7 +507,8 @@ export async function getSamSpadeSession(sessionId: string): Promise<SamSpadeSes
 export async function sendSamSpadeMessage(input: {
   sessionId: string;
   prompt: string;
-  metadata?: Record<string, unknown>;
+  callerUserId?: string;
+  metadata?: SamSpadeRequestMetadata;
   tuning?: {
     entropyThreshold?: number;
     syntacticThreshold?: number;
@@ -445,12 +517,11 @@ export async function sendSamSpadeMessage(input: {
     regexRules?: string[];
   };
 }): Promise<{ session: SamSpadeSession; review: SamSpadeReviewArtifact }> {
+  const { callerUserId, ...body } = input;
   const { response, payload } = await fetchJsonWithTimeout('/v1/ctf/sam-spade/message', {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(input),
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     const errorPayload = z.object({ error: z.string() }).safeParse(payload);
@@ -463,6 +534,7 @@ export async function sendSamSpadeMessage(input: {
 export async function solveSamSpadeCase(input: {
   sessionId: string;
   theory: string;
+  callerUserId?: string;
   tuning?: {
     entropyThreshold?: number;
     syntacticThreshold?: number;
@@ -471,12 +543,11 @@ export async function solveSamSpadeCase(input: {
     regexRules?: string[];
   };
 }): Promise<{ session: SamSpadeSession; solved: boolean; evaluation: string; review: SamSpadeReviewArtifact }> {
+  const { callerUserId, ...body } = input;
   const { response, payload } = await fetchJsonWithTimeout('/v1/ctf/sam-spade/solve', {
     method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-    },
-    body: JSON.stringify(input),
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify(body),
   });
   if (!response.ok) {
     const errorPayload = z.object({ error: z.string() }).safeParse(payload);

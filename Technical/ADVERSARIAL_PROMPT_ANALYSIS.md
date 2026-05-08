@@ -123,6 +123,7 @@ The current audit log already captures much of what we need. For analysis, deriv
 | `localPrecheckLatencyMs` | `number?` | Backend deterministic precheck latency for prompts that reached `/v1/intercept` |
 | `backendSafeguardLatencyMs` | `number?` | Pure safeguard judge call latency, excluding local precheck and responder time |
 | `backendGatewayLatencyMs` | `number?` | Total backend gateway latency for the intercept request |
+| `instructionEmbeddingDurationMs` | `number?` | Backend instruction-monitor embedding duration for pgvector/Ollama requests |
 | `responderLatencyMs` | `number?` | Downstream responder latency; local responder passthrough records `0` |
 | `failSecureFlags` | `string[]?` | Derived from `SAFEGUARD_TIMEOUT`, `SAFEGUARD_ERROR`, `FAIL_SECURE`, and `ReDoS_ATTEMPT_DETECTED` flags |
 | `atlasTactic` | `string?` | Active MITRE ATLAS organizer shown in the UI |

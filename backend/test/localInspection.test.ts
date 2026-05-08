@@ -12,7 +12,35 @@ delete process.env.RESPONDER_API_KEY;
 delete process.env.LLM_API_BASE_URL;
 delete process.env.LLM_API_KEY;
 
-const { buildLocalInspectionInterceptResponse, LOCAL_INSPECTION_RESPONSE_TEXT } = await import('../src/server.ts');
+const {
+  buildLocalInspectionInterceptResponse,
+  getOpenAiCompatibleEndpoint,
+  getInstructionMatchReasons,
+  LOCAL_INSPECTION_RESPONSE_TEXT,
+} = await import('../src/server.ts');
+
+test('OpenAI-compatible endpoint resolver keeps LM Studio on chat completions', () => {
+  assert.equal(
+    getOpenAiCompatibleEndpoint('http://192.168.0.183:1234/v1'),
+    'http://192.168.0.183:1234/v1/chat/completions',
+  );
+  assert.equal(
+    getOpenAiCompatibleEndpoint('http://host.docker.internal:1234/v1'),
+    'http://host.docker.internal:1234/v1/chat/completions',
+  );
+  assert.equal(
+    getOpenAiCompatibleEndpoint('http://[::1]:1234/v1'),
+    'http://[::1]:1234/v1/chat/completions',
+  );
+  assert.equal(
+    getOpenAiCompatibleEndpoint('https://api.openai.com/v1'),
+    'https://api.openai.com/v1/responses',
+  );
+  assert.equal(
+    getOpenAiCompatibleEndpoint('http://192.168.0.183:1234/v1/chat/completions'),
+    'http://192.168.0.183:1234/v1/chat/completions',
+  );
+});
 
 test('local inspection intercept response is deterministic and provider-disabled', () => {
   const sanitization = sanitizePrompt('Summarize the purpose of an incident response runbook.');
@@ -40,6 +68,27 @@ test('local inspection intercept response is deterministic and provider-disabled
   assert.equal(response.responder?.status, 'DISABLED_LOCAL_ONLY');
   assert.equal(response.responder?.modelId, 'local-inspection');
   assert.equal(response.responder?.response, LOCAL_INSPECTION_RESPONSE_TEXT);
+});
+
+test('instruction match reasons mirror semantic classifier thresholds', () => {
+  const reasons = getInstructionMatchReasons({
+    targetId: 'seed-1',
+    targetHash: 'hash',
+    source: 'analyst_chat',
+    targetVerdict: 'ADVERSARIAL',
+    exactMatch: false,
+    looseExactMatch: false,
+    hammingDistance: 64,
+    hammingDistance2gram: 64,
+    hammingDistance4gram: 64,
+    cosineSimilarity: null,
+    maxChunkSimilarity: 0.71,
+    attentionPooledChunkSimilarity: 0.71,
+    sandwichDelta: null,
+    risk: 'medium',
+  });
+
+  assert.deepEqual(reasons, ['attention_pool']);
 });
 
 test('local inspection still identifies local adversarial prompts before passthrough', () => {

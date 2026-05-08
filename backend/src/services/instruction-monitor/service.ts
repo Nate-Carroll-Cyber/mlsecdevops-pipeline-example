@@ -1,5 +1,8 @@
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
 import { Pool, type PoolClient, type PoolConfig } from 'pg';
 import pgvector from 'pgvector/pg';
+import { z } from 'zod';
 import { fingerprintInstruction } from './fingerprint.js';
 import type {
   InstructionMatch,
@@ -40,6 +43,55 @@ type ChunkAcc = {
   weightSum: number;
 };
 
+const SeedChunkSchema = z.object({
+  chunkIndex: z.number().int().nonnegative(),
+  chunkText: z.string(),
+  chunkHash: z.string().regex(/^[a-f0-9]{64}$/),
+  embedding: z.array(z.number()),
+  intentScore: z.number().min(0).max(1).default(1),
+});
+
+const SeedRecordSchema = z.object({
+  id: z.string().min(1),
+  source: z.enum(['analyst_chat', 'bulk_ingest', 'ctf_chat', 'ctf_solve', 'playground', 'system']),
+  rawText: z.string(),
+  normalizedText: z.string(),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  sha256Loose: z.string().regex(/^[a-f0-9]{64}$/),
+  simhash: z.string(),
+  simhash2gram: z.string(),
+  simhash4gram: z.string(),
+  embedding: z.array(z.number()).nullable(),
+  verdict: z.enum(['CLEAN', 'SUSPICIOUS', 'ADVERSARIAL']),
+  detectionFlags: z.array(z.string()).default([]),
+  reviewed: z.literal(true),
+  labels: z.array(z.string()).default([]),
+  matchPolicy: z.record(z.string(), z.unknown()).default({}),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+  chunks: z.array(SeedChunkSchema).default([]),
+  seedRecordHash: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
+const SeedSnapshotSchema = z.object({
+  schemaVersion: z.literal(1),
+  seedPack: z.literal('core'),
+  seedVersion: z.string().min(1),
+  seedSource: z.string().min(1),
+  exportedAt: z.string().min(1),
+  embeddingDimensions: z.number().int().positive(),
+  records: z.array(SeedRecordSchema),
+  seedSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/),
+});
+
+export type InstructionSeedImportResult = {
+  seedPack: 'core';
+  seedVersion: string;
+  seedSnapshotHash: string;
+  insertedRecords: number;
+  skippedRecords: number;
+  insertedChunks: number;
+};
+
 export class PgvectorInstructionMonitor {
   private readonly pool: Pool;
   private readonly registeredClients = new WeakSet<PoolClient>();
@@ -56,6 +108,10 @@ export class PgvectorInstructionMonitor {
     this.hammingThreshold = options.hammingThreshold ?? 12;
     this.chunkQueryConcurrency = options.chunkQueryConcurrency ?? 4;
     this.pool = new Pool({
+      max: 10,
+      connectionTimeoutMillis: 5_000,
+      idleTimeoutMillis: 30_000,
+      application_name: 'counter-spy-instruction-monitor',
       ...options.poolConfig,
       connectionString: options.connectionString,
     });
@@ -73,15 +129,26 @@ export class PgvectorInstructionMonitor {
     const record = fingerprintInstruction(input);
     this.assertEmbeddingDimensions(record.embedding, 'embedding');
     record.chunks?.forEach((chunk, index) => this.assertEmbeddingDimensions(chunk.embedding, `chunks[${index}].embedding`));
+    if (!isReviewedAdversarialRecord(record)) return record;
 
     await this.withClient(async (client) => {
       await client.query('BEGIN');
       try {
+        const existing = await client.query<{ seed_immutable: boolean }>(
+          'SELECT seed_immutable FROM instruction_records WHERE id = $1 FOR UPDATE',
+          [record.id],
+        );
+        if (existing.rows[0]?.seed_immutable) {
+          throw new Error(`Instruction record ${record.id} is an immutable seed record and cannot be overwritten.`);
+        }
+
         await client.query(
           `INSERT INTO instruction_records
              (id, source, raw_text, normalized_text, sha256, sha256_loose,
-              simhash, simhash_2gram, simhash_4gram, embedding, verdict, detection_flags)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+              simhash, simhash_2gram, simhash_4gram, embedding, verdict, detection_flags,
+              reviewed, labels, seed_metadata)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                   $13, $14, $15)
            ON CONFLICT (id) DO UPDATE SET
              source = EXCLUDED.source,
              raw_text = EXCLUDED.raw_text,
@@ -94,6 +161,9 @@ export class PgvectorInstructionMonitor {
              embedding = EXCLUDED.embedding,
              verdict = EXCLUDED.verdict,
              detection_flags = EXCLUDED.detection_flags,
+             reviewed = EXCLUDED.reviewed,
+             labels = EXCLUDED.labels,
+             seed_metadata = EXCLUDED.seed_metadata,
              updated_at = NOW()`,
           [
             record.id,
@@ -108,6 +178,9 @@ export class PgvectorInstructionMonitor {
             record.embedding ? pgvector.toSql(record.embedding) : null,
             record.verdict ?? null,
             record.detectionFlags ?? [],
+            record.reviewed ?? false,
+            record.labels ?? [],
+            JSON.stringify(record.metadata ?? {}),
           ],
         );
 
@@ -131,6 +204,152 @@ export class PgvectorInstructionMonitor {
     });
 
     return record;
+  }
+
+  async importSeedSnapshotFromFile(path: string, options: { allowChangedSeedRecords?: boolean } = {}): Promise<InstructionSeedImportResult> {
+    const raw = await readFile(path, 'utf8');
+    return this.importSeedSnapshot(JSON.parse(raw), options);
+  }
+
+  async importSeedSnapshot(input: unknown, options: { allowChangedSeedRecords?: boolean } = {}): Promise<InstructionSeedImportResult> {
+    const snapshot = SeedSnapshotSchema.parse(input);
+    if (snapshot.embeddingDimensions !== this.embeddingDimensions) {
+      throw new Error(`Seed snapshot embeddingDimensions ${snapshot.embeddingDimensions} does not match monitor dimensions ${this.embeddingDimensions}.`);
+    }
+
+    const snapshotHash = hashSeedSnapshot(snapshot);
+    if (snapshotHash !== snapshot.seedSnapshotHash) {
+      throw new Error(`Seed snapshot hash mismatch. Expected ${snapshot.seedSnapshotHash}, calculated ${snapshotHash}.`);
+    }
+
+    for (const record of snapshot.records) {
+      if (record.verdict !== 'ADVERSARIAL') {
+        throw new Error(`Seed record ${record.id} is ${record.verdict}; only reviewed ADVERSARIAL records may be imported.`);
+      }
+      this.assertEmbeddingDimensions(record.embedding ?? undefined, `seed ${record.id}.embedding`);
+      for (const chunk of record.chunks) {
+        this.assertEmbeddingDimensions(chunk.embedding, `seed ${record.id}.chunks[${chunk.chunkIndex}].embedding`);
+      }
+      const recordHash = hashSeedRecord(record);
+      if (recordHash !== record.seedRecordHash) {
+        throw new Error(`Seed record ${record.id} hash mismatch. Expected ${record.seedRecordHash}, calculated ${recordHash}.`);
+      }
+    }
+
+    let insertedRecords = 0;
+    let skippedRecords = 0;
+    let insertedChunks = 0;
+
+    await this.withClient(async (client) => {
+      await client.query('BEGIN');
+      try {
+        for (const record of snapshot.records) {
+          const existing = await client.query<{ seed_record_hash: string | null; seed_immutable: boolean }>(
+            'SELECT seed_record_hash, seed_immutable FROM instruction_records WHERE id = $1 FOR UPDATE',
+            [record.id],
+          );
+          const row = existing.rows[0];
+          if (row) {
+            if (row.seed_record_hash === record.seedRecordHash) {
+              skippedRecords += 1;
+              continue;
+            }
+            if (!options.allowChangedSeedRecords) {
+              throw new Error(`Instruction seed record ${record.id} exists with different content. Refusing to overwrite without explicit migration permission.`);
+            }
+          }
+
+          await client.query(
+            `INSERT INTO instruction_records
+               (id, source, raw_text, normalized_text, sha256, sha256_loose,
+                simhash, simhash_2gram, simhash_4gram, embedding, verdict, detection_flags,
+                seed_pack, seed_version, seed_record_hash, seed_snapshot_hash, seed_immutable,
+                seed_imported_at, seed_source, reviewed, labels, match_policy, seed_metadata)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                     $13, $14, $15, $16, TRUE, NOW(), $17, TRUE, $18, $19, $20)
+             ON CONFLICT (id) DO UPDATE SET
+               source = EXCLUDED.source,
+               raw_text = EXCLUDED.raw_text,
+               normalized_text = EXCLUDED.normalized_text,
+               sha256 = EXCLUDED.sha256,
+               sha256_loose = EXCLUDED.sha256_loose,
+               simhash = EXCLUDED.simhash,
+               simhash_2gram = EXCLUDED.simhash_2gram,
+               simhash_4gram = EXCLUDED.simhash_4gram,
+               embedding = EXCLUDED.embedding,
+               verdict = EXCLUDED.verdict,
+               detection_flags = EXCLUDED.detection_flags,
+               seed_pack = EXCLUDED.seed_pack,
+               seed_version = EXCLUDED.seed_version,
+               seed_record_hash = EXCLUDED.seed_record_hash,
+               seed_snapshot_hash = EXCLUDED.seed_snapshot_hash,
+               seed_immutable = TRUE,
+               seed_imported_at = NOW(),
+               seed_source = EXCLUDED.seed_source,
+               reviewed = TRUE,
+               labels = EXCLUDED.labels,
+               match_policy = EXCLUDED.match_policy,
+               seed_metadata = EXCLUDED.seed_metadata,
+               updated_at = NOW()`,
+            [
+              record.id,
+              record.source,
+              record.rawText,
+              record.normalizedText,
+              record.sha256,
+              record.sha256Loose,
+              record.simhash,
+              record.simhash2gram,
+              record.simhash4gram,
+              record.embedding ? pgvector.toSql(record.embedding) : null,
+              record.verdict,
+              record.detectionFlags,
+              snapshot.seedPack,
+              snapshot.seedVersion,
+              record.seedRecordHash,
+              snapshot.seedSnapshotHash,
+              snapshot.seedSource,
+              record.labels,
+              JSON.stringify(record.matchPolicy),
+              JSON.stringify(record.metadata),
+            ],
+          );
+
+          await client.query('DELETE FROM instruction_chunks WHERE instruction_id = $1', [record.id]);
+          for (const chunk of record.chunks) {
+            await client.query(
+              `INSERT INTO instruction_chunks
+                 (instruction_id, chunk_index, chunk_text, chunk_hash, embedding, intent_score)
+               VALUES ($1, $2, $3, $4, $5, $6)`,
+              [record.id, chunk.chunkIndex, chunk.chunkText, chunk.chunkHash, pgvector.toSql(chunk.embedding), chunk.intentScore],
+            );
+            insertedChunks += 1;
+          }
+          if (!row) insertedRecords += 1;
+        }
+
+        await client.query(
+          `INSERT INTO instruction_seed_imports
+             (seed_pack, seed_version, seed_snapshot_hash, seed_source, schema_version, record_count, imported_at)
+           VALUES ($1, $2, $3, $4, $5, $6, NOW())
+           ON CONFLICT (seed_pack, seed_version, seed_snapshot_hash) DO NOTHING`,
+          [snapshot.seedPack, snapshot.seedVersion, snapshot.seedSnapshotHash, snapshot.seedSource, snapshot.schemaVersion, snapshot.records.length],
+        );
+        await client.query('COMMIT');
+      } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+      }
+    });
+
+    return {
+      seedPack: snapshot.seedPack,
+      seedVersion: snapshot.seedVersion,
+      seedSnapshotHash: snapshot.seedSnapshotHash,
+      insertedRecords,
+      skippedRecords,
+      insertedChunks,
+    };
   }
 
   async compare(record: InstructionRecord): Promise<InstructionMonitorCompareResult> {
@@ -360,26 +579,69 @@ CREATE TABLE IF NOT EXISTS instruction_records (
   simhash         BIGINT NOT NULL,
   simhash_2gram   BIGINT NOT NULL,
   simhash_4gram   BIGINT NOT NULL,
-  embedding       vector(${this.embeddingDimensions}),
-  verdict         TEXT,
-  detection_flags TEXT[] NOT NULL DEFAULT '{}',
-  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+	  embedding       vector(${this.embeddingDimensions}),
+	  verdict         TEXT,
+	  detection_flags TEXT[] NOT NULL DEFAULT '{}',
+	  seed_pack       TEXT,
+	  seed_version    TEXT,
+	  seed_record_hash TEXT,
+	  seed_snapshot_hash TEXT,
+	  seed_immutable  BOOLEAN NOT NULL DEFAULT FALSE,
+	  seed_imported_at TIMESTAMPTZ,
+	  seed_source     TEXT,
+	  reviewed        BOOLEAN NOT NULL DEFAULT FALSE,
+	  labels          TEXT[] NOT NULL DEFAULT '{}',
+	  match_policy    JSONB NOT NULL DEFAULT '{}'::jsonb,
+	  seed_metadata   JSONB NOT NULL DEFAULT '{}'::jsonb,
+	  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+	  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
 
 CREATE TABLE IF NOT EXISTS instruction_chunks (
   id              BIGSERIAL PRIMARY KEY,
-  instruction_id  TEXT NOT NULL REFERENCES instruction_records(id) ON DELETE CASCADE,
-  chunk_index     INTEGER NOT NULL,
-  chunk_text      TEXT NOT NULL,
-  embedding       vector(${this.embeddingDimensions}) NOT NULL,
-  intent_score    REAL NOT NULL DEFAULT 1,
-  UNIQUE (instruction_id, chunk_index)
+	  instruction_id  TEXT NOT NULL REFERENCES instruction_records(id) ON DELETE CASCADE,
+	  chunk_index     INTEGER NOT NULL,
+	  chunk_text      TEXT NOT NULL,
+	  chunk_hash      TEXT,
+	  embedding       vector(${this.embeddingDimensions}) NOT NULL,
+	  intent_score    REAL NOT NULL DEFAULT 1,
+	  UNIQUE (instruction_id, chunk_index)
+	);
+
+CREATE TABLE IF NOT EXISTS instruction_seed_imports (
+  id                 BIGSERIAL PRIMARY KEY,
+  seed_pack          TEXT NOT NULL,
+  seed_version       TEXT NOT NULL,
+  seed_snapshot_hash TEXT NOT NULL,
+  seed_source        TEXT NOT NULL,
+  schema_version     INTEGER NOT NULL,
+  record_count       INTEGER NOT NULL,
+  imported_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (seed_pack, seed_version, seed_snapshot_hash)
 );
 
-CREATE INDEX IF NOT EXISTS idx_instruction_sha256 ON instruction_records (sha256);
-CREATE INDEX IF NOT EXISTS idx_instruction_sha256_loose ON instruction_records (sha256_loose);
-CREATE INDEX IF NOT EXISTS idx_instruction_embedding_hnsw
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS seed_pack TEXT;
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS seed_version TEXT;
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS seed_record_hash TEXT;
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS seed_snapshot_hash TEXT;
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS seed_immutable BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS seed_imported_at TIMESTAMPTZ;
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS seed_source TEXT;
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS reviewed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS labels TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS match_policy JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE instruction_records ADD COLUMN IF NOT EXISTS seed_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE instruction_chunks ADD COLUMN IF NOT EXISTS chunk_hash TEXT;
+
+	CREATE INDEX IF NOT EXISTS idx_instruction_sha256 ON instruction_records (sha256);
+	CREATE INDEX IF NOT EXISTS idx_instruction_sha256_loose ON instruction_records (sha256_loose);
+CREATE INDEX IF NOT EXISTS idx_instruction_seed_pack ON instruction_records (seed_pack);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_instruction_seed_record_hash
+  ON instruction_records (seed_pack, seed_record_hash)
+  WHERE seed_pack IS NOT NULL;
+	CREATE INDEX IF NOT EXISTS idx_instruction_embedding_hnsw
   ON instruction_records USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_instruction_chunks_embedding_hnsw
   ON instruction_chunks USING hnsw (embedding vector_cosine_ops);
@@ -445,4 +707,60 @@ export function classifyInstructionRisk(
   if (hasFingerprintMatch) return 'medium';
 
   return 'low';
+}
+
+function isReviewedAdversarialRecord(record: InstructionRecord): boolean {
+  return record.verdict === 'ADVERSARIAL' && record.reviewed === true;
+}
+
+function hashSeedRecord(record: z.infer<typeof SeedRecordSchema>): string {
+  return sha256Canonical({
+    chunks: record.chunks,
+    detectionFlags: record.detectionFlags,
+    embedding: record.embedding,
+    id: record.id,
+    labels: record.labels,
+    matchPolicy: record.matchPolicy,
+    metadata: record.metadata,
+    normalizedText: record.normalizedText,
+    rawText: record.rawText,
+    reviewed: record.reviewed,
+    sha256: record.sha256,
+    sha256Loose: record.sha256Loose,
+    simhash: record.simhash,
+    simhash2gram: record.simhash2gram,
+    simhash4gram: record.simhash4gram,
+    source: record.source,
+    verdict: record.verdict,
+  });
+}
+
+function hashSeedSnapshot(snapshot: z.infer<typeof SeedSnapshotSchema>): string {
+  return sha256Canonical({
+    embeddingDimensions: snapshot.embeddingDimensions,
+    exportedAt: snapshot.exportedAt,
+    records: snapshot.records.map((record) => ({
+      id: record.id,
+      seedRecordHash: record.seedRecordHash,
+    })),
+    schemaVersion: snapshot.schemaVersion,
+    seedPack: snapshot.seedPack,
+    seedSource: snapshot.seedSource,
+    seedVersion: snapshot.seedVersion,
+  });
+}
+
+function sha256Canonical(value: unknown): string {
+  return createHash('sha256').update(canonicalJson(value)).digest('hex');
+}
+
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entryValue]) => entryValue !== undefined)
+      .sort(([a], [b]) => a.localeCompare(b));
+    return `{${entries.map(([key, entryValue]) => `${JSON.stringify(key)}:${canonicalJson(entryValue)}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
 }

@@ -132,6 +132,9 @@ export function fingerprintInstruction(input: InstructionMonitorInput): Instruct
     chunks,
     verdict: input.verdict,
     detectionFlags: input.detectionFlags,
+    reviewed: input.reviewed,
+    labels: input.labels,
+    metadata: input.metadata,
   };
 }
 

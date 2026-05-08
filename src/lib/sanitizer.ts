@@ -34,6 +34,8 @@ import { hasLowNaturalLanguageLikelihood } from './languageLikelihood';
 const SENSITIVE_PATTERNS = [
   // Regex to match standard email addresses
   { name: 'EMAIL', regex: /[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+/g },
+  // Regex to match bare LLM provider API keys such as sk_..., sk-..., sk-proj-..., and sk-svcacct-...
+  { name: 'LLM_API_KEY', regex: /(?<![A-Za-z0-9])sk[-_](?:proj[-_]|svcacct[-_])?[A-Za-z0-9_-]{16,}(?![A-Za-z0-9_-])/g },
   // Regex to match various phone number formats
   { name: 'PHONE', regex: /(?<!\d)(\+\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/g },
   // Regex to match US street addresses and states
@@ -57,6 +59,7 @@ const SENSITIVE_PATTERNS = [
   // Regex to match generic secret keys or passwords assignments
   { name: 'SECRET_KEY', regex: /(?:secret[-_]?key|password|passwd|api[-_]?key|token)(?:\s+is\s+|\s*[:=]\s*)([^\s]+)/gi }
 ];
+const CANARY_EXFIL_FLAG = 'CANARY_EXFIL';
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
 const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
@@ -534,6 +537,9 @@ export function sanitizeInput(
     if (matches) {
       // Add the pattern name to the redactions list if not already present
       if (!redactions.includes(pattern.name)) redactions.push(pattern.name);
+      if (pattern.name === 'CANARY_TOKEN' && !redactions.includes(CANARY_EXFIL_FLAG)) {
+        redactions.push(CANARY_EXFIL_FLAG);
+      }
       // If PII redaction is enabled in the guardrails
       if (guardrails.piiRedaction) {
         // Replace all occurrences of the pattern with a redaction placeholder
@@ -556,6 +562,9 @@ export function sanitizeInput(
     const placeholderName = match[1];
     if (placeholderName && !redactions.includes(placeholderName)) {
       redactions.push(placeholderName);
+    }
+    if (placeholderName === 'CANARY_TOKEN' && !redactions.includes(CANARY_EXFIL_FLAG)) {
+      redactions.push(CANARY_EXFIL_FLAG);
     }
   }
 
@@ -1049,6 +1058,9 @@ export function sanitizeOutput(
     if (pattern.regex.test(output)) {
       // Add the pattern name to the redactions list if not already present
       if (!redactions.includes(pattern.name)) redactions.push(pattern.name);
+      if (pattern.name === 'CANARY_TOKEN' && !redactions.includes(CANARY_EXFIL_FLAG)) {
+        redactions.push(CANARY_EXFIL_FLAG);
+      }
       // If PII redaction is enabled
       if (guardrails.piiRedaction) {
         // Replace all occurrences of the pattern with a redaction placeholder

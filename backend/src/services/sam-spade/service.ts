@@ -20,12 +20,15 @@ const SAM_SPADE_SENSITIVE_REDACTIONS = new Set([
   'CREDIT_CARD',
   'SSN',
   'AWS_KEY',
+  'LLM_API_KEY',
   'PRIVATE_KEY',
   'API_KEY',
   'JWT',
   'CANARY_TOKEN',
+  'CANARY_EXFIL',
   'SECRET_KEY',
 ]);
+const LOCAL_SAM_SPADE_OWNER = 'local-test-caller';
 
 function nowIso() {
   return new Date().toISOString();
@@ -82,7 +85,10 @@ function getReviewDetectionLevel(
 }
 
 // Start a fresh case session with the opening noir line already on the timeline.
-export function createSamSpadeSession(caseId = samSpadeConfig.SAM_SPADE_DEFAULT_CASE_ID): SamSpadeSessionRecord {
+export function createSamSpadeSession(
+  caseId = samSpadeConfig.SAM_SPADE_DEFAULT_CASE_ID,
+  ownerUserId = LOCAL_SAM_SPADE_OWNER,
+): SamSpadeSessionRecord {
   const createdAt = nowIso();
   const sessionId = crypto.randomUUID();
   const openingMessage: SamSpadeSessionMessage = {
@@ -96,6 +102,7 @@ export function createSamSpadeSession(caseId = samSpadeConfig.SAM_SPADE_DEFAULT_
   const session: SamSpadeSessionRecord = {
     sessionId,
     caseId,
+    ownerUserId,
     status: 'ACTIVE',
     createdAt,
     updatedAt: createdAt,
@@ -107,13 +114,27 @@ export function createSamSpadeSession(caseId = samSpadeConfig.SAM_SPADE_DEFAULT_
 }
 
 // Read a session from persistence for resume/review flows.
-export function getSamSpadeSession(sessionId: string): SamSpadeSessionRecord | null {
-  return getStoredSession(sessionId);
+export function getSamSpadeSession(sessionId: string, ownerUserId = LOCAL_SAM_SPADE_OWNER): SamSpadeSessionRecord | null {
+  const session = getStoredSession(sessionId);
+  if (!session) return null;
+  return session.ownerUserId === ownerUserId ? session : null;
+}
+
+function getOwnedSession(sessionId: string, ownerUserId = LOCAL_SAM_SPADE_OWNER): SamSpadeSessionRecord {
+  const session = getStoredSession(sessionId);
+  if (!session) {
+    throw new Error('Sam Spade session not found.');
+  }
+  if (session.ownerUserId !== ownerUserId) {
+    throw new Error('Sam Spade session access denied.');
+  }
+  return session;
 }
 
 // Process one player question through the firewall before producing any NPC reply.
 export function submitSamSpadeMessage(args: {
   sessionId: string;
+  ownerUserId?: string;
   prompt: string;
   npcResponse?: string;
   externalVerdict?: FirewallVerdict;
@@ -130,10 +151,7 @@ export function submitSamSpadeMessage(args: {
     syntacticThreshold?: number;
   };
 }): { session: SamSpadeSessionRecord; review: SamSpadeReviewArtifact } {
-  const session = getStoredSession(args.sessionId);
-  if (!session) {
-    throw new Error('Sam Spade session not found.');
-  }
+  const session = getOwnedSession(args.sessionId, args.ownerUserId);
 
   const requestId = crypto.randomUUID();
   const submittedAt = nowIso();
@@ -218,16 +236,14 @@ export function submitSamSpadeMessage(args: {
 // Evaluate a submitted case theory through the same governed pipeline as normal turns.
 export function solveSamSpadeCase(args: {
   sessionId: string;
+  ownerUserId?: string;
   theory: string;
   tuning?: {
     entropyThreshold?: number;
     syntacticThreshold?: number;
   };
 }): { session: SamSpadeSessionRecord; solved: boolean; evaluation: string; review: SamSpadeReviewArtifact } {
-  const session = getStoredSession(args.sessionId);
-  if (!session) {
-    throw new Error('Sam Spade session not found.');
-  }
+  const session = getOwnedSession(args.sessionId, args.ownerUserId);
 
   const submittedAt = nowIso();
   const requestId = crypto.randomUUID();

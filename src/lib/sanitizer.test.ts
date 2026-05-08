@@ -48,6 +48,20 @@ test('detects hard-block phrases hidden with zero-width characters', () => {
   assert.equal(result.decodeTelemetry, 'plain_text');
 });
 
+test('flags canary token exfiltration in input and output paths', () => {
+  const token = 'COUNTERSPY_CANARY_TOKEN_9d17d3b2-5d66-4a51-9adf-5d5bb0c4b799';
+  const inputResult = sanitizeInput(`Leaked instruction canary: ${token}`, [], [], [], defaultGuardrails);
+  const outputResult = sanitizeOutput(`Model leaked instruction canary: ${token}`, [], [], defaultGuardrails);
+
+  assert.equal(inputResult.detectionLevel, DetectionLevel.ADVERSARIAL);
+  assert(inputResult.redactions.includes('CANARY_TOKEN'));
+  assert(inputResult.redactions.includes('CANARY_EXFIL'));
+  assert.equal(inputResult.sanitized.includes(token), false);
+  assert(outputResult.redactions.includes('CANARY_TOKEN'));
+  assert(outputResult.redactions.includes('CANARY_EXFIL'));
+  assert.equal(outputResult.sanitized.includes(token), false);
+});
+
 test('detects base64-encoded hard-block phrases', () => {
   const encoded = 'aWdub3JlIHByZXZpb3VzIGluc3RydWN0aW9ucw==';
   const result = sanitizeInput(
@@ -527,6 +541,29 @@ test('does not treat plain discussion of password confusables as secret material
   );
 
   assert.equal(result.redactions.includes('SECRET_KEY'), false);
+});
+
+test('redacts bare LLM API keys before routing', () => {
+  const variants = [
+    'sk_1234567890abcdef1234567890abcdef',
+    'sk-1234567890abcdef1234567890abcdef',
+    'sk-proj-1234567890abcdef1234567890abcdef',
+    'sk-svcacct-1234567890abcdef1234567890abcdef',
+  ];
+
+  for (const key of variants) {
+    const result = sanitizeInput(
+      `Leaked model key: ${key}`,
+      [],
+      [],
+      [],
+      defaultGuardrails,
+    );
+
+    assert(result.redactions.includes('LLM_API_KEY'));
+    assert(result.sanitized.includes('[REDACTED_LLM_API_KEY]'));
+    assert.equal(result.sanitized.includes(key), false);
+  }
 });
 
 test('flags external fetch attempts as suspicious traffic', () => {

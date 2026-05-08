@@ -62,6 +62,7 @@ export interface PlaygroundMetricEntry extends AtlasTaxonomyFields {
   backendSafeguardReasoning?: string;
   backendReachedSafeguard?: boolean;
   instructionSimilarity?: unknown;
+  instructionEmbeddingDurationMs?: number;
 }
 
 export interface PlaygroundMetricSummary {
@@ -231,6 +232,7 @@ const PlaygroundMetricEntrySchema = z.object({
   backendSafeguardReasoning: z.string().optional(),
   backendReachedSafeguard: z.boolean().optional(),
   instructionSimilarity: z.unknown().optional(),
+  instructionEmbeddingDurationMs: z.number().optional(),
   atlasTactic: z.enum(ATLAS_TACTIC_VALUES).optional(),
   atlasTechniqueId: z.enum(ATLAS_TECHNIQUE_ID_VALUES).optional(),
   atlasTechniqueName: z.string().optional(),

@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "seedPack": "core",
+  "seedVersion": "0.0.0",
+  "seedSource": "manual-controlled-review",
+  "exportedAt": "2026-05-08T00:00:00.000Z",
+  "embeddingDimensions": 1536,
+  "records": [],
+  "seedSnapshotHash": "255e001f62ced79cf2d52c7f54d1618699073130c59a24b9e666d83c208bf2c6"
+}

@@ -47,6 +47,7 @@ export interface SamSpadeReviewArtifact {
 export interface SamSpadeSessionRecord {
   sessionId: string;
   caseId: string;
+  ownerUserId: string;
   status: SamSpadeSessionStatus;
   createdAt: string;
   updatedAt: string;

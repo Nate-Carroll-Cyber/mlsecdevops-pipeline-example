@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import { Pool, type PoolClient, type PoolConfig } from 'pg';
 import pgvector from 'pgvector/pg';
 import { z } from 'zod';
@@ -90,6 +90,15 @@ export type InstructionSeedImportResult = {
   insertedRecords: number;
   skippedRecords: number;
   insertedChunks: number;
+};
+
+export type InstructionSeedExportResult = {
+  seedPack: 'core';
+  seedVersion: string;
+  seedSnapshotHash: string;
+  exportedRecords: number;
+  exportedChunks: number;
+  outputPath: string;
 };
 
 export class PgvectorInstructionMonitor {
@@ -185,16 +194,17 @@ export class PgvectorInstructionMonitor {
         );
 
         await client.query('DELETE FROM instruction_chunks WHERE instruction_id = $1', [record.id]);
-        for (let i = 0; i < (record.chunks?.length ?? 0); i++) {
-          const chunk = record.chunks?.[i];
-          if (!chunk) continue;
-          await client.query(
-            `INSERT INTO instruction_chunks
-               (instruction_id, chunk_index, chunk_text, embedding, intent_score)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [record.id, i, chunk.text, pgvector.toSql(chunk.embedding), chunk.intentScore ?? 1],
-          );
-        }
+	        for (let i = 0; i < (record.chunks?.length ?? 0); i++) {
+	          const chunk = record.chunks?.[i];
+	          if (!chunk) continue;
+	          const chunkHash = createHash('sha256').update(chunk.text).digest('hex');
+	          await client.query(
+	            `INSERT INTO instruction_chunks
+	               (instruction_id, chunk_index, chunk_text, chunk_hash, embedding, intent_score)
+	             VALUES ($1, $2, $3, $4, $5, $6)`,
+	            [record.id, i, chunk.text, chunkHash, pgvector.toSql(chunk.embedding), chunk.intentScore ?? 1],
+	          );
+	        }
 
         await client.query('COMMIT');
       } catch (error) {
@@ -349,6 +359,139 @@ export class PgvectorInstructionMonitor {
       insertedRecords,
       skippedRecords,
       insertedChunks,
+    };
+  }
+
+  async exportCoreSeedSnapshotToFile(path: string, options: {
+    seedVersion: string;
+    seedSource: string;
+    includeExistingSeedRecords?: boolean;
+  }): Promise<InstructionSeedExportResult> {
+    const snapshot = await this.exportCoreSeedSnapshot(options);
+    await writeFile(path, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+    return {
+      seedPack: snapshot.seedPack,
+      seedVersion: snapshot.seedVersion,
+      seedSnapshotHash: snapshot.seedSnapshotHash,
+      exportedRecords: snapshot.records.length,
+      exportedChunks: snapshot.records.reduce((count, record) => count + record.chunks.length, 0),
+      outputPath: path,
+    };
+  }
+
+  async exportCoreSeedSnapshot(options: {
+    seedVersion: string;
+    seedSource: string;
+    includeExistingSeedRecords?: boolean;
+  }): Promise<z.infer<typeof SeedSnapshotSchema>> {
+    const recordResult = await this.pool.query<{
+      id: string;
+      source: string;
+      raw_text: string;
+      normalized_text: string;
+      sha256: string;
+      sha256_loose: string;
+      simhash: string;
+      simhash_2gram: string;
+      simhash_4gram: string;
+      embedding: number[] | string | null;
+      verdict: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL';
+      detection_flags: string[];
+      reviewed: boolean;
+      labels: string[];
+      match_policy: Record<string, unknown>;
+      seed_metadata: Record<string, unknown>;
+    }>(
+	      `WITH eligible_records AS (
+	         SELECT id, source, raw_text, normalized_text, sha256, sha256_loose,
+	                simhash, simhash_2gram, simhash_4gram, embedding, verdict,
+	                detection_flags, reviewed, labels, match_policy, seed_metadata, created_at
+	         FROM instruction_records
+	         WHERE verdict = 'ADVERSARIAL'
+	           AND reviewed = TRUE
+	           AND ($1::boolean OR seed_pack IS NULL)
+	       ),
+	       deduped_records AS (
+	         SELECT DISTINCT ON (sha256)
+	                id, source, raw_text, normalized_text, sha256, sha256_loose,
+	                simhash, simhash_2gram, simhash_4gram, embedding, verdict,
+	                detection_flags, reviewed, labels, match_policy, seed_metadata
+	         FROM eligible_records
+	         ORDER BY sha256, (embedding IS NULL), created_at, id
+	       )
+	       SELECT id, source, raw_text, normalized_text, sha256, sha256_loose,
+	              simhash::text, simhash_2gram::text, simhash_4gram::text, embedding,
+	              verdict, detection_flags, reviewed, labels, match_policy, seed_metadata
+	       FROM deduped_records
+	       ORDER BY id`,
+	      [options.includeExistingSeedRecords === true],
+	    );
+
+    const records = [];
+    for (const row of recordResult.rows) {
+      const chunkResult = await this.pool.query<{
+        chunk_index: number;
+        chunk_text: string;
+        chunk_hash: string | null;
+        embedding: number[] | string;
+        intent_score: number | string;
+      }>(
+        `SELECT chunk_index, chunk_text, chunk_hash, embedding, intent_score
+         FROM instruction_chunks
+         WHERE instruction_id = $1
+         ORDER BY chunk_index`,
+        [row.id],
+      );
+
+      const chunks = chunkResult.rows.map((chunk) => {
+        const chunkText = chunk.chunk_text;
+        return {
+          chunkIndex: chunk.chunk_index,
+          chunkText,
+          chunkHash: chunk.chunk_hash ?? createHash('sha256').update(chunkText).digest('hex'),
+          embedding: parseVectorValue(chunk.embedding),
+          intentScore: Number(chunk.intent_score),
+        };
+      });
+
+      const recordWithoutHash = {
+        id: row.id,
+        source: this.toInstructionSource(row.source),
+        rawText: row.raw_text,
+        normalizedText: row.normalized_text,
+        sha256: row.sha256,
+        sha256Loose: row.sha256_loose,
+        simhash: row.simhash,
+        simhash2gram: row.simhash_2gram,
+        simhash4gram: row.simhash_4gram,
+        embedding: row.embedding === null ? null : parseVectorValue(row.embedding),
+        verdict: row.verdict,
+        detectionFlags: row.detection_flags ?? [],
+        reviewed: true as const,
+        labels: row.labels ?? [],
+        matchPolicy: row.match_policy ?? {},
+        metadata: row.seed_metadata ?? {},
+        chunks,
+      };
+      records.push({
+        ...recordWithoutHash,
+        seedRecordHash: hashSeedRecord(recordWithoutHash),
+      });
+    }
+
+    const snapshotWithoutHash = {
+      schemaVersion: 1 as const,
+      seedPack: 'core' as const,
+      seedVersion: options.seedVersion,
+      seedSource: options.seedSource,
+      exportedAt: new Date().toISOString(),
+      embeddingDimensions: this.embeddingDimensions,
+      records,
+    };
+
+    return {
+      ...snapshotWithoutHash,
+      seedSnapshotHash: hashSeedSnapshot(snapshotWithoutHash),
     };
   }
 
@@ -713,7 +856,7 @@ function isReviewedAdversarialRecord(record: InstructionRecord): boolean {
   return record.verdict === 'ADVERSARIAL' && record.reviewed === true;
 }
 
-function hashSeedRecord(record: z.infer<typeof SeedRecordSchema>): string {
+function hashSeedRecord(record: Omit<z.infer<typeof SeedRecordSchema>, 'seedRecordHash'>): string {
   return sha256Canonical({
     chunks: record.chunks,
     detectionFlags: record.detectionFlags,
@@ -735,7 +878,7 @@ function hashSeedRecord(record: z.infer<typeof SeedRecordSchema>): string {
   });
 }
 
-function hashSeedSnapshot(snapshot: z.infer<typeof SeedSnapshotSchema>): string {
+function hashSeedSnapshot(snapshot: Omit<z.infer<typeof SeedSnapshotSchema>, 'seedSnapshotHash'>): string {
   return sha256Canonical({
     embeddingDimensions: snapshot.embeddingDimensions,
     exportedAt: snapshot.exportedAt,
@@ -748,6 +891,16 @@ function hashSeedSnapshot(snapshot: z.infer<typeof SeedSnapshotSchema>): string 
     seedSource: snapshot.seedSource,
     seedVersion: snapshot.seedVersion,
   });
+}
+
+function parseVectorValue(value: number[] | string): number[] {
+  if (Array.isArray(value)) return value.map(Number);
+  return value
+    .replace(/^\[/, '')
+    .replace(/\]$/, '')
+    .split(',')
+    .filter(Boolean)
+    .map(Number);
 }
 
 function sha256Canonical(value: unknown): string {

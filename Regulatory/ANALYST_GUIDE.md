@@ -21,15 +21,15 @@ As an Analyst or Administrator, your role is to monitor the threat landscape, tu
 
 The **Metrics** tab provides a high-level view of the platform's health and the current threat velocity.
 
-### 2.1 Threat Velocity & Z-Score Spikes
+### 2.1 Threat Velocity & Spike Indicators
 The dashboard tracks the rate of "Threats" (Suspicious or Adversarial logs) over a rolling 24-hour window.
 *   **Threat Velocity:** Represented as a percentage change. A value of `+500%` indicates that current threat activity is five times higher than the recent baseline.
-*   **Z-Score Spike:** This metric measures how many standard deviations the current threat rate is from the mean. 
-    *   **Z-Score > 2.0:** Indicates a statistically significant increase in activity.
-    *   **Z-Score > 5.0:** Represents a critical anomaly, likely a coordinated automated attack or a "jailbreak" attempt going viral.
+*   **Current Beta Spike Indicator:** The Metrics surface exposes threat velocity and alert-severity trends from audit records. Formal Z-score incidenting should be calculated in the production telemetry pipeline if your deployment uses statistical thresholds.
+    *   **Elevated spike indicator:** Increase monitoring cadence and check repeated payloads from a single `userId`.
+    *   **Critical spike indicator:** Treat as likely coordinated automation and evaluate Global System Pause.
 
 > [!IMPORTANT]
-> **Notification Escalation:** When a Z-Score exceeds **5.0**, the system automatically triggers a high-priority alert. In production environments, this is integrated with **PagerDuty** and **Slack (#soc-alerts)** to ensure immediate analyst response.
+> **Notification Escalation:** PagerDuty/Slack delivery is a planned production integration, not current repo functionality. In the current Beta, operators should manually escalate critical spike indicators.
 
 > [!TIP]
 > Audit records retain a `source` marker such as `analyst_chat`, `bulk_ingest`, `playground`, or `ctf_chat`, so Bulk Ingest and Sam Spade CTF traffic can be compared against analyst-entered traffic without removing it from the main dashboards.
@@ -163,7 +163,7 @@ When a prompt is intercepted or blocked, the system returns a standardized messa
 
 ## 9. Administrative Audit Trail (Compliance)
 
-To meet **ISO 27001** and other regulatory requirements, Counter-Spy.ai maintains a separate, immutable **Admin Audit Log**.
+To meet **ISO 27001** and other regulatory requirements, production deployments should maintain a separate, immutable **Admin Audit Log**. The current Beta stores review state in Firestore audit records but does not implement a separate immutable admin audit ledger.
 
 *   **Tracked Actions:** 
     *   Toggling the **Global System Pause**.

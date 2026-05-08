@@ -103,14 +103,11 @@ The governance state is persisted in Firestore (`config/governance`).
 ## 5. API Reference: `/v1/intercept`
 
 ### 5.1 Authentication
-External services must authenticate with the Counter-Spy gateway using **Bearer Tokens (JWT)**. 
-*   **Header:** `Authorization: Bearer <JWT_TOKEN>`
-*   **Validation:** 
-    *   **Provider:** Tokens are validated against the configured Auth Provider (Firebase/OIDC).
-    *   **Claims:** Validation requires `sub` (subject), `aud` (audience), and `exp` (expiration).
-    *   **Policy:** Tokens are validated per-request; no local caching of validation state is performed in the Beta to ensure immediate revocation propagation.
-    *   **TTL:** Token lifespan and refresh cycles are governed by the Identity Provider's policy.
-*   **Current Beta Note:** Protected execution routes require the shared backend bearer token when they are called. `INTERCEPT_BEARER_TOKEN` configures the backend-side credential, and browser gateway clients send the matching `VITE_BACKEND_BEARER_TOKEN` value with `/v1/intercept`, `/v1/translate`, `/v1/instruction-monitor/reviewed-adversarial`, and `/v1/ctf/sam-spade/*` requests.
+Current Beta protected execution routes require a shared backend bearer credential before work begins.
+
+*   **Header:** `Authorization: Bearer <INTERCEPT_BEARER_TOKEN>`
+*   **Current Beta Implementation:** `INTERCEPT_BEARER_TOKEN` configures the backend-side credential, and browser gateway clients send the matching `VITE_BACKEND_BEARER_TOKEN` value with `/v1/intercept`, `/v1/translate`, `/v1/instruction-monitor/reviewed-adversarial`, and `/v1/ctf/sam-spade/*` requests. The backend performs a static bearer-token comparison for these routes.
+*   **Planned Production Control:** JWT/OIDC validation is not implemented in the current backend. A production deployment should replace or front this shared-token check with provider-backed JWT validation, including per-request validation of `sub`, `aud`, and `exp`, plus the identity provider's token lifetime and revocation policy.
 *   **Future Support:** Integration with **AWS IAM SigV4** is planned for service-to-service communication within VPC environments.
 
 ### 5.2 Endpoint Specification
@@ -221,11 +218,12 @@ The `source` field preserves provenance without hiding traffic from the primary 
 
 ### 6.2 Metrics Architecture
 The platform utilizes a real-time anomaly detection engine to monitor threat velocity.
-*   **Statistical Baseline:** Calculates a rolling 24-hour mean ($\mu$) and standard deviation ($\sigma$) of threat events.
-*   **Z-Score Calculation:** $Z = \frac{x - \mu}{\sigma}$.
+*   **Current Baseline:** Tracks recent audit activity against a rolling 24-hour hourly baseline for threat-velocity and dashboard context.
+*   **Current Beta Spike Metric:** The Metrics surface reports threat velocity and alert severity from the current audit stream. The standalone anomaly helper currently calculates a rolling spike ratio against the 24-hour hourly baseline rather than a production incidenting Z-score service.
+*   **Planned Production Control:** A production deployment should add a true Z-score or equivalent statistical detector in the telemetry pipeline if formal Z-score thresholds are used operationally.
 *   **Alerting Thresholds:** 
-    *   **Z > 2.0**: Triggers "Anomalous Activity" dashboard alerts.
-    *   **Z > 5.0**: Triggers high-priority escalation via PagerDuty/Slack integrations.
+    *   **Elevated spike indicator**: Treat as anomalous activity and increase monitoring cadence.
+    *   **Z > 5.0**: Production target for high-priority escalation through PagerDuty/Slack or an equivalent incident-management integration. PagerDuty/Slack delivery is not implemented in the current repo.
 *   **Implementation Details**: For detailed dashboard telemetry and SOPs, refer to the [Analyst & Administrator Operations Guide](../OPERATIONS_GUIDE.MD).
 *   **Layered Defense Funnel:** The Metrics surface tracks pre-inference blocks, backend safeguard/model interventions, and post-model escapes. It uses `backendReachedSafeguard`, `backendGatewayStatus`, and `backendSafeguardVerdict` as structured layer attribution before falling back to older severity heuristics.
 *   **Detection Signal Rollups:** The Metrics **Detection Signals** card is a prompt-count rollup by detection family. It uses shared helper functions for local-review and Firestore-backed log sets, groups `FORBIDDEN_TOPIC` and future `FORBIDDEN_PHRASE` flags as **Forbidden Phrase Hits**, and treats **Obfuscation Hits** as any persisted obfuscation technique rather than only `OBFUSCATED_INSTRUCTION`.

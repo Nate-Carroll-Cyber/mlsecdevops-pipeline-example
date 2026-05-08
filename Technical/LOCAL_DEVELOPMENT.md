@@ -218,7 +218,72 @@ Useful instruction-monitor env vars:
 - `INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL`
 - `INSTRUCTION_MONITOR_EMBEDDINGS_API_KEY`
 - `INSTRUCTION_MONITOR_EMBEDDINGS_MODEL_ID`
-- `INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS`
+
+### Core pgvector Seed Snapshot
+
+The `core` seed pack lives at `seeds/pgvector/core.json`. It is the reviewed-adversarial bootstrap corpus for the instruction similarity monitor.
+
+Current policy:
+
+- Seed rows use the same `instruction_records` and `instruction_chunks` tables as runtime records.
+- Seed metadata is explicit: `seed_pack`, `seed_version`, `seed_record_hash`, `seed_snapshot_hash`, `seed_immutable`, `seed_imported_at`, and `seed_source`.
+- Only reviewed `ADVERSARIAL` records are eligible for seed import/export.
+- Exact, loose-hash, or SimHash matches against stored `ADVERSARIAL` rows remain high-risk and block.
+- Semantic-only matches route to `SUSPICIOUS` / review.
+- Clean seed rows are intentionally not imported into the pgvector corpus.
+
+Fresh database workflow:
+
+```bash
+docker compose --env-file .env.demo.local -f docker-compose.demo.yml up --build --force-recreate -d
+```
+
+Because demo Postgres uses tmpfs, recreating `counter-spy-postgres` starts with a clean instruction-monitor database. Tables are lazily created by backend comparison/observe calls, seed import, or seed export.
+
+Import the current `core` seed:
+
+```bash
+npm run instruction-monitor:seed:core
+```
+
+The import verifies `embeddingDimensions`, `seedSnapshotHash`, and every `seedRecordHash`. Existing seed records with matching hashes are skipped. Changed seed records fail closed unless the operator explicitly runs:
+
+```bash
+npm run instruction-monitor:seed:core -- --allow-seed-update
+```
+
+Export reviewed adversarial runtime records into `core`:
+
+```bash
+npm run instruction-monitor:export:core -- seeds/pgvector/core.json --seed-version=core-2026-05-08 --seed-source=controlled-prompt-review
+```
+
+By default, export includes reviewed `ADVERSARIAL` rows whose `seed_pack` is `null`, which keeps runtime-reviewed samples separate from previously imported seed records. Export de-duplicates exact normalized SHA-256 matches and prefers records with whole-prompt embeddings when duplicate reviewed rows exist. Add `--include-existing-seed-records` only when intentionally rebuilding a full seed snapshot from the live corpus.
+
+Current `core` seed status:
+
+- Seed version: `core-2026-05-08`
+- Seed source: `controlled-prompt-review`
+- Snapshot hash: `606d60b8447304d50654356ba0ae4148596e8aad11ac4850b25f872147571479`
+- Records: `151` reviewed `ADVERSARIAL` seed rows
+- Chunks: `443`
+- Embedding dimensions: `768`
+- Coverage: `144` whole-prompt embeddings, `7` chunk-only oversized records, `0` hash-only records
+- Fresh import check: first import inserted `151` records and `443` chunks; second import skipped all `151` records
+- Drift check: a changed seed record with recomputed hashes was refused without `--allow-seed-update`
+
+Recommended controlled-seed loop:
+
+1. Rebuild a clean pgvector database.
+2. Confirm `instruction_records` and `instruction_chunks` are empty or absent.
+3. Run the controlled prompt set through Counter-Spy.ai.
+4. Review desired records as `Adversarial` so they are observed into pgvector.
+5. Verify whole-prompt embeddings and chunks are populated.
+6. Replay selected prompts to validate fingerprint and semantic-match behavior.
+7. Export reviewed runtime records into `seeds/pgvector/core.json`.
+8. Review the snapshot for quality and safety.
+9. Rebuild the database again and run `npm run instruction-monitor:seed:core`.
+10. Run the import a second time to confirm idempotent skip behavior.
 
 Normal frontend submissions do not generate embeddings in the browser. The Docker demo now defaults `INSTRUCTION_MONITOR_EMBEDDINGS_*` to the remote Ollama sidecar at `http://192.168.0.183:11434/v1` with `nomic-embed-text`, `INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS=768`, and `INSTRUCTION_MONITOR_EMBEDDINGS_MAX_CHUNKS=4`. The backend generates whole-prompt and chunk embeddings only when `INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL` points at a local/private-network OpenAI-compatible embeddings provider. It does not infer embeddings from `SAFEGUARDS_API_BASE_URL`, so LM Studio safeguard endpoints are never probed as embedding endpoints. Public hosted endpoints such as OpenAI or Google are blocked for instruction-monitor embeddings so malicious prompt material is not sent to third-party embedding APIs. Embeddings do not inherit the generic responder, safeguard, or OpenAI LLM endpoint. API callers can still supply `metadata.instructionEmbedding` or `metadata.instructionChunks` explicitly for controlled tests.
 

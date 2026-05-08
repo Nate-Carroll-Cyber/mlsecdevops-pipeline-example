@@ -123,11 +123,13 @@ The `/v1/intercept` endpoint is now part of the current Beta implementation. It 
 ### 5.1 Authentication
 Future external services would authenticate with the Counter-Spy gateway using **Bearer Tokens (JWT)**. 
 *   **Header:** `Authorization: Bearer <JWT_TOKEN>`
-*   **Validation:** 
+*   **Planned Production Validation:** 
     *   **Provider:** Tokens are validated against the configured Auth Provider (Firebase/OIDC).
     *   **Claims:** Validation requires `sub` (subject), `aud` (audience), and `exp` (expiration).
     *   **Policy:** Tokens are validated per-request; no local caching of validation state is performed in the Beta to ensure immediate revocation propagation.
     *   **TTL:** Token lifespan and refresh cycles are governed by the Identity Provider's policy.
+
+Current Beta protected routes use a shared `INTERCEPT_BEARER_TOKEN` static bearer credential. JWT/OIDC validation is not implemented in the backend yet.
 *   **Current Beta Note:** Protected execution routes require the shared backend bearer token when they are called. `INTERCEPT_BEARER_TOKEN` configures the backend-side credential, and browser gateway clients send the matching `VITE_BACKEND_BEARER_TOKEN` value with `/v1/intercept`, `/v1/translate`, `/v1/instruction-monitor/reviewed-adversarial`, and `/v1/ctf/sam-spade/*` requests.
 *   **Additional Future Support:** Integration with **AWS IAM SigV4** is planned for service-to-service communication within VPC environments.
 
@@ -226,11 +228,11 @@ The `source` field preserves traffic provenance without hiding data from the pri
 
 ### 6.2 Metrics Architecture
 The platform utilizes a real-time anomaly detection engine to monitor threat velocity.
-*   **Statistical Baseline:** Calculates a rolling 24-hour mean ($\mu$) and standard deviation ($\sigma$) of threat events.
-*   **Z-Score Calculation:** $Z = \frac{x - \mu}{\sigma}$.
+*   **Current Baseline:** Tracks recent audit activity against a rolling 24-hour hourly baseline for threat-velocity and dashboard context.
+*   **Current Beta Spike Metric:** The Metrics dashboard tracks threat velocity from audit records and the anomaly helper calculates a rolling spike ratio against the 24-hour hourly baseline. A formal production Z-score incidenting service is not implemented in this repo.
 *   **Alerting Thresholds:** 
-    *   **Z > 2.0**: Triggers "Anomalous Activity" dashboard alerts.
-    *   **Z > 5.0**: Triggers high-priority escalation via PagerDuty/Slack integrations.
+    *   **Elevated spike indicator**: Treat as anomalous activity and increase monitoring cadence.
+    *   **Z > 5.0**: Production target for high-priority escalation through PagerDuty/Slack or equivalent incident tooling. PagerDuty/Slack delivery is not implemented in the current codebase.
 *   **Layered Defense Funnel:** The Metrics surface now tracks the governed prompt path across both enforcement layers:
     *   **Pre-Inference Block Rate:** Fraction of prompts blocked before the Safeguard LLM is invoked.
     *   **Model Intervention Rate:** Fraction of prompts that reached the Safeguard LLM and were then blocked or queued there.

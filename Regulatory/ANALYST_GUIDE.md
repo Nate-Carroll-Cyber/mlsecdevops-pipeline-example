@@ -108,7 +108,7 @@ Thresholds can be adjusted in the **Knowledge Base -> System Configuration** sec
 ### 5.1 Recommended Baselines
 | Guardrail | Suspicious Threshold | Adversarial Threshold | Description |
 | :--- | :--- | :--- | :--- |
-| **Entropy** | > 3.6 | Configured Entropy Threshold | Detects obfuscated payloads and borderline high-entropy prompts. |
+| **Entropy** | > 3.8 | Configured Entropy Threshold | Detects obfuscated payloads and borderline high-entropy prompts. |
 | **Syntactic Complexity** | 50 | 90 | Detects instruction stacking and probing. |
 
 > [!NOTE]

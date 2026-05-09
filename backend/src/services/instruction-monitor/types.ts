@@ -67,3 +67,30 @@ export type InstructionMonitorCompareResult = {
   matches: InstructionMatch[];
   highestRisk: InstructionRisk;
 };
+
+export type InstructionRecordLookup = {
+  id: string;
+  source: InstructionSource;
+  rawText: string;
+  normalizedText: string;
+  sha256: string;
+  sha256Loose: string;
+  simhash: string;
+  simhash2gram: string;
+  simhash4gram: string;
+  verdict: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL' | null;
+  detectionFlags: string[];
+  reviewed: boolean;
+  labels: string[];
+  seedPack: string | null;
+  seedVersion: string | null;
+  seedSource: string | null;
+  createdAt: string;
+  updatedAt: string;
+  chunks: Array<{
+    chunkIndex: number;
+    chunkText: string;
+    chunkHash: string | null;
+    intentScore: number;
+  }>;
+};

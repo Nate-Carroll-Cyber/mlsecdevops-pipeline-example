@@ -9,6 +9,7 @@ import type {
   InstructionMonitorCompareResult,
   InstructionMonitorInput,
   InstructionRecord,
+  InstructionRecordLookup,
   InstructionRisk,
 } from './types.js';
 
@@ -646,6 +647,80 @@ export class PgvectorInstructionMonitor {
     const result = await this.compare(record);
     await this.observe(input);
     return result;
+  }
+
+  async lookupRecord(identifier: string): Promise<InstructionRecordLookup | null> {
+    const recordResult = await this.pool.query<{
+      id: string;
+      source: string;
+      raw_text: string;
+      normalized_text: string;
+      sha256: string;
+      sha256_loose: string;
+      simhash: string;
+      simhash_2gram: string;
+      simhash_4gram: string;
+      verdict: 'CLEAN' | 'SUSPICIOUS' | 'ADVERSARIAL' | null;
+      detection_flags: string[];
+      reviewed: boolean;
+      labels: string[];
+      seed_pack: string | null;
+      seed_version: string | null;
+      seed_source: string | null;
+      created_at: Date;
+      updated_at: Date;
+    }>(
+      `SELECT id, source, raw_text, normalized_text, sha256, sha256_loose,
+              simhash::text, simhash_2gram::text, simhash_4gram::text,
+              verdict, detection_flags, reviewed, labels, seed_pack, seed_version,
+              seed_source, created_at, updated_at
+       FROM instruction_records
+       WHERE id = $1 OR sha256 = $1 OR sha256_loose = $1
+       LIMIT 1`,
+      [identifier],
+    );
+    const row = recordResult.rows[0];
+    if (!row) return null;
+
+    const chunkResult = await this.pool.query<{
+      chunk_index: number;
+      chunk_text: string;
+      chunk_hash: string | null;
+      intent_score: number | string;
+    }>(
+      `SELECT chunk_index, chunk_text, chunk_hash, intent_score
+       FROM instruction_chunks
+       WHERE instruction_id = $1
+       ORDER BY chunk_index`,
+      [row.id],
+    );
+
+    return {
+      id: row.id,
+      source: this.toInstructionSource(row.source),
+      rawText: row.raw_text,
+      normalizedText: row.normalized_text,
+      sha256: row.sha256,
+      sha256Loose: row.sha256_loose,
+      simhash: row.simhash,
+      simhash2gram: row.simhash_2gram,
+      simhash4gram: row.simhash_4gram,
+      verdict: row.verdict,
+      detectionFlags: row.detection_flags ?? [],
+      reviewed: row.reviewed,
+      labels: row.labels ?? [],
+      seedPack: row.seed_pack,
+      seedVersion: row.seed_version,
+      seedSource: row.seed_source,
+      createdAt: row.created_at.toISOString(),
+      updatedAt: row.updated_at.toISOString(),
+      chunks: chunkResult.rows.map((chunk) => ({
+        chunkIndex: chunk.chunk_index,
+        chunkText: chunk.chunk_text,
+        chunkHash: chunk.chunk_hash,
+        intentScore: Number(chunk.intent_score),
+      })),
+    };
   }
 
   async close(): Promise<void> {

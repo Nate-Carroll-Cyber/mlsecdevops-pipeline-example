@@ -54,11 +54,13 @@ import {
   checkBackendHealth,
   createSamSpadeSession,
   interceptPrompt,
+  lookupInstructionMonitorRecord,
   observeReviewedAdversarialInstruction,
   sendSamSpadeMessage,
   solveSamSpadeCase,
   type BackendInterceptResponse,
   type BackendHealthResponse,
+  type InstructionMonitorRecord,
   type SamSpadeReviewArtifact,
   type SamSpadeSession,
 } from './lib/backendApi';
@@ -1148,8 +1150,8 @@ function hasPolicyViolationFlags(flags: string[] = []): boolean {
     flags.includes('REGEX_MATCH');
 }
 
-function getAuditSeverityLabel(log: AuditLog): 'Review' | 'Adversarial' | 'Policy Violation' | 'Suspicious' | 'Informational' | 'Clean' {
-  if (log.status === 'PENDING_REVIEW') return 'Review';
+function getAuditSeverityLabel(log: AuditLog): 'Adversarial' | 'Policy Violation' | 'Suspicious' | 'Informational' | 'Clean' {
+  if (log.status === 'PENDING_REVIEW') return 'Suspicious';
   if (log.detectionLevel === DetectionLevel.ADVERSARIAL || (log.detectionLevel === undefined && log.escalationRecommended)) return 'Adversarial';
   if (hasPolicyViolationFlags(log.detectionFlags)) return 'Policy Violation';
   if (log.detectionLevel === DetectionLevel.SUSPICIOUS) return 'Suspicious';
@@ -1510,6 +1512,23 @@ function formatInstructionSimilarityReason(reason: string) {
     .join(' ');
 }
 
+function formatDetectionFlagLabel(flag: string) {
+  const displayLabels: Record<string, string> = {
+    FOREIGN_LANGUAGE: 'Language Recovery',
+    MIXED_LANGUAGE: 'Mixed-Script Input',
+  };
+  return displayLabels[flag] ?? flag;
+}
+
+function formatBackendReasoning(reason: string) {
+  const trimmed = reason.trim();
+  if (!trimmed) return '';
+  return trimmed
+    .replace(/\bSimilarity monitor\b/g, 'Similarity Monitor')
+    .replace(/\b(threshold exceeded)\s+(Similarity Monitor)\b/g, '$1. $2')
+    .replace(/^([a-z])/, (char) => char.toUpperCase());
+}
+
 function loadResponderTelemetryConfig(): ResponderTelemetryConfig {
   if (typeof window === 'undefined') return DEFAULT_RESPONDER_TELEMETRY_CONFIG;
   try {
@@ -1721,6 +1740,10 @@ export default function App() {
   // State to store the log currently being viewed in detail
   const [viewingPromptLog, setViewingPromptLog] = useState<AuditLog | null>(null);
   const [decisionPromptPreview, setDecisionPromptPreview] = useState<{ prompt: string; systemPrompt: string; systemPromptHash?: string; includesMcpSafetyPolicy: boolean } | null>(null);
+  const [instructionLookupRecord, setInstructionLookupRecord] = useState<InstructionMonitorRecord | null>(null);
+  const [instructionLookupLoading, setInstructionLookupLoading] = useState(false);
+  const [instructionLookupError, setInstructionLookupError] = useState<string | null>(null);
+  const [instructionLookupIdentifier, setInstructionLookupIdentifier] = useState<string | null>(null);
   
   // State to store the system configuration (prompts, rules, etc.)
   const [systemConfig, setSystemConfig] = useState<SystemConfig>(DEFAULT_SYSTEM_CONFIG);
@@ -1740,7 +1763,8 @@ export default function App() {
     sessionAudit: true,
     blockedKeywords: true,
     blockedTopics: true,
-    regexRules: true
+    regexRules: true,
+    instructionSimilarity: true,
   });
   // State to store the current session ID, initialized with a random UUID
   const [sessionId, setSessionId] = useState<string>(() => crypto.randomUUID());
@@ -2405,6 +2429,29 @@ export default function App() {
       systemPromptHash: await sha256Hex(systemPrompt),
       includesMcpSafetyPolicy: systemPrompt.includes(MCP_AGENT_SAFETY_POLICY_TITLE),
     });
+  };
+
+  const handleLookupInstructionRecord = async (identifier?: string) => {
+    const normalizedIdentifier = identifier?.trim();
+    if (!normalizedIdentifier) {
+      toast.error('No stored instruction identifier is available.');
+      return;
+    }
+
+    setInstructionLookupIdentifier(normalizedIdentifier);
+    setInstructionLookupRecord(null);
+    setInstructionLookupError(null);
+    setInstructionLookupLoading(true);
+    try {
+      const record = await lookupInstructionMonitorRecord(normalizedIdentifier, profile?.uid);
+      setInstructionLookupRecord(record);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Instruction record lookup failed.';
+      setInstructionLookupError(message);
+      toast.error(message);
+    } finally {
+      setInstructionLookupLoading(false);
+    }
   };
 
   // Function to promote a log to the Golden Set for fine-tuning
@@ -3573,6 +3620,7 @@ export default function App() {
               source: options?.source || 'analyst_chat',
               providerLlmRoutingEnabled: false,
               responderLlmRoutingEnabled: false,
+              instructionSimilarityEnabled: activeGuardrails.instructionSimilarity,
             },
             tuning: {
               entropyThreshold: governanceConfig.entropyThreshold,
@@ -3711,6 +3759,7 @@ export default function App() {
 	                source: options?.source || 'analyst_chat',
 		                providerLlmRoutingEnabled: true,
 	                  responderLlmRoutingEnabled: effectiveResponderLlmRoutingEnabled,
+                  instructionSimilarityEnabled: activeGuardrails.instructionSimilarity,
                   ...(safeguardApiKeyOverride ? { safeguardApiKey: safeguardApiKeyOverride } : {}),
 	              },
               tuning: {
@@ -4245,7 +4294,7 @@ export default function App() {
                 className="w-16 h-16 object-contain"
               />
               <CardTitle className="text-xl font-sans font-semibold tracking-tight flex items-baseline gap-0.5">
-                Counter-Spy<span className="text-primary">.ai</span> <span className="text-[10px] opacity-50 ml-2 font-mono">v2.2</span>
+                Counter-Spy<span className="text-primary">.ai</span> <span className="text-[10px] opacity-50 ml-2 font-mono">v2.3</span>
               </CardTitle>
             </div>
             <CardDescription className="text-sm font-semibold text-slate-200">
@@ -4855,7 +4904,7 @@ export default function App() {
 	                                  : isStructuredAllowMessage
 	                                    ? 'bg-green-500/10 border-green-500/30'
 	                                    : isBackendInterceptMessage || isPendingReviewMessage
-	                                      ? 'bg-purple-500/10 border-purple-500/30'
+	                                      ? 'bg-amber-500/10 border-amber-500/30'
 	                                : isPolicyViolationMessage
 	                                  ? 'bg-orange-500/10 border-orange-500/30'
                                   : isSuspiciousDetectionMessage
@@ -4868,12 +4917,12 @@ export default function App() {
 	                                {m.role === 'user' ? 'Analyst' : 'Counter-Spy.ai'}
 	                              </span>
 	                              {m.role === 'model' && isBackendInterceptMessage && (
-	                                <Badge variant="outline" className="border-purple-500/50 bg-purple-500/10 text-[10px] uppercase text-purple-500">
-	                                  Backend Review
+	                                <Badge variant="outline" className="border-amber-500/50 bg-amber-500/10 text-[10px] uppercase text-amber-500">
+	                                  Suspicious
 	                                </Badge>
 	                              )}
 	                              {m.role === 'model' && isPendingReviewMessage && (
-	                                <Badge variant="outline" className="border-purple-500/50 bg-purple-500/10 text-[10px] uppercase text-purple-500">
+	                                <Badge variant="outline" className="border-amber-500/50 bg-amber-500/10 text-[10px] uppercase text-amber-500">
 	                                  Pending Review
 	                                </Badge>
 	                              )}
@@ -4902,12 +4951,12 @@ export default function App() {
 	                                </>
 	                              ) : isBackendInterceptMessage ? (
 	                                <>
-	                                  <span className="text-purple-500 font-bold">Backend intercepted the prompt:</span>
+	                                  <span className="text-amber-500 font-bold">Backend intercepted the prompt:</span>
 	                                  {m.text.substring('Backend intercepted the prompt:'.length)}
 	                                </>
 	                              ) : isPendingReviewMessage ? (
 	                                <>
-	                                  <span className="text-purple-500 font-bold">PENDING REVIEW:</span>
+	                                  <span className="text-amber-500 font-bold">PENDING REVIEW:</span>
 	                                  {m.text.substring('PENDING REVIEW:'.length)}
 	                                </>
 	                              ) : isSuspiciousDetectionMessage ? (
@@ -4987,24 +5036,34 @@ export default function App() {
                           const backendStatusLabel = getBackendGatewayStatusLabel(backendStatus);
                           const similaritySummary = displayBackendOutcome?.instructionSimilarity;
                           const similarityTopMatch = similaritySummary?.topMatch;
-	                          const backendRequiresReview = displayBackendOutcome
+                          const backendRequiresReview = displayBackendOutcome
 	                            ? isBackendSafeguardIntervention(displayBackendOutcome) || Boolean(similaritySummary)
 	                            : false;
                           const backendReachedSafeguard = displayBackendOutcome?.backendReachedSafeguard !== false;
                           const backendVerdictLevel = mapBackendSafeguardVerdictToDetectionLevel(displayBackendOutcome?.backendSafeguardVerdict);
-                          const backendUltimateDetectionLevel = Math.max(displaySanitization!.detectionLevel, backendVerdictLevel);
-                          const backendAlertClass = backendUltimateDetectionLevel === DetectionLevel.ADVERSARIAL
+                          const backendGatewayDetectionLevel = backendStatus === 'INTERCEPTED' || backendStatus === 'QUEUED' || backendStatus === 'SHIELD_ERROR'
+                            ? DetectionLevel.SUSPICIOUS
+                            : DetectionLevel.CLEAN;
+                          const backendReviewDisplayLevel = displaySanitization!.detectionLevel === DetectionLevel.ADVERSARIAL
+                            ? DetectionLevel.ADVERSARIAL
+                            : Math.max(
+                                displaySanitization!.detectionLevel,
+                                backendRequiresReview || backendVerdictLevel >= DetectionLevel.SUSPICIOUS
+                                  ? DetectionLevel.SUSPICIOUS
+                                  : backendGatewayDetectionLevel,
+                              );
+                          const backendAlertClass = backendReviewDisplayLevel === DetectionLevel.ADVERSARIAL
                             ? 'border-destructive/30 bg-destructive/10 text-destructive'
-                            : backendUltimateDetectionLevel === DetectionLevel.SUSPICIOUS
+                            : backendReviewDisplayLevel === DetectionLevel.SUSPICIOUS
                               ? 'border-amber-500/30 bg-amber-500/10 text-amber-600'
                               : backendStatus === 'CLEAN'
                                 ? 'border-green-500/30 bg-green-500/10 text-green-600'
                                 : 'border-amber-500/30 bg-amber-500/10 text-amber-600';
-                          const flaggedChunksClass = backendUltimateDetectionLevel === DetectionLevel.ADVERSARIAL
+                          const alertMatchedPanelClass = backendReviewDisplayLevel === DetectionLevel.ADVERSARIAL
                             ? 'border-destructive/30 bg-destructive/10 text-destructive'
-                            : backendUltimateDetectionLevel === DetectionLevel.SUSPICIOUS
+                            : backendReviewDisplayLevel === DetectionLevel.SUSPICIOUS
                               ? 'border-amber-500/30 bg-amber-500/10 text-amber-600'
-                              : backendUltimateDetectionLevel === DetectionLevel.INFORMATIONAL
+                              : backendReviewDisplayLevel === DetectionLevel.INFORMATIONAL
                                 ? 'border-sky-500/30 bg-sky-500/10 text-sky-600'
                                 : 'border-green-500/30 bg-green-500/10 text-green-600';
                           const hasSemanticSimilarity = Boolean(
@@ -5038,31 +5097,33 @@ export default function App() {
 	                                <Alert className={`rounded-xl p-3 ${backendAlertClass}`}>
 	                                  <ShieldAlert className="w-4 h-4" />
 	                                  <AlertTitle className="ml-2 flex items-center gap-2 text-xs font-bold uppercase">
-	                                    {backendReachedSafeguard ? 'Backend Safeguard' : 'Backend Monitor'}
-	                                    <Badge variant="outline" className="border-current bg-background/40 px-1.5 py-0 text-[9px] uppercase">
-	                                      {backendRequiresReview ? 'Review' : backendStatusLabel}
-	                                    </Badge>
+	                                    {backendReachedSafeguard ? 'Backend Safeguard' : 'Similarity Monitor'}
+	                                    {!backendRequiresReview && (
+	                                      <Badge variant="outline" className="border-current bg-background/40 px-1.5 py-0 text-[9px] uppercase">
+	                                        {backendStatusLabel}
+	                                      </Badge>
+	                                    )}
 	                                  </AlertTitle>
 	                                  <AlertDescription className="text-[9px]">
                                       {!backendReachedSafeguard
-                                        ? `Local firewall decision was observed by the backend monitor; safeguard and responder calls were skipped.`
+                                        ? `Local firewall decision was observed by the Similarity Monitor; safeguard and responder calls were skipped.`
 	                                      : backendRequiresReview
 	                                        ? `Local gates passed; backend returned ${backendStatusLabel} and queued analyst review.`
 	                                        : backendStatus === 'CLEAN'
 	                                        ? 'Local gates passed; backend safeguard allowed the prompt to continue.'
 	                                        : `Backend safeguard returned ${backendStatusLabel}.`}
 	                                    {displayBackendOutcome.backendSafeguardReasoning && !similaritySummary
-	                                      ? ` ${displayBackendOutcome.backendSafeguardReasoning}`
+	                                      ? ` ${formatBackendReasoning(displayBackendOutcome.backendSafeguardReasoning)}`
 	                                      : ''}
                                       {similaritySummary && (
-                                        <span className="mt-2 block rounded-lg border border-current/20 bg-background/30 p-2 text-[9px] text-current">
+                                        <span className={`mt-2 block rounded-lg border p-2 text-[9px] ${alertMatchedPanelClass}`}>
                                           <span className="mb-1 flex items-center justify-between gap-2 font-bold uppercase">
                                             <span>Similarity Monitor</span>
                                             <span>{similaritySummary.highestRisk} risk / {similaritySummary.matchCount} match{similaritySummary.matchCount === 1 ? '' : 'es'}</span>
                                           </span>
                                           {displayBackendOutcome.backendSafeguardReasoning ? (
                                             <span className="mb-1 block opacity-80">
-                                              {displayBackendOutcome.backendSafeguardReasoning}
+                                              {formatBackendReasoning(displayBackendOutcome.backendSafeguardReasoning)}
                                             </span>
                                           ) : null}
                                           {hasSemanticSimilarity ? (
@@ -5083,7 +5144,21 @@ export default function App() {
                                           )}
                                           <span className="grid gap-1">
                                             <span className="min-w-0">
-                                              <span className="block opacity-70">Stored hash</span>
+                                              <span className="flex items-center justify-between gap-2 opacity-70">
+                                                <span>Stored hash</span>
+                                                {similarityTopMatch?.targetId && (
+                                                  <Button
+                                                    type="button"
+                                                    variant="ghost"
+                                                    size="sm"
+                                                    className="h-5 px-1.5 text-[8px] uppercase text-current hover:bg-background/30"
+                                                    onClick={() => void handleLookupInstructionRecord(similarityTopMatch.targetId)}
+                                                  >
+                                                    <Search className="mr-1 h-3 w-3" />
+                                                    Lookup
+                                                  </Button>
+                                                )}
+                                              </span>
                                               <span className="block break-all font-mono" title={similarityTopMatch?.targetHash}>{similarityTopMatch?.targetHash ?? 'n/a'}</span>
                                             </span>
                                             <span>
@@ -5132,13 +5207,14 @@ export default function App() {
                                       <Badge
                                         key={r}
                                         variant="outline"
-                                        className={`rounded-md text-[10px] uppercase px-1.5 py-0.5 ${
+                                        title={r}
+                                        className={`rounded-md text-[10px] px-1.5 py-0.5 ${
                                           r === 'REGEX_MATCH' ? 'border-amber-500 text-amber-600 bg-amber-500/10' :
                                           ['EMAIL', 'AWS_KEY', 'LLM_API_KEY', 'SECRET_KEY', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'PHONE'].includes(r) ? 'border-blue-500 text-blue-600 bg-blue-500/10' :
                                           'border-destructive text-destructive bg-destructive/10'
                                         }`}
                                       >
-                                        {r}
+                                        {formatDetectionFlagLabel(r)}
                                       </Badge>
                                     ))
                                   ) : (
@@ -5198,7 +5274,7 @@ export default function App() {
                                   </div>
                                   {/* Flagged Chunks Display */}
                                   {displaySanitization!.suspiciousChunks && displaySanitization!.suspiciousChunks.length > 0 && (
-                                    <div className={`mt-2 rounded-md border p-2 ${flaggedChunksClass}`}>
+                                    <div className={`mt-2 rounded-md border p-2 ${alertMatchedPanelClass}`}>
                                       <p className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold">
                                         Flagged Chunks:
                                         <HelpTooltip text="Prompt segments that crossed the entropy threshold and may contain encoded, compressed, or obfuscated content." />
@@ -5452,6 +5528,23 @@ export default function App() {
                               <Switch
                                 checked={activeGuardrails.safeguardLlm}
                                 onCheckedChange={(c) => setActiveGuardrails(prev => ({ ...prev, safeguardLlm: c }))}
+                                className="scale-75 data-[state=checked]:bg-green-500"
+                              />
+                            )}
+                          </li>
+                          {/* Similarity Monitor Toggle */}
+                          <li className="flex items-center justify-between">
+                            <div className="flex items-center gap-2.5">
+                              <ShieldCheck className={`w-3.5 h-3.5 ${activeGuardrails.instructionSimilarity ? 'text-green-500' : 'text-muted-foreground'}`} />
+                              <span className={!activeGuardrails.instructionSimilarity ? 'text-muted-foreground line-through' : ''}>
+                                Similarity Monitor
+                              </span>
+                              <HelpTooltip text="Compares prompts against stored reviewed-adversarial instructions using hashes, SimHash, and pgvector similarity." />
+                            </div>
+                            {profile?.role === 'admin' && (
+                              <Switch
+                                checked={activeGuardrails.instructionSimilarity}
+                                onCheckedChange={(c) => setActiveGuardrails(prev => ({ ...prev, instructionSimilarity: c }))}
                                 className="scale-75 data-[state=checked]:bg-green-500"
                               />
                             )}
@@ -5858,14 +5951,13 @@ export default function App() {
                             const severityLabel = getAuditSeverityLabel(log);
                             return (
                           <span className={`font-semibold ${
-                            severityLabel === 'Review' ? 'text-purple-500' :
                             severityLabel === 'Adversarial' ? 'text-red-500' :
                             severityLabel === 'Policy Violation' ? 'text-orange-500' :
                             severityLabel === 'Suspicious' ? 'text-amber-500' :
                             severityLabel === 'Informational' ? 'text-blue-500' :
                             'text-green-500'
                           }`}>
-                            {severityLabel === 'Review' ? 'REVIEW' : severityLabel}
+                            {severityLabel}
                           </span>
                             );
                           })()
@@ -5887,7 +5979,6 @@ export default function App() {
                                   log.resultantSeverity === 'Informational' ? 'border-blue-500 text-blue-600 hover:bg-blue-50' :
                                   'border-green-500 text-green-600 hover:bg-green-50'
                                 ) : (
-                                  getAuditSeverityLabel(log) === 'Review' ? 'border-purple-500 text-purple-600 hover:bg-purple-50' :
                                   getAuditSeverityLabel(log) === 'Adversarial' ? 'border-transparent bg-destructive text-destructive-foreground hover:bg-red-700' :
                                   getAuditSeverityLabel(log) === 'Policy Violation' ? 'border-orange-500 text-orange-600 hover:bg-orange-50' :
                                   getAuditSeverityLabel(log) === 'Suspicious' ? 'border-amber-500 text-amber-600 hover:bg-amber-50' :
@@ -5897,7 +5988,7 @@ export default function App() {
                               }`}
                             >
                               {log.reviewed ? 'Reviewed' :
-                               (getAuditSeverityLabel(log) === 'Review' || getAuditSeverityLabel(log) === 'Adversarial' || getAuditSeverityLabel(log) === 'Suspicious' || getAuditSeverityLabel(log) === 'Policy Violation') ? 'Review' :
+                               (getAuditSeverityLabel(log) === 'Adversarial' || getAuditSeverityLabel(log) === 'Suspicious' || getAuditSeverityLabel(log) === 'Policy Violation') ? 'Review' :
                                getAuditSeverityLabel(log) === 'Informational' ? 'Informational' : 'Clean'}
                             </DropdownMenuTrigger>
                             <DropdownMenuContent>
@@ -5928,7 +6019,6 @@ export default function App() {
                           <Badge 
                             variant={getAuditSeverityLabel(log) === 'Adversarial' ? "destructive" : "outline"} 
                             className={`rounded-none text-[8px] uppercase px-1 ${
-                              getAuditSeverityLabel(log) === 'Review' ? 'border-purple-500 text-purple-600' :
                               getAuditSeverityLabel(log) === 'Policy Violation' ? 'border-orange-500 text-orange-600' :
                               getAuditSeverityLabel(log) === 'Suspicious' ? 'border-amber-500 text-amber-600' : 
                               getAuditSeverityLabel(log) === 'Informational' ? 'border-blue-400 text-blue-500' :
@@ -6574,6 +6664,72 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
                     )}
                   </div>
                 </div>
+                {viewingPromptLog.instructionSimilarity && (
+                  <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+                    <div className="mb-2 flex items-center justify-between gap-3 font-semibold uppercase tracking-wide">
+                      <span>Similarity Monitor</span>
+                      <span>
+                        {viewingPromptLog.instructionSimilarity.highestRisk} risk / {viewingPromptLog.instructionSimilarity.matchCount} match{viewingPromptLog.instructionSimilarity.matchCount === 1 ? '' : 'es'}
+                      </span>
+                    </div>
+                    {viewingPromptLog.backendSafeguardReasoning && (
+                      <p className="mb-3 leading-relaxed">
+                        {formatBackendReasoning(viewingPromptLog.backendSafeguardReasoning)}
+                      </p>
+                    )}
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <div>
+                        <div className="text-[10px] font-semibold uppercase opacity-70">Semantic</div>
+                        <div className="font-mono">
+                          {formatSimilarityPercent(viewingPromptLog.instructionSimilarity.topMatch?.cosineSimilarity)}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-semibold uppercase opacity-70">Chunk</div>
+                        <div className="font-mono">
+                          {formatSimilarityPercent(
+                            viewingPromptLog.instructionSimilarity.topMatch?.attentionPooledChunkSimilarity ??
+                            viewingPromptLog.instructionSimilarity.topMatch?.maxChunkSimilarity
+                          )}
+                        </div>
+                      </div>
+                      <div className="sm:col-span-2">
+                        <div className="flex items-center justify-between gap-2 text-[10px] font-semibold uppercase opacity-70">
+                          <span>Stored Hash</span>
+                          {viewingPromptLog.instructionSimilarity.topMatch?.targetId && (
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="sm"
+                              className="h-6 px-2 text-[10px] uppercase text-current hover:bg-background/30"
+                              onClick={() => void handleLookupInstructionRecord(viewingPromptLog.instructionSimilarity?.topMatch?.targetId)}
+                            >
+                              <Search className="mr-1 h-3 w-3" />
+                              Lookup
+                            </Button>
+                          )}
+                        </div>
+                        <div className="break-all font-mono">
+                          {viewingPromptLog.instructionSimilarity.topMatch?.targetHash ?? 'n/a'}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-semibold uppercase opacity-70">Stored Verdict</div>
+                        <div className="font-mono uppercase">
+                          {viewingPromptLog.instructionSimilarity.topMatch?.targetVerdict ?? 'n/a'}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[10px] font-semibold uppercase opacity-70">Match Reasons</div>
+                        <div>
+                          {viewingPromptLog.instructionSimilarity.topMatch?.matchReasons?.length
+                            ? viewingPromptLog.instructionSimilarity.topMatch.matchReasons.map(formatInstructionSimilarityReason).join(', ')
+                            : 'n/a'}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             )}
             {/* Scrollable area for potentially long prompts and responses */}
@@ -6670,6 +6826,122 @@ ${BULK_PROMPT_END_MARKER}`}</pre>
               </Button>
             )}
             <Button onClick={() => setViewingPromptLog(null)}>Close</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={!!instructionLookupIdentifier}
+        onOpenChange={(open) => {
+          if (!open) {
+            setInstructionLookupIdentifier(null);
+            setInstructionLookupRecord(null);
+            setInstructionLookupError(null);
+            setInstructionLookupLoading(false);
+          }
+        }}
+      >
+        <DialogContent className="flex max-h-[88vh] flex-col sm:max-w-[760px]">
+          <DialogHeader>
+            <DialogTitle>Instruction Match</DialogTitle>
+            <DialogDescription>
+              Stored instruction record linked to the Similarity Monitor match.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto py-4 pr-2">
+            {instructionLookupLoading ? (
+              <div className="rounded-md border bg-muted/40 p-4 text-sm text-muted-foreground">
+                Looking up stored instruction record...
+              </div>
+            ) : instructionLookupError ? (
+              <Alert className="border-destructive/30 bg-destructive/10 text-destructive">
+                <AlertTriangle className="h-4 w-4" />
+                <AlertTitle>Lookup Failed</AlertTitle>
+                <AlertDescription>{instructionLookupError}</AlertDescription>
+              </Alert>
+            ) : instructionLookupRecord ? (
+              <div className="space-y-4 text-sm">
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-md border bg-background/60 p-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Record ID</div>
+                    <div className="mt-1 break-all font-mono text-xs">{instructionLookupRecord.id}</div>
+                  </div>
+                  <div className="rounded-md border bg-background/60 p-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Source</div>
+                    <div className="mt-1 font-mono text-xs uppercase">{instructionLookupRecord.source.replace(/_/g, ' ')}</div>
+                  </div>
+                  <div className="rounded-md border bg-background/60 p-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Stored Verdict</div>
+                    <div className="mt-1 font-mono text-xs uppercase">{instructionLookupRecord.verdict ?? 'n/a'}</div>
+                  </div>
+                  <div className="rounded-md border bg-background/60 p-3">
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Reviewed</div>
+                    <div className="mt-1 font-mono text-xs uppercase">{instructionLookupRecord.reviewed ? 'Yes' : 'No'}</div>
+                  </div>
+                </div>
+                <div className="rounded-md border bg-background/60 p-3">
+                  <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">SHA-256</div>
+                  <div className="mt-1 break-all font-mono text-xs">{instructionLookupRecord.sha256}</div>
+                  <div className="mt-3 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Loose SHA-256</div>
+                  <div className="mt-1 break-all font-mono text-xs">{instructionLookupRecord.sha256Loose}</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {instructionLookupRecord.detectionFlags.map((flag) => (
+                    <Badge key={flag} variant="secondary" className="text-[10px] uppercase">
+                      {formatDetectionFlagLabel(flag).replace(/_/g, ' ')}
+                    </Badge>
+                  ))}
+                  {instructionLookupRecord.labels.map((label) => (
+                    <Badge key={label} variant="outline" className="text-[10px] uppercase">
+                      {label.replace(/_/g, ' ')}
+                    </Badge>
+                  ))}
+                  {instructionLookupRecord.seedPack && (
+                    <Badge variant="outline" className="text-[10px] uppercase">
+                      {instructionLookupRecord.seedPack} {instructionLookupRecord.seedVersion ?? ''}
+                    </Badge>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Stored Instruction Preview</p>
+                  <pre className="max-h-56 overflow-y-auto rounded-md border bg-muted/50 p-3 font-mono text-xs whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
+                    {instructionLookupRecord.rawText}
+                  </pre>
+                </div>
+                {instructionLookupRecord.chunks.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Stored Chunks</p>
+                    <div className="space-y-2">
+                      {instructionLookupRecord.chunks.map((chunk) => (
+                        <div key={chunk.chunkIndex} className="rounded-md border bg-background/60 p-3">
+                          <div className="mb-1 flex items-center justify-between gap-2 text-[10px] uppercase text-muted-foreground">
+                            <span>Chunk {chunk.chunkIndex + 1}</span>
+                            <span className="font-mono">Intent {chunk.intentScore.toFixed(2)}</span>
+                          </div>
+                          {chunk.chunkHash && (
+                            <div className="mb-2 break-all font-mono text-[10px] text-muted-foreground">{chunk.chunkHash}</div>
+                          )}
+                          <pre className="max-h-24 overflow-y-auto whitespace-pre-wrap break-words font-mono text-xs [overflow-wrap:anywhere]">
+                            {chunk.chunkText}
+                          </pre>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="rounded-md border bg-muted/40 p-4 text-sm text-muted-foreground">
+                No instruction record selected.
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button onClick={() => {
+              setInstructionLookupIdentifier(null);
+              setInstructionLookupRecord(null);
+              setInstructionLookupError(null);
+              setInstructionLookupLoading(false);
+            }}>Close</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>

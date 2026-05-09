@@ -305,6 +305,8 @@ Metrics note: the Security Operations view now includes a **Defense Funnel** car
 
 If your ingest run includes `expectedVerdict` labels, the escape-rate math will use those labels when available instead of relying only on final severity heuristics.
 
+Review workload note: Metrics keeps audit records classified as `Suspicious` when that is the effective detector result, but the dashboard rolls unreviewed `Suspicious` items into operational `Review` counts. The Alert Severity `Review` bucket, 24-hour severity trend, and HITL Queue `Pending Review` total should therefore include suspicious borderline traffic even if the audit detail still shows `Suspicious`.
+
 Backend safeguard attribution note: records that reach `/v1/intercept` now carry `backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, and `backendReachedSafeguard`. The Metrics funnel uses those fields to count backend safeguard/model interventions, so a Bulk Ingest prompt blocked by the safeguard judge should increment **Model Intervention Rate** rather than appearing as `0 caught by Safeguard LLM / 0 prompts that reached it`.
 
 Safeguard observability note: every safeguard call emits structured JSON log events for `safeguard.schema` and `safeguard.divergence` via `metric_increment`, plus a detailed `safeguard_decision` event with prompt hash, retry marker, response shape, judge verdict, gateway action, divergence boolean, optional raw reasoning trace, and latency. Instruction-monitor embedding calls emit `instruction_embedding_generated` with model, source, input count, vector dimensions, chunk count, and duration. These are intended for log-based metric extraction in CloudWatch or another collector.

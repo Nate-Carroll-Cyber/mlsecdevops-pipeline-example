@@ -44,6 +44,8 @@ The six normalized component pressures are:
 
 The Metrics view has a **Feature Pressure** card.
 
+The Metrics view also rolls unreviewed `Suspicious` results into operational `Review` counts. This is display/workload aggregation only: audit records and detailed severity labels remain `Suspicious`, while the Alert Severity `Review` bucket, severity trend, and HITL Queue `Pending Review` count include those borderline items.
+
 - `Avg Feature Pressure` is shown as `x / 100`.
 - The six component rows are shown as average percentages across submitted prompts with feature vectors:
   - `Avg Instruction Pressure`

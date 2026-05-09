@@ -166,6 +166,20 @@ function getSeverityBucket(log: any, entropyThreshold?: number): SeverityBucket 
   return 'clean';
 }
 
+function getMetricsSeverityBucket(log: any, entropyThreshold?: number): SeverityBucket {
+  const bucket = getSeverityBucket(log, entropyThreshold);
+  return bucket === 'suspicious' ? 'review' : bucket;
+}
+
+function isPendingReviewMetric(log: any, entropyThreshold?: number): boolean {
+  return log.reviewed !== true && getMetricsSeverityBucket(log, entropyThreshold) === 'review';
+}
+
+function getPendingAgeHours(log: any): number {
+  const stamp = normalizeLogTimestamp(log.timestamp);
+  return (Date.now() - stamp.getTime()) / (1000 * 60 * 60);
+}
+
 function getAutomatedSeverityBucket(log: any, entropyThreshold?: number): SeverityBucket {
   const detectionFlags = Array.isArray(log.detectionFlags) ? log.detectionFlags : [];
   const upperResponse = typeof log.response === 'string' ? log.response.toUpperCase() : '';
@@ -632,7 +646,7 @@ export function ThreatDashboard({
           const hour = stamp.getHours();
           const bucket = severityHourlyData[hour];
           if (!bucket) return;
-          bucket[getSeverityBucket(log, entropyThreshold)] += 1;
+          bucket[getMetricsSeverityBucket(log, entropyThreshold)] += 1;
         });
         const reorderedSeverityData = [];
         for (let i = 1; i <= 24; i++) {
@@ -641,13 +655,10 @@ export function ThreatDashboard({
         }
         setSeverityChartData(reorderedSeverityData);
 
-        const pendingLogs = filteredLogs.filter((log) => log.status === 'PENDING_REVIEW');
+        const pendingLogs = filteredLogs.filter((log) => isPendingReviewMetric(log, entropyThreshold));
         const reviewedLogs = filteredLogs.filter((log) => log.reviewed === true);
         const averagePendingHours = pendingLogs.length > 0
-          ? pendingLogs.reduce((sum, log) => {
-              const stamp = log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp);
-              return sum + ((Date.now() - stamp.getTime()) / (1000 * 60 * 60));
-            }, 0) / pendingLogs.length
+          ? pendingLogs.reduce((sum, log) => sum + getPendingAgeHours(log), 0) / pendingLogs.length
           : 0;
 
         const totalLogs = filteredLogs.length || 1;
@@ -710,7 +721,7 @@ export function ThreatDashboard({
           return Number.isFinite(entropy) ? Math.max(maxEntropy, entropy) : maxEntropy;
         }, 0);
         const alertCounts = filteredLogs.reduce<SeverityCounts>((counts, log) => {
-          counts[getSeverityBucket(log, entropyThreshold)] += 1;
+          counts[getMetricsSeverityBucket(log, entropyThreshold)] += 1;
           return counts;
         }, createEmptySeverityCounts());
         const layerMetrics = calculateLayerMetrics(filteredLogs, entropyThreshold);
@@ -877,7 +888,7 @@ export function ThreatDashboard({
           const hour = log.timestamp.getHours();
           const bucket = severityHourlyData[hour];
           if (!bucket) return;
-          bucket[getSeverityBucket(log, entropyThreshold)] += 1;
+          bucket[getMetricsSeverityBucket(log, entropyThreshold)] += 1;
         });
         const reorderedSeverityData = [];
         for (let i = 1; i <= 24; i++) {
@@ -886,10 +897,10 @@ export function ThreatDashboard({
         }
         setSeverityChartData(reorderedSeverityData);
 
-        const pendingLogs = filteredLogs.filter((log) => log.status === 'PENDING_REVIEW');
+        const pendingLogs = filteredLogs.filter((log) => isPendingReviewMetric(log, entropyThreshold));
         const reviewedLogs = filteredLogs.filter((log) => log.reviewed === true);
         const averagePendingHours = pendingLogs.length > 0
-          ? pendingLogs.reduce((sum, log) => sum + ((Date.now() - log.timestamp.getTime()) / (1000 * 60 * 60)), 0) / pendingLogs.length
+          ? pendingLogs.reduce((sum, log) => sum + getPendingAgeHours(log), 0) / pendingLogs.length
           : 0;
 
         const totalLogs = filteredLogs.length || 1;
@@ -954,7 +965,7 @@ export function ThreatDashboard({
           return Number.isFinite(entropy) ? Math.max(maxEntropy, entropy) : maxEntropy;
         }, 0);
         const alertCounts = filteredLogs.reduce<SeverityCounts>((counts, log) => {
-          counts[getSeverityBucket(log, entropyThreshold)] += 1;
+          counts[getMetricsSeverityBucket(log, entropyThreshold)] += 1;
           return counts;
         }, createEmptySeverityCounts());
         const layerMetrics = calculateLayerMetrics(filteredLogs, entropyThreshold);

@@ -232,6 +232,7 @@ The `source` field preserves traffic provenance without hiding data from the pri
 The platform utilizes a real-time anomaly detection engine to monitor threat velocity.
 *   **Current Baseline:** Tracks recent audit activity against a rolling 24-hour hourly baseline for threat-velocity and dashboard context.
 *   **Current Beta Spike Metric:** The Metrics dashboard tracks threat velocity from audit records and the anomaly helper calculates a rolling spike ratio against the 24-hour hourly baseline. A formal production Z-score incidenting service is not implemented in this repo.
+*   **Review Workload Rollup:** Metrics does not rewrite audit severity. For operational counts only, unreviewed `Suspicious` results roll up into `Review`, so the Alert Severity trend and HITL Queue `Pending Review` count reflect the analyst workload created by borderline detections.
 *   **Alerting Thresholds:** 
     *   **Elevated spike indicator**: Treat as anomalous activity and increase monitoring cadence.
     *   **Z > 5.0**: Production target for high-priority escalation through PagerDuty/Slack or equivalent incident tooling. PagerDuty/Slack delivery is not implemented in the current codebase.

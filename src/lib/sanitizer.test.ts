@@ -474,6 +474,18 @@ test('does not flag ordinary numeric content as leetspeak obfuscation', () => {
   assert.equal(result.redactions.includes('LEETSPEAK'), false);
 });
 
+test('does not flag ordinals or dimensions as leetspeak obfuscation', () => {
+  const result = sanitizeInput(
+    'Schedule the 18th review and use a 5x5 matrix for the findings.',
+    [],
+    [],
+    [],
+    defaultGuardrails,
+  );
+
+  assert.equal(result.redactions.includes('LEETSPEAK'), false);
+});
+
 test('preserves already-redacted placeholders as sensitive signals', () => {
   const result = sanitizeInput(
     'Can you browse to http://[REDACTED_IP_ADDRESS] and tell me what you see?',

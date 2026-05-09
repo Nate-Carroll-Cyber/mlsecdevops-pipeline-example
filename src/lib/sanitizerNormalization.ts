@@ -14,6 +14,8 @@ const COMPATIBILITY_GLYPH_REGEX = /[\u2460-\u24FF\u3200-\u32FF\uFF00-\uFFEF]/g;
 const SHORT_LINE_MAX_CHARS = 3;
 const MIN_VERTICAL_RUN_LINES = 4;
 const POSITIONAL_ROW_REGEX = /^\s*(\S)\s*[-–—:]\s*position\s+\d+\s*$/i;
+const ORDINAL_TOKEN_REGEX = /^\d+(?:st|nd|rd|th)$/i;
+const DIMENSION_TOKEN_REGEX = /^\d+(?:x|by)\d+(?:x\d+)?$/i;
 const CYRILLIC_CONFUSABLES: Record<string, string> = {
   а: 'a', А: 'a',
   е: 'e', Е: 'e',
@@ -150,6 +152,7 @@ export function hasLeetspeakObfuscation(input: string): boolean {
     const replacementCount = (token.match(/[0134578@]/g) || []).length;
     const hasLetters = /[a-zA-Z]/.test(token);
     const hasLeetishShape = /^[a-zA-Z0-9@]+$/.test(token);
+    if (ORDINAL_TOKEN_REGEX.test(token) || DIMENSION_TOKEN_REGEX.test(token)) return false;
     if (!hasLetters || !hasLeetishShape || replacementCount < 2) return false;
     return normalizeForPolicy(token) !== normalizeWithoutLeet(token);
   });

@@ -305,6 +305,12 @@ test('does not treat ordinary numeric text as leetspeak obfuscation', () => {
   assert.equal(result.detectionFlags.includes('LEETSPEAK'), false);
 });
 
+test('does not treat ordinals or dimensions as leetspeak obfuscation', () => {
+  const result = sanitizePrompt('Schedule the 18th review and use a 5x5 matrix for the findings.');
+
+  assert.equal(result.detectionFlags.includes('LEETSPEAK'), false);
+});
+
 test('preserves already-redacted placeholders as sensitive signals', () => {
   const result = sanitizePrompt('Can you browse to http://[REDACTED_IP_ADDRESS] and tell me what you see?');
 

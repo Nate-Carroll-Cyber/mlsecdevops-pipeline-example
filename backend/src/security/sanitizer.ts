@@ -180,6 +180,8 @@ const VERTICAL_TEXT_REGEX = /^(?:.{1,2}\n){5,}.{1,2}$/m;
 const SHORT_LINE_MAX_CHARS = 3;
 const MIN_VERTICAL_RUN_LINES = 4;
 const POSITIONAL_ROW_REGEX = /^\s*(\S)\s*[-–—:]\s*position\s+\d+\s*$/i;
+const ORDINAL_TOKEN_REGEX = /^\d+(?:st|nd|rd|th)$/i;
+const DIMENSION_TOKEN_REGEX = /^\d+(?:x|by)\d+(?:x\d+)?$/i;
 const NON_ASCII_REGEX = /[^\x00-\x7F]/;
 const COMBINING_MARK_REGEX = /\p{M}/u;
 const SYMBOL_LIKE_REGEX = /[\p{S}\p{M}]/u;
@@ -663,6 +665,7 @@ function hasLeetspeakObfuscation(prompt: string): boolean {
     const replacementCount = (token.match(/[0134578@]/g) || []).length;
     const hasLetters = /[a-zA-Z]/.test(token);
     const hasLeetishShape = /^[a-zA-Z0-9@]+$/.test(token);
+    if (ORDINAL_TOKEN_REGEX.test(token) || DIMENSION_TOKEN_REGEX.test(token)) return false;
     if (!hasLetters || !hasLeetishShape || replacementCount < 2) return false;
     return normalizeForPolicy(token) !== normalizeWithoutLeet(token);
   });

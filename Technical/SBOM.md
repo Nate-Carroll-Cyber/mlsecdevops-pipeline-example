@@ -69,6 +69,7 @@ These services are not npm dependencies and are not bundled into the Counter-Spy
 | `@types/pg` | `^8.20.0` | Type definitions for the PostgreSQL client |
 | `autoprefixer` | `^10.4.21` | CSS Vendor Prefixing |
 | `shadcn` | `^4.2.0` | UI Component CLI (Moved to devDependencies) |
+| `fast-uri` | `3.1.2` | Transitive dev dependency via `shadcn` -> `@modelcontextprotocol/sdk` -> `ajv`; lockfile patched to mitigate GHSA-q3j6-qgpj-74h6 and GHSA-v39h-62p7-jpjc. |
 
 ## 🔧 Observed Deployment Tooling
 

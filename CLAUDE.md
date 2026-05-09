@@ -39,8 +39,8 @@ The codebase is bifurcated into two distinct security layers:
 
 | Level | Threshold |
 | :--- | :--- |
-| Allowed | <= 3.6 |
-| Suspicious | > 3.6 and <= configured Entropy Threshold |
+| Allowed | <= 3.8 |
+| Suspicious | > 3.8 and <= configured Entropy Threshold |
 | Adversarial | > configured Entropy Threshold |
 
 ---

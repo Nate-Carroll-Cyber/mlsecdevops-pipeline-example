@@ -61,8 +61,8 @@ To catch substitution-cipher gibberish that still looks like ordinary alphabetic
 
 ### 2.1.2 Entropy Policy Bands
 Entropy is now evaluated with one shared policy across the live sanitizer, Audit Logs, and Metrics.
-*   **Allowed:** `<= 3.6`
-*   **Suspicious:** `> 3.6` and `<= configured Entropy Threshold`
+*   **Allowed:** `<= 3.8`
+*   **Suspicious:** `> 3.8` and `<= configured Entropy Threshold`
 *   **Adversarial:** `> configured Entropy Threshold`
 *   **Intent:** Keep the governance slider focused on the operator-chosen adversarial ceiling while preserving a stable suspicious floor for concealment review.
 

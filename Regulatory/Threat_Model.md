@@ -17,7 +17,7 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 - **MITRE ATLAS Mapping:** `AML.TA0003` (Initial Access) / `AML.T0043` (Craft Adversarial Data)  
 - **Target Component:** Human‑in‑the‑Loop (HITL) Queue / API Gateway  
 - **Description:** Attackers may spoof IPs or rotate ephemeral authenticated sessions to make automated traffic appear organic and bypass rate limits.  
-- **Proposed Mitigation:** Implement behavioral fingerprinting (typing cadence, interaction speed) and require CAPTCHA/challenge responses for sessions that trigger the `Suspicious` entropy band (`Entropy > 3.6` and at or below the configured adversarial cutoff) before entering HITL.
+- **Proposed Mitigation:** Implement behavioral fingerprinting (typing cadence, interaction speed) and require CAPTCHA/challenge responses for sessions that trigger the `Suspicious` entropy band (`Entropy > 3.8` and at or below the configured adversarial cutoff) before entering HITL.
 
 ---
 
@@ -109,7 +109,7 @@ Counter‑Spy.ai is well fortified against direct front‑door attacks such as p
 ---
 
 ### Appendix — Key Operational Thresholds and Controls
-- **Entropy bands:** `Allowed <= 3.6`, `Suspicious > 3.6 and <= configured Entropy Threshold`, `Adversarial > configured Entropy Threshold`
+- **Entropy bands:** `Allowed <= 3.8`, `Suspicious > 3.8 and <= configured Entropy Threshold`, `Adversarial > configured Entropy Threshold`
 - **Sanitization order:** `Normalize (NFKC)` → `Strip non-printables` → `Local sanitizer/entropy/regex checks` → `OpenAI-compatible safeguard judge` → `Downstream responder` → `Output filter`
 - **Audit logging:** Current Beta audit records persist sanitized prompts, detection metadata, review state, and backend telemetry with Firestore RBAC. Dual raw/normalized records and immutable admin audit metadata are planned production controls, not current repo functionality.
 

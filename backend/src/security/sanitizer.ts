@@ -147,8 +147,8 @@ const COMMON_AY_WORDS = new Set([
   'yesterday', 'everyday', 'someday', 'holiday', 'birthday', 'yay', 'hooray',
   'hurray',
 ]);
-const SUSPICIOUS_ENTROPY_THRESHOLD = 4.0;
-const ADVERSARIAL_ENTROPY_THRESHOLD = 4.8;
+const SUSPICIOUS_ENTROPY_THRESHOLD = 3.8;
+const ADVERSARIAL_ENTROPY_THRESHOLD = 4.0;
 type DecodeTelemetry = 'plain_text' | 'single_hop_decode' | 'recursive_decode';
 type ObfuscationSignal =
   | 'URL_ENCODING'
@@ -1228,7 +1228,11 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     }
   }
 
-  const suspiciousEntropyThreshold = tuning.entropyThreshold ?? SUSPICIOUS_ENTROPY_THRESHOLD;
+  const suspiciousEntropyThreshold = SUSPICIOUS_ENTROPY_THRESHOLD;
+  const adversarialEntropyThreshold = Math.max(
+    tuning.entropyThreshold ?? ADVERSARIAL_ENTROPY_THRESHOLD,
+    suspiciousEntropyThreshold,
+  );
   const suspiciousSyntacticThreshold = tuning.syntacticThreshold ?? 65;
   const configuredBlockedKeywords = (tuning.blockedKeywords ?? [])
     .map((keyword) => keyword.trim().toLowerCase())
@@ -1420,7 +1424,7 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
   let verdict: FirewallVerdict = 'CLEAN';
   const reasons: string[] = [];
 
-  if (entropyAnalysis.maxEntropy > ADVERSARIAL_ENTROPY_THRESHOLD && entropyContextSuspicious) reasons.push('adversarial entropy threshold exceeded');
+  if (entropyAnalysis.maxEntropy > adversarialEntropyThreshold && entropyContextSuspicious) reasons.push('adversarial entropy threshold exceeded');
   if (syntacticScore >= 90) reasons.push('adversarial syntactic complexity threshold exceeded');
   if (redactions.has('CANARY_TOKEN')) reasons.push('canary token disclosure attempt detected');
   if (redactions.has('PRIVATE_KEY') || redactions.has('AWS_KEY') || redactions.has('LLM_API_KEY')) reasons.push('high-risk secret material detected');

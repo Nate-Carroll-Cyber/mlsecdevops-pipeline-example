@@ -1123,6 +1123,7 @@ const InterceptMetadataSchema = z.object({
   source: InstructionSourceSchema.optional(),
   providerLlmRoutingEnabled: z.boolean().optional(),
   responderLlmRoutingEnabled: z.boolean().optional(),
+  instructionSimilarityEnabled: z.boolean().optional(),
   safeguardApiKey: z.string().min(1).max(4096).optional(),
   instructionEmbedding: z.array(z.number()).max(4096).optional(),
   instructionChunks: z.array(InstructionChunkRequestSchema).max(32).optional(),
@@ -1633,6 +1634,36 @@ app.post('/v1/instruction-monitor/reviewed-adversarial', requireBackendAuth, asy
   }
 });
 
+app.get('/v1/instruction-monitor/records/:identifier', requireBackendAuth, async (
+  req: AuthenticatedRequest,
+  res: Response<Awaited<ReturnType<PgvectorInstructionMonitor['lookupRecord']>> | { error: string }>,
+) => {
+  const rawIdentifier = req.params.identifier;
+  const identifier = (Array.isArray(rawIdentifier) ? rawIdentifier[0] : rawIdentifier)?.trim();
+  if (!identifier || identifier.length > 256) {
+    res.status(400).json({ error: 'Invalid instruction record identifier.' });
+    return;
+  }
+
+  try {
+    const monitor = await getInstructionMonitor();
+    if (!monitor) {
+      res.status(503).json({ error: 'Instruction monitor is unavailable.' });
+      return;
+    }
+    const record = await monitor.lookupRecord(identifier);
+    if (!record) {
+      res.status(404).json({ error: 'Instruction record was not found.' });
+      return;
+    }
+    res.json(record);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to look up instruction record.';
+    log('warn', 'instruction_record_lookup_failed', { identifier, error: message });
+    res.status(500).json({ error: message });
+  }
+});
+
 // Firewall intercept route:
 // validates input, sanitizes the prompt, and returns a governed decision that the
 // frontend can treat as clean, queued, or intercepted without calling a model directly.
@@ -1648,7 +1679,9 @@ app.post('/v1/intercept', requireBackendAuth, async (req: AuthenticatedRequest, 
   const gatewayStartedAt = Date.now();
   const input = parsed.data;
   const sanitization = sanitizePrompt(input.prompt, input.tuning);
-  const instructionSimilarityEvaluation = await evaluateInstructionSimilarity({ requestId, input, sanitization });
+  const instructionSimilarityEvaluation = input.metadata?.instructionSimilarityEnabled === false
+    ? undefined
+    : await evaluateInstructionSimilarity({ requestId, input, sanitization });
   const instructionSimilarity = instructionSimilarityEvaluation?.result;
   const instructionEmbeddingDurationMs = instructionSimilarityEvaluation?.embeddingDurationMs;
   const instructionSimilarityRisk = instructionSimilarity?.highestRisk ?? 'low';

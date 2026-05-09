@@ -22,7 +22,7 @@ import { getFeaturePressure, getTopPressureDriver } from '../lib/playgroundMetri
 // Import icons from Lucide React
 import { AlertTriangle, Activity, UserCheck, ShieldX, PauseOctagon, PlayCircle } from 'lucide-react';
 // Import charting components from Recharts
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area, Legend } from 'recharts';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
 
 interface ThreatDashboardProps {
   localReviewMode?: boolean;
@@ -315,7 +315,7 @@ function calculateDetectionSignalMetrics(logs: any[]) {
     obfuscatedHits: logs.filter(hasAnyObfuscationSignal).length,
     instructionSimilarityHits: logs.filter(hasInstructionSimilaritySignal).length,
     semanticSimilarityHits: logs.filter(hasSemanticSimilaritySignal).length,
-    foreignLanguageHits: logs.filter((log) => getDetectionFlags(log).includes('FOREIGN_LANGUAGE')).length,
+    languageRecoveryHits: logs.filter((log) => getDetectionFlags(log).includes('FOREIGN_LANGUAGE') || getDetectionFlags(log).includes('MIXED_LANGUAGE')).length,
     spellingObfuscationHits: logs.filter((log) => getDetectionFlags(log).includes('SPELLING_OBFUSCATION')).length,
   };
 }
@@ -1339,9 +1339,10 @@ export function ThreatDashboard({
             <HelpTooltip text="Hourly trend of prompt outcomes grouped by alert severity over the last 24 hours." />
           </CardTitle>
         </CardHeader>
-        <CardContent className="h-[180px] pt-4">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={severityChartData}>
+        <CardContent className="space-y-3 pt-4">
+          <div className="h-[180px]">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={severityChartData} margin={{ top: 6, right: 12, bottom: 8, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#333" vertical={false} />
               <XAxis
                 dataKey="hour"
@@ -1358,18 +1359,20 @@ export function ThreatDashboard({
               />
               <Tooltip
                 contentStyle={{ backgroundColor: '#020617', borderColor: '#334155', color: '#e2e8f0' }}
+                wrapperStyle={{ zIndex: 40 }}
                 formatter={(value: number, name: string) => [`${value} alerts`, name]}
                 labelFormatter={(label) => `Hour: ${label}:00`}
               />
-              <Legend content={<SeverityLegend />} />
               <Area type="monotone" dataKey="adversarial" name="Adversarial" stackId="1" stroke="#ef4444" fill="#ef4444" fillOpacity={0.35} />
               <Area type="monotone" dataKey="review" name="Review" stackId="1" stroke="#8b5cf6" fill="#8b5cf6" fillOpacity={0.35} />
               <Area type="monotone" dataKey="policyViolation" name="Policy Violation" stackId="1" stroke="#f97316" fill="#f97316" fillOpacity={0.35} />
               <Area type="monotone" dataKey="suspicious" name="Suspicious" stackId="1" stroke="#f59e0b" fill="#f59e0b" fillOpacity={0.35} />
               <Area type="monotone" dataKey="informational" name="Informational" stackId="1" stroke="#38bdf8" fill="#38bdf8" fillOpacity={0.3} />
               <Area type="monotone" dataKey="clean" name="Clean" stackId="1" stroke="#22c55e" fill="#22c55e" fillOpacity={0.25} />
-            </AreaChart>
-          </ResponsiveContainer>
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+          <SeverityLegend />
         </CardContent>
       </Card>
 
@@ -1603,8 +1606,8 @@ export function ThreatDashboard({
                 <span className="font-semibold text-indigo-300">{operationalMetrics.detectionSignals.semanticSimilarityHits}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Foreign / Mixed Language</span>
-                <span className="font-semibold text-cyan-300">{operationalMetrics.detectionSignals.foreignLanguageHits}</span>
+                <span className="text-muted-foreground">Language Recovery Signals</span>
+                <span className="font-semibold text-cyan-300">{operationalMetrics.detectionSignals.languageRecoveryHits}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Spelling Recovery</span>

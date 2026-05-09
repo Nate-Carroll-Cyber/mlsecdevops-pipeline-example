@@ -105,6 +105,33 @@ const ReviewedAdversarialInstructionResponseSchema = z.object({
   embeddingDurationMs: z.number().optional(),
 });
 
+const InstructionMonitorRecordSchema = z.object({
+  id: z.string(),
+  source: z.enum(['analyst_chat', 'bulk_ingest', 'ctf_chat', 'ctf_solve', 'playground', 'system']),
+  rawText: z.string(),
+  normalizedText: z.string(),
+  sha256: z.string(),
+  sha256Loose: z.string(),
+  simhash: z.string(),
+  simhash2gram: z.string(),
+  simhash4gram: z.string(),
+  verdict: z.enum(['CLEAN', 'SUSPICIOUS', 'ADVERSARIAL']).nullable(),
+  detectionFlags: z.array(z.string()),
+  reviewed: z.boolean(),
+  labels: z.array(z.string()),
+  seedPack: z.string().nullable(),
+  seedVersion: z.string().nullable(),
+  seedSource: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  chunks: z.array(z.object({
+    chunkIndex: z.number(),
+    chunkText: z.string(),
+    chunkHash: z.string().nullable(),
+    intentScore: z.number(),
+  })),
+});
+
 const SamSpadeMessageSchema = z.object({
   id: z.string(),
   role: z.enum(['player', 'npc', 'system']),
@@ -263,6 +290,8 @@ export interface ReviewedAdversarialInstructionResponse {
   embeddingDurationMs?: number;
 }
 
+export type InstructionMonitorRecord = z.infer<typeof InstructionMonitorRecordSchema>;
+
 export interface SamSpadeMessage {
   id: string;
   role: 'player' | 'npc' | 'system';
@@ -324,6 +353,7 @@ type BackendRequestMetadata = {
   source?: 'analyst_chat' | 'bulk_ingest' | 'ctf_chat' | 'ctf_solve' | 'playground' | 'system';
   providerLlmRoutingEnabled?: boolean;
   responderLlmRoutingEnabled?: boolean;
+  instructionSimilarityEnabled?: boolean;
   safeguardApiKey?: string;
   instructionEmbedding?: number[];
   instructionChunks?: Array<{
@@ -408,6 +438,24 @@ export async function interceptPrompt(input: {
   }
 
   return BackendInterceptResponseSchema.parse(payload);
+}
+
+export async function lookupInstructionMonitorRecord(
+  identifier: string,
+  callerUserId?: string,
+): Promise<InstructionMonitorRecord> {
+  const response = await fetch(resolveBackendUrl(`/v1/instruction-monitor/records/${encodeURIComponent(identifier)}`), {
+    method: 'GET',
+    headers: getProtectedHeaders(callerUserId),
+  });
+
+  const payload: unknown = await response.json();
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Instruction record lookup failed (HTTP ${response.status}).`);
+  }
+
+  return InstructionMonitorRecordSchema.parse(payload);
 }
 
 // Send one translation request through the backend so provider keys stay server-side.

@@ -44,15 +44,15 @@ Clean prompts are routed to the backend gateway. The gateway runs local precheck
 
 ### Safeguard Effective Prompt and Drift Hash
 
-The frontend stores one canonical safeguard instruction as the editable **Safeguard Effective Prompt** for review and drift management. Protected backend execution now uses backend-owned safeguard instructions and rejects caller-supplied prompt-contract overrides.
+The frontend stores one canonical safeguard instruction as the editable **Safeguard Effective Prompt** for review and drift management. Protected backend execution forwards the current System Configuration safeguard prompt verbatim to the safeguard judge.
 
 Current promoted recommended effective safeguard prompt hash:
 
 ```text
-89ab9212ae0d97bac17e2072ec5851e76a3991b766602c9f5e5bcca127499a9d
+78b54175e27126f42ae7f4204619170fd98a5422c5e77929e7822563ca8f9214
 ```
 
-The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. A backend fallback prompt exists only for direct `/v1/intercept` callers that omit `safeguardSystemPrompt`.
+The current System Configuration safeguard prompt hash should match `78b54175e27126f42ae7f4204619170fd98a5422c5e77929e7822563ca8f9214` when the active prompt is aligned to the recommended baseline. The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. A backend fallback prompt exists only for direct `/v1/intercept` callers that omit `safeguardEffectivePrompt`.
 
 ### Split Runtime Latency
 

@@ -355,6 +355,7 @@ type BackendRequestMetadata = {
   responderLlmRoutingEnabled?: boolean;
   instructionSimilarityEnabled?: boolean;
   safeguardApiKey?: string;
+  safeguardEffectivePrompt?: string;
   instructionEmbedding?: number[];
   instructionChunks?: Array<{
     text: string;
@@ -367,6 +368,7 @@ type SamSpadeRequestMetadata = {
   localReviewMode?: boolean;
   providerLlmRoutingEnabled?: boolean;
   responderLlmRoutingEnabled?: boolean;
+  safeguardEffectivePrompt?: string;
 };
 
 function getProtectedHeaders(callerUserId?: string): HeadersInit {

@@ -112,7 +112,7 @@ export class PgvectorInstructionMonitor {
   private readonly chunkQueryConcurrency: number;
 
   constructor(options: MonitorOptions) {
-    this.embeddingDimensions = options.embeddingDimensions ?? 1536;
+    this.embeddingDimensions = options.embeddingDimensions ?? 768;
     this.compareLimit = options.compareLimit ?? 10;
     this.similarityThreshold = options.similarityThreshold ?? 0.78;
     this.hammingThreshold = options.hammingThreshold ?? 12;

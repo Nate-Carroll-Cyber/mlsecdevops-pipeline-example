@@ -16,7 +16,7 @@ delete process.env.LARA_ACCESS_KEY_ID;
 delete process.env.LARA_ACCESS_KEY_SECRET;
 delete process.env.LARA_API_BASE_URL;
 
-const { app } = await import('../src/server.ts');
+const { app, buildSafeguardJudgeInstructions, resolveSafeguardJudgeInstructions } = await import('../src/server.ts');
 
 async function requestApp(path: string, options: {
   method?: string;
@@ -139,6 +139,32 @@ test('browser-memory safeguard API key is allowed without other runtime override
   });
 
   assert.equal(intercept.status, 200);
+});
+
+test('browser-supplied safeguard effective prompt is accepted for exact system-prompt forwarding', async () => {
+  const configuredPrompt = '  SYSTEM CONFIG SAFEGUARD PROMPT\nReturn JSON only.\n  ';
+  const intercept = await requestApp('/v1/intercept', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: {
+      prompt: 'Summarize incident response note hygiene.',
+      metadata: {
+        providerLlmRoutingEnabled: false,
+        safeguardEffectivePrompt: configuredPrompt,
+      },
+    },
+  });
+
+  assert.equal(intercept.status, 200);
+  assert.equal(resolveSafeguardJudgeInstructions({ systemPrompt: configuredPrompt }), configuredPrompt);
+});
+
+test('backend safeguard prompt blocks explicit forbidden-category violations', () => {
+  const instructions = buildSafeguardJudgeInstructions();
+
+  assert.match(instructions, /Use ADVERSARIAL when the candidate prompt clearly requests a forbidden category/i);
+  assert.match(instructions, /medical advice including medication or dosage recommendations/i);
+  assert.match(instructions, /Use SUSPICIOUS only for ambiguous, borderline, malformed, or review-needed evidence/i);
 });
 
 test('translation fails closed when backend Lara configuration is missing', async () => {

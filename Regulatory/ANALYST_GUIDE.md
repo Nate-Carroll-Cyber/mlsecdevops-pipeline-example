@@ -6,6 +6,7 @@
 | v2.1 | 2026-04-25 | Runtime sync: backend safeguard attribution is now structured in audit/metrics records, and blocked Sam Spade CTF content is masked as `Bad content.` on gameplay surfaces. |
 | v2.2 | 2026-05-07 | Instruction similarity monitor: backend pgvector memory now detects exact, loose-hash, SimHash, and semantic prompt matches before responder forwarding. Adversarial fingerprint reuse blocks; semantic overlap routes to suspicious review. The local demo database is clean on Postgres container recreation. |
 | v2.3 | 2026-05-09 | Security remediation plus Similarity Monitor workflow: protected execution routes now require backend bearer auth, browser-supplied backend runtime overrides are rejected, Lara translation is backend-configured only, Sam Spade sessions are owner-scoped, Firestore audit-log creates have a tighter allowlist, stored-hash lookup opens an Instruction Match view, and Active Guardrails can disable pgvector comparison per request. |
+| v2.5 | 2026-05-10 | Safeguard Effective Prompt runtime hardening and corpus refresh: promoted prompt defaults are hardcoded and legacy generated baselines auto-align on startup, provider safeguard calls fail closed without an explicit effective prompt, Sam Spade metadata carries the effective prompt contract, and the bundled pgvector `core` seed snapshot advances to `core-2026-05-10-latest`. |
 
 ---
 

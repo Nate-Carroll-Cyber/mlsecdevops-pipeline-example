@@ -1,12 +1,11 @@
-import test from 'node:test';
+import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
-import { IncomingMessage, ServerResponse } from 'node:http';
+import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { Socket } from 'node:net';
 
 process.env.COUNTER_SPY_DISABLE_SERVER_LISTEN = 'true';
 process.env.APP_ENV = 'dev';
 process.env.INTERCEPT_BEARER_TOKEN = 'test-route-token-12345';
-delete process.env.SAFEGUARDS_API_BASE_URL;
 delete process.env.SAFEGUARDS_API_KEY;
 delete process.env.RESPONDER_API_BASE_URL;
 delete process.env.RESPONDER_API_KEY;
@@ -16,7 +15,40 @@ delete process.env.LARA_ACCESS_KEY_ID;
 delete process.env.LARA_ACCESS_KEY_SECRET;
 delete process.env.LARA_API_BASE_URL;
 
-const { app, buildSafeguardJudgeInstructions, resolveSafeguardJudgeInstructions } = await import('../src/server.ts');
+const safeguardRequests: unknown[] = [];
+const safeguardMockServer = createServer((req, res) => {
+  const chunks: Buffer[] = [];
+  req.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
+  req.on('end', () => {
+    const body = Buffer.concat(chunks).toString('utf8');
+    safeguardRequests.push(body ? JSON.parse(body) : undefined);
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              verdict: 'CLEAN',
+              analystReasoning: 'Test safeguard allowed prompt.',
+            }),
+          },
+        },
+      ],
+    }));
+  });
+});
+await new Promise<void>((resolve) => safeguardMockServer.listen(0, '127.0.0.1', resolve));
+const safeguardAddress = safeguardMockServer.address();
+assert.ok(safeguardAddress && typeof safeguardAddress === 'object');
+process.env.SAFEGUARDS_API_BASE_URL = `http://127.0.0.1:${safeguardAddress.port}/v1`;
+
+const { app, resolveSafeguardJudgeInstructions } = await import('../src/server.ts');
+
+after(async () => {
+  await new Promise<void>((resolve, reject) => {
+    safeguardMockServer.close((error) => error ? reject(error) : resolve());
+  });
+});
 
 async function requestApp(path: string, options: {
   method?: string;
@@ -142,14 +174,16 @@ test('browser-memory safeguard API key is allowed without other runtime override
 });
 
 test('browser-supplied safeguard effective prompt is accepted for exact system-prompt forwarding', async () => {
+  const startRequestCount = safeguardRequests.length;
   const configuredPrompt = '  SYSTEM CONFIG SAFEGUARD PROMPT\nReturn JSON only.\n  ';
   const intercept = await requestApp('/v1/intercept', {
     method: 'POST',
     headers: authHeaders(),
     body: {
-      prompt: 'Summarize incident response note hygiene.',
+      prompt: 'Summarize deployment hygiene controls.',
       metadata: {
-        providerLlmRoutingEnabled: false,
+        providerLlmRoutingEnabled: true,
+        responderLlmRoutingEnabled: false,
         safeguardEffectivePrompt: configuredPrompt,
       },
     },
@@ -157,14 +191,33 @@ test('browser-supplied safeguard effective prompt is accepted for exact system-p
 
   assert.equal(intercept.status, 200);
   assert.equal(resolveSafeguardJudgeInstructions({ systemPrompt: configuredPrompt }), configuredPrompt);
+  assert.equal(safeguardRequests.length, startRequestCount + 1);
+  const forwardedRequest = safeguardRequests.at(-1) as {
+    messages?: Array<{ role?: string; content?: string }>;
+    instructions?: string;
+  };
+  assert.equal(forwardedRequest.messages?.[0]?.role, 'system');
+  assert.equal(forwardedRequest.messages?.[0]?.content, configuredPrompt);
+  assert.equal(forwardedRequest.instructions, undefined);
 });
 
-test('backend safeguard prompt blocks explicit forbidden-category violations', () => {
-  const instructions = buildSafeguardJudgeInstructions();
+test('provider safeguard calls fail closed when safeguard effective prompt is absent', async () => {
+  const startRequestCount = safeguardRequests.length;
+  const intercept = await requestApp('/v1/intercept', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: {
+      prompt: 'Summarize incident response note hygiene.',
+      metadata: {
+        providerLlmRoutingEnabled: true,
+        responderLlmRoutingEnabled: false,
+      },
+    },
+  });
 
-  assert.match(instructions, /Use ADVERSARIAL when the candidate prompt clearly requests a forbidden category/i);
-  assert.match(instructions, /medical advice including medication or dosage recommendations/i);
-  assert.match(instructions, /Use SUSPICIOUS only for ambiguous, borderline, malformed, or review-needed evidence/i);
+  assert.equal(intercept.status, 202);
+  assert.equal((intercept.payload as { status?: string }).status, 'SHIELD_ERROR');
+  assert.equal(safeguardRequests.length, startRequestCount);
 });
 
 test('translation fails closed when backend Lara configuration is missing', async () => {

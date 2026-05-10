@@ -585,6 +585,7 @@ export async function solveSamSpadeCase(input: {
   sessionId: string;
   theory: string;
   callerUserId?: string;
+  metadata?: SamSpadeRequestMetadata;
   tuning?: {
     entropyThreshold?: number;
     syntacticThreshold?: number;

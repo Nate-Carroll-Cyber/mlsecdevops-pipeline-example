@@ -49,10 +49,10 @@ The frontend stores one canonical safeguard instruction as the editable **Safegu
 Current promoted recommended effective safeguard prompt hash:
 
 ```text
-78b54175e27126f42ae7f4204619170fd98a5422c5e77929e7822563ca8f9214
+590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0
 ```
 
-The current System Configuration safeguard prompt hash should match `78b54175e27126f42ae7f4204619170fd98a5422c5e77929e7822563ca8f9214` when the active prompt is aligned to the recommended baseline. The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. A backend fallback prompt exists only for direct `/v1/intercept` callers that omit `safeguardEffectivePrompt`.
+The current System Configuration safeguard prompt hash should match `590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0` when the active prompt is aligned to the recommended baseline. The default System Configuration hardcodes that prompt in `safeguardEffectivePromptOverride`; empty legacy/local values and previous app-generated baseline prompts are normalized back to the hardcoded promoted default on startup. This keeps first-open and upgraded local-review sessions aligned without requiring the user to click Reset, while preserving genuinely custom non-empty prompt overrides as drift. The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. Provider safeguard calls fail closed if direct `/v1/intercept` callers omit `safeguardEffectivePrompt`; there is no backend-authored prompt fallback.
 
 ### Split Runtime Latency
 

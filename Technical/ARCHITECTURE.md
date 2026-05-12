@@ -260,3 +260,17 @@ The platform utilizes a real-time anomaly detection engine to monitor threat vel
     *   **Ground-Truth Assist:** When available, bulk-ingest `expectedVerdict` labels are used to strengthen post-model escape calculations instead of relying only on final severity heuristics.
 *   **Detection Signal Rollups:** The Metrics **Detection Signals** card reports prompt counts by detection family, not raw per-flag totals. The same aggregation helpers are used for local-review overlays and Firestore-backed metrics. `FORBIDDEN_TOPIC` and `FORBIDDEN_PHRASE` are grouped under **Forbidden Phrase Hits**, while **Obfuscation Hits** counts any stored obfuscation technique from `obfuscationSummary.techniques` or legacy detection flags so the rollup matches the prompt-detail badges.
 *   **Implementation Details**: For detailed dashboard telemetry and SOPs, refer to the [Analyst & Administrator Operations Guide](../OPERATIONS_GUIDE.MD).
+
+---
+
+## 7. Observability (OpenTelemetry)
+
+The backend is instrumented with the OpenTelemetry SDK (`backend/src/telemetry.ts`, imported first by `backend/src/server.ts`).
+
+*   **Signals:**
+    *   **Traces** — `@opentelemetry/auto-instrumentations-node` instruments Express, `http`/`https`, and `pg`, so every request, downstream fetch (safeguard / responder / Lara / embeddings), and Postgres query becomes a span. The per-request `requestId` is stamped onto the HTTP server span as `counterspy.request_id`.
+    *   **Metrics** — `counterspy.http.server.duration` (request latency histogram), `counterspy.safeguard.latency`, `counterspy.responder.latency`, `counterspy.intercept.verdict` (counter by gateway status/stage), plus the legacy `emitMetricIncrement()` events promoted to OpenTelemetry counters (`counterspy.safeguard.schema`, `counterspy.safeguard.divergence`, `counterspy.ratelimit.dropped`, `counterspy.responder.output_redacted`, ...).
+    *   **Logs** — the `log()` helper emits through the OpenTelemetry Logs API **and** keeps the structured stdout JSON (CloudWatch-friendly). The active `trace_id`/`span_id` are stamped onto the stdout record so logs and traces correlate.
+*   **Export:** Everything is OTLP/HTTP, driven by the standard `OTEL_*` environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`/`OTEL_TRACES_SAMPLER_ARG`, ...). `docker-compose.demo.yml` points the backend at a bundled `otel-collector` (`otel/collector-config.yaml`) that fans out to its stdout, Prometheus (`:8889/metrics`), and Jaeger (`:16686`).
+*   **No-op by default:** The SDK only starts when an OTLP endpoint/exporter is configured. With nothing set — or with `OTEL_SDK_DISABLED=true` — the OpenTelemetry API resolves to no-op providers and the only sink is the structured stdout JSON, so `npm run backend:dev` and the test suite stay quiet.
+*   **Production:** For the ECS task definition, set the same `OTEL_*` env vars (point them at an OTLP endpoint / the AWS Distro for OpenTelemetry sidecar). Browser-side OpenTelemetry for the frontends is a planned follow-up.

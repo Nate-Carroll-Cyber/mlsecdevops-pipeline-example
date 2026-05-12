@@ -1,0 +1,53 @@
+# OpenTelemetry Collector config for the local Counter-Spy demo stack.
+# Receives OTLP (gRPC :4317 / HTTP :4318) from counter-spy-backend (and the
+# sam-spade service once it is split out), and fans out to:
+#   - debug exporter  -> collector stdout (so `docker compose logs otel-collector` shows traffic)
+#   - prometheus       -> :8889/metrics  (scrapeable; also handy for `curl`)
+#   - otlp/jaeger      -> the all-in-one Jaeger UI at :16686 (traces)
+# Swap the exporters block for your real backend (Honeycomb, Datadog, ADOT, ...)
+# in a non-demo deployment.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+  memory_limiter:
+    check_interval: 5s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+
+exporters:
+  debug:
+    verbosity: normal
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug, prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [debug]

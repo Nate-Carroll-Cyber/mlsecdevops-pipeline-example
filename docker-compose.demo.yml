@@ -31,6 +31,13 @@ services:
       SAM_SPADE_DEFAULT_CASE_ID: "case-067"
       SAM_SPADE_STORE_PATH: "/app/backend/data/sam-spade.db"
       SAM_SPADE_SERVICE_PORT: "18120"
+      # OpenTelemetry: export traces/metrics/logs over OTLP/HTTP to the collector.
+      OTEL_SERVICE_NAME: "counter-spy-backend"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/json"
+      OTEL_TRACES_SAMPLER: "${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}"
+      OTEL_TRACES_SAMPLER_ARG: "${OTEL_TRACES_SAMPLER_ARG:-1.0}"
+      OTEL_LOG_LEVEL: "${OTEL_LOG_LEVEL:-warn}"
       # Lara Translate credentials come from the local env file above so the
       # demo stack stays stable across rebuilds and restarts.
     ports:
@@ -41,6 +48,8 @@ services:
     depends_on:
       counter-spy-postgres:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
     restart: unless-stopped
 
   counter-spy-frontend:
@@ -93,6 +102,32 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+    restart: unless-stopped
+
+  # OpenTelemetry Collector: OTLP in (4317 gRPC / 4318 HTTP), out to stdout debug,
+  # Prometheus (:8889), and Jaeger. See otel/collector-config.yaml.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.117.0
+    container_name: counter-spy-otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+      - "127.0.0.1:8889:8889"   # Prometheus scrape endpoint (/metrics)
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  # Jaeger all-in-one for viewing traces at http://localhost:16686.
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: counter-spy-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "127.0.0.1:16686:16686"  # Jaeger UI
     restart: unless-stopped
 
 volumes:

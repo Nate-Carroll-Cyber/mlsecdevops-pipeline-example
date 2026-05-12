@@ -29,6 +29,25 @@
 | `pgvector` | `^0.2.1` | pgvector type registration and vector serialization for semantic instruction-memory queries |
 | `tw-animate-css` | `^1.4.0` | Tailwind Animation Utilities |
 | `@base-ui/react` | `^1.3.0` | Unstyled UI Components |
+| `@opentelemetry/api` | `^1.9.1` | OpenTelemetry trace/metrics/logs API surface (no-op until the SDK is started) |
+| `@opentelemetry/api-logs` | `^0.217.0` | OpenTelemetry Logs API used by the backend `log()` helper |
+| `@opentelemetry/sdk-node` | `^0.217.0` | Backend OpenTelemetry SDK bootstrap (`backend/src/telemetry.ts`) |
+| `@opentelemetry/sdk-metrics` | `^2.7.1` | Metrics SDK (`PeriodicExportingMetricReader`) |
+| `@opentelemetry/sdk-logs` | `^0.217.0` | Logs SDK (`BatchLogRecordProcessor`) |
+| `@opentelemetry/auto-instrumentations-node` | `^0.75.0` | Auto-instrumentation bundle (Express 5, http/https, pg, ...) |
+| `@opentelemetry/instrumentation` | `^0.217.0` | Instrumentation base (also pulled transitively; pinned explicitly) |
+| `@opentelemetry/exporter-trace-otlp-http` | `^0.217.0` | OTLP/HTTP trace exporter |
+| `@opentelemetry/exporter-metrics-otlp-http` | `^0.217.0` | OTLP/HTTP metric exporter |
+| `@opentelemetry/exporter-logs-otlp-http` | `^0.217.0` | OTLP/HTTP log exporter |
+| `@opentelemetry/resources` | `^2.7.1` | OpenTelemetry `Resource` (service.name/version/environment) |
+| `@opentelemetry/semantic-conventions` | `^1.41.1` | Semantic attribute keys |
+
+### Runtime Container Packages
+
+| Component | Version | Description |
+| :--- | :--- | :--- |
+| `otel/opentelemetry-collector-contrib` | `0.117.0` (demo image) | OTLP collector shipped in `docker-compose.demo.yml`; fans traces/metrics/logs out to stdout, Prometheus (`:8889`), and Jaeger. Not part of the application; demo-only. |
+| `jaegertracing/all-in-one` | `1.62.0` (demo image) | Local Jaeger UI (`:16686`) for trace inspection in the demo stack. Demo-only. |
 
 ### Runtime Database Extensions
 

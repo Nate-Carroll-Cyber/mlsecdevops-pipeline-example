@@ -59,9 +59,14 @@ service cloud.firestore {
     }
 
     function isAdmin() {
-      return isAuthenticated() && 
-        (request.auth.token.email == "nate.carroll@natecarrollfilms.com" ||
-         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+      // Admin is granted via a backend/Cognito-issued custom claim
+      // (request.auth.token.admin == true), via membership in /config/admins/{uid},
+      // or via a users/{uid}.role == 'admin' profile document. No email is
+      // hardcoded in deployed rules.
+      return isAuthenticated() &&
+        (request.auth.token.admin == true ||
+         exists(/databases/$(database)/documents/config/admins/$(request.auth.uid)) ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
           get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin'));
     }
 

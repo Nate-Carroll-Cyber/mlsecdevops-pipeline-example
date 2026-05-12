@@ -7,7 +7,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { samSpadeConfig } from './config.js';
-import type { SamSpadeSessionRecord } from './types.js';
+import { SamSpadeSessionRecordSchema, type SamSpadeSessionRecord } from './types.js';
 
 // Resolve the configured DB path from the container/process working directory.
 const SAM_SPADE_STORE_PATH = resolve(process.cwd(), samSpadeConfig.SAM_SPADE_STORE_PATH);
@@ -26,6 +26,9 @@ db.exec(`
 `);
 
 // Load one session payload and deserialize it back into the runtime shape.
+// The bytes are untrusted (disk corruption, manual edits, partial writes), so a
+// failed JSON parse or schema check is logged and treated as "session not found"
+// rather than crashing the request handler.
 export function getStoredSession(sessionId: string): SamSpadeSessionRecord | null {
   const row = db
     .prepare('SELECT payload FROM sam_spade_sessions WHERE session_id = ?')
@@ -34,7 +37,32 @@ export function getStoredSession(sessionId: string): SamSpadeSessionRecord | nul
     return null;
   }
 
-  return JSON.parse(row.payload) as SamSpadeSessionRecord;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.payload);
+  } catch (error) {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      message: 'sam_spade_session_payload_unparseable',
+      service: 'counter-spy-sam-spade',
+      sessionId,
+      error: error instanceof Error ? error.message : 'invalid JSON',
+    }));
+    return null;
+  }
+
+  const validated = SamSpadeSessionRecordSchema.safeParse(parsed);
+  if (!validated.success) {
+    console.warn(JSON.stringify({
+      level: 'warn',
+      message: 'sam_spade_session_payload_invalid',
+      service: 'counter-spy-sam-spade',
+      sessionId,
+      issues: validated.error.issues.map((issue) => issue.path.join('.')),
+    }));
+    return null;
+  }
+  return validated.data as SamSpadeSessionRecord;
 }
 
 // Persist the latest session state after every message or solve action.

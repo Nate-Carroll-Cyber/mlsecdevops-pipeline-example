@@ -114,6 +114,22 @@ The governance state is persisted in Firestore (`config/governance`).
 *   **Threshold:** 1,000ms.
 *   **Policy:** Any sanitization pass completing above 1,000ms is treated as a potential ReDoS event. The triggering request is blocked before inference, logged as `Adversarial` with the `ReDoS_ATTEMPT_DETECTED` flag, returns `governanceAction: "GLOBAL_PAUSE"` from `/v1/intercept`, and contributes to both the `ReDoS Trips` resilience metric and the Defense Funnel's pre-inference blocked count.
 
+### 4.2 Output-side Shield (`sanitizeOutput`)
+*   **Logic:** The cardinal rule ("nothing reaches the responder without passing the sanitizer") has an outbound counterpart: every responder LLM string is re-run through `sanitizeOutput` (backend: `backend/src/security/sanitizer.ts`) before it leaves the gateway. `sanitizeOutput` reuses the inbound redaction passes (`SENSITIVE_PATTERNS`, credit-card, redacted-placeholder echo) plus the blocked-keyword check; it does **not** apply entropy/syntactic scoring because model output is not an adversarial vector for those.
+*   **Policy:** On `/v1/intercept`, a high-risk leak (canary, private/AWS/LLM key, `SECRET_KEY`) is withheld entirely (`responder.status: "WITHHELD"`, body replaced); a lesser redaction (e.g. an email or card the model echoed) is returned with the span replaced (`responder.status: "REDACTED"`). The `OUTPUT_*` flags are folded into `detectionFlags`. On `/v1/ctf/sam-spade/message`, any trip flips the turn to an `ADVERSARIAL` external verdict so the existing intercept path (`Bad content.`, `reviewDisposition: queued`, `escalationRecommended: true`) takes over.
+*   **Toggle:** `RESPONDER_OUTPUT_SHIELD_ENABLED` (default `true`).
+
+### 4.3 Rate Limiting
+*   **Logic:** A dependency-free fixed-window limiter (`backend/src/middleware/rateLimit.ts`) runs immediately after the JSON body parser, keyed by the caller's bearer token (so a leaked credential cannot be used to run up the safeguard/responder bill) and falling back to the client IP. `/healthz` is exempt.
+*   **Policy:** `RATE_LIMIT_MAX` requests per `RATE_LIMIT_WINDOW_MS` (defaults `120` / `60000`); over the limit returns `429` with `Retry-After` and emits the `ratelimit.dropped` metric. `RATE_LIMIT_MAX=0` disables it.
+
+### 4.4 SSRF Egress Guard
+*   **Logic:** `backend/src/security/urlGuard.ts` validates every configurable outbound base URL (`SAFEGUARDS_API_BASE_URL`, `RESPONDER_API_BASE_URL`, `LLM_API_BASE_URL`, `LARA_API_BASE_URL`, `INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL`) **at startup** (fail-fast). Link-local / cloud-metadata addresses (`169.254.0.0/16`, `fe80::/10`) are always rejected; loopback and RFC1918/CGNAT/`host.docker.internal` are tolerated only when `APP_ENV=dev` or listed in `EGRESS_ALLOWLIST` (`host` or `host:port` entries).
+*   **Request overrides:** The per-request `metadata.safeguardApiKey` credential override on `/v1/intercept` is honored only when `APP_ENV=dev`; outside dev it is dropped and logged.
+
+### 4.5 Persisted Session Integrity
+*   **Logic:** The Sam Spade SQLite session store (`backend/src/services/sam-spade/store.ts`) deserializes untrusted bytes off disk. Every read JSON-parses inside a `try/catch` and validates the result against `SamSpadeSessionRecordSchema` (Zod); a malformed/tampered row is logged (`sam_spade_session_payload_invalid`) and treated as "session not found" rather than crashing the request handler.
+
 ---
 
 ## 5. Gateway Architecture: `/v1/intercept`

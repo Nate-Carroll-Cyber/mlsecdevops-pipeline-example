@@ -7,7 +7,9 @@ import express, { type Request, type Response } from 'express';
 import { Credentials, Translator } from '@translated/lara';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import { sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict } from './security/sanitizer.js';
+import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict } from './security/sanitizer.js';
+import { assertEgressAllowed } from './security/urlGuard.js';
+import { createRateLimiter } from './middleware/rateLimit.js';
 import {
   createSamSpadeSession,
   getSamSpadeSession,
@@ -51,6 +53,13 @@ const EnvSchema = z.object({
   LLM_API_KEY: z.string().optional(),
   LLM_MODEL_ID: z.string().optional(),
   INTERCEPT_BEARER_TOKEN: z.string().min(16).optional(),
+  RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
+  RATE_LIMIT_MAX: z.coerce.number().int().min(0).max(1_000_000).default(120),
+  EGRESS_ALLOWLIST: z.string().optional(),
+  RESPONDER_OUTPUT_SHIELD_ENABLED: z
+    .string()
+    .optional()
+    .transform((value) => (value === undefined ? true : value.toLowerCase() !== 'false')),
   LARA_ACCESS_KEY_ID: z.string().optional(),
   LARA_ACCESS_KEY_SECRET: z.string().optional(),
   LARA_API_BASE_URL: z.string().url().optional(),
@@ -97,6 +106,23 @@ const safeguardsTimeoutMs = env.SAFEGUARDS_TIMEOUT_MS;
 const responderModelId = env.LLM_MODEL_ID || env.RESPONDER_MODEL_ID;
 const responderProvider = env.RESPONDER_PROVIDER || 'openai_compatible';
 const defaultGeminiResponderModelId = 'gemini-2.5-flash';
+
+// SSRF egress guard: validate every configurable outbound base URL once at boot
+// so a tampered/misconfigured endpoint cannot reach cloud metadata or other
+// internal hosts. Loopback/RFC1918 targets are tolerated only in dev/demo.
+const egressGuardOptions = {
+  allowPrivate: appEnv === 'dev',
+  ...(env.EGRESS_ALLOWLIST ? { allowlist: env.EGRESS_ALLOWLIST } : {}),
+};
+for (const [label, value] of [
+  ['SAFEGUARDS_API_BASE_URL', env.SAFEGUARDS_API_BASE_URL],
+  ['RESPONDER_API_BASE_URL', env.RESPONDER_API_BASE_URL],
+  ['LLM_API_BASE_URL', env.LLM_API_BASE_URL],
+  ['LARA_API_BASE_URL', env.LARA_API_BASE_URL],
+  ['INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL', env.INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL],
+] as const) {
+  if (value) assertEgressAllowed(value, { ...egressGuardOptions, label });
+}
 const recentPromptHashes = new Map<string, number>();
 const RETRY_WINDOW_MS = 5 * 60_000;
 let instructionMonitorPromise: Promise<PgvectorInstructionMonitor | null> | undefined;
@@ -1106,6 +1132,85 @@ async function generateResponderOutput(
   throw new Error('Responder API returned no message content.');
 }
 
+const RESPONDER_OUTPUT_WITHHELD_TEXT =
+  'Counter-Spy.ai withheld this responder output pending analyst review (the output Shield detected secret/credential material).';
+
+// Output-side Shield: re-run the responder's text through `sanitizeOutput` before
+// it leaves the gateway. High-risk leaks (canary, private/AWS/LLM keys) are
+// withheld entirely; lesser redactions (e.g. an email or credit card the model
+// echoed) are returned with the offending span replaced. Returns the (possibly
+// rewritten) responder payload plus the OUTPUT_* flags to fold into detectionFlags.
+function applyResponderOutputShield(
+  responder: { provider: ResponderProvider; modelId: string; latencyMs: number; response: string; usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number } },
+  context: { requestId: string; route: 'intercept' | 'sam_spade'; blockedKeywords?: string[] },
+): {
+  responder: NonNullable<InterceptResponse['responder']>;
+  outputDetectionFlags: string[];
+  tripped: boolean;
+  highRiskLeak: boolean;
+} {
+  if (!env.RESPONDER_OUTPUT_SHIELD_ENABLED) {
+    return {
+      responder: { ...responder, status: 'COMPLETED' },
+      outputDetectionFlags: [],
+      tripped: false,
+      highRiskLeak: false,
+    };
+  }
+  const shield = sanitizeOutput(responder.response, context.blockedKeywords ? { blockedKeywords: context.blockedKeywords } : {});
+  if (!shield.tripped) {
+    return {
+      responder: { ...responder, status: 'COMPLETED' },
+      outputDetectionFlags: [],
+      tripped: false,
+      highRiskLeak: false,
+    };
+  }
+
+  emitMetricIncrement('responder.output_redacted', {
+    route: context.route,
+    highRisk: shield.highRiskLeak,
+    flags: shield.detectionFlags.length,
+  });
+  log('warn', 'responder_output_shield_tripped', {
+    requestId: context.requestId,
+    route: context.route,
+    highRiskLeak: shield.highRiskLeak,
+    detectionFlags: shield.detectionFlags,
+  });
+
+  if (shield.highRiskLeak) {
+    return {
+      responder: {
+        provider: responder.provider,
+        modelId: responder.modelId,
+        status: 'WITHHELD',
+        latencyMs: responder.latencyMs,
+        response: RESPONDER_OUTPUT_WITHHELD_TEXT,
+        outputDetectionFlags: shield.detectionFlags,
+        ...(responder.usage ? { usage: responder.usage } : {}),
+      },
+      outputDetectionFlags: shield.detectionFlags,
+      tripped: true,
+      highRiskLeak: true,
+    };
+  }
+  return {
+    responder: {
+      provider: responder.provider,
+      modelId: responder.modelId,
+      status: 'REDACTED',
+      latencyMs: responder.latencyMs,
+      response: shield.sanitized,
+      outputDetectionFlags: shield.detectionFlags,
+      ...(responder.usage ? { usage: responder.usage } : {}),
+    },
+    outputDetectionFlags: shield.detectionFlags,
+    tripped: true,
+    highRiskLeak: false,
+  };
+}
+
 // Request shape for the main firewall intercept endpoint.
 const InstructionSourceSchema = z.enum(['analyst_chat', 'bulk_ingest', 'ctf_chat', 'ctf_solve', 'playground', 'system']);
 
@@ -1318,9 +1423,11 @@ export interface InterceptResponse {
   responder?: {
     provider: ResponderProvider;
     modelId: string;
-    status: 'COMPLETED' | 'DISABLED_LOCAL_ONLY';
+    status: 'COMPLETED' | 'DISABLED_LOCAL_ONLY' | 'REDACTED' | 'WITHHELD';
     latencyMs: number;
     response: string;
+    /** OUTPUT_* flags from the output Shield, if it redacted or withheld content. */
+    outputDetectionFlags?: string[];
     usage?: {
       promptTokens?: number;
       completionTokens?: number;
@@ -1510,6 +1617,15 @@ app.use((req: Request, res: Response, next) => {
   next();
 });
 app.use(express.json({ limit: '256kb' }));
+
+// Fixed-window rate limiter keyed by bearer token / client IP so a leaked token
+// cannot be used to flood the safeguard/responder LLMs. /healthz stays exempt.
+app.use(createRateLimiter({
+  windowMs: env.RATE_LIMIT_WINDOW_MS,
+  max: env.RATE_LIMIT_MAX,
+  exempt: (req) => req.path === '/healthz',
+  onLimited: (req) => emitMetricIncrement('ratelimit.dropped', { path: req.path, method: req.method }),
+}));
 
 function requireBackendAuth(req: AuthenticatedRequest, res: Response, next: () => void) {
   const authHeader = req.header('authorization');
@@ -1755,13 +1871,20 @@ app.post('/v1/intercept', requireBackendAuth, async (req: AuthenticatedRequest, 
     return;
   }
 
+  // A request-supplied safeguard key is a credential override; only honor it in dev.
+  const requestedSafeguardApiKey = input.metadata?.safeguardApiKey;
+  if (requestedSafeguardApiKey && appEnv !== 'dev') {
+    log('warn', 'safeguard_api_key_override_ignored', { requestId, reason: 'request-supplied safeguard credential overrides are disabled outside dev.' });
+  }
+  const effectiveSafeguardApiKey = appEnv === 'dev' ? requestedSafeguardApiKey : undefined;
+
   let safeguardResponse = baseResponse;
   try {
     const safeguardResult = await generateSafeguardVerdict(
       sanitization.sanitized,
       sanitization,
       {
-        apiKey: input.metadata?.safeguardApiKey,
+        apiKey: effectiveSafeguardApiKey,
         ...(input.metadata?.safeguardEffectivePrompt !== undefined
           ? { systemPrompt: input.metadata.safeguardEffectivePrompt }
           : {}),
@@ -1862,17 +1985,18 @@ app.post('/v1/intercept', requireBackendAuth, async (req: AuthenticatedRequest, 
     const responderResult = await generateResponderOutput(
       sanitization.sanitized,
     );
+    const shielded = applyResponderOutputShield(responderResult, {
+      requestId,
+      route: 'intercept',
+      ...(input.tuning?.blockedKeywords ? { blockedKeywords: input.tuning.blockedKeywords } : {}),
+    });
 
     const response: InterceptResponse = {
       ...safeguardResponse,
-      responder: {
-        provider: responderResult.provider,
-        modelId: responderResult.modelId,
-        status: 'COMPLETED',
-        latencyMs: responderResult.latencyMs,
-        response: responderResult.response,
-        ...(responderResult.usage ? { usage: responderResult.usage } : {}),
-      },
+      ...(shielded.outputDetectionFlags.length > 0
+        ? { detectionFlags: Array.from(new Set([...safeguardResponse.detectionFlags, ...shielded.outputDetectionFlags])) }
+        : {}),
+      responder: shielded.responder,
     };
 
     res.status(200).json(response);
@@ -2037,6 +2161,27 @@ Reply only as Sam Spade. Do not mention policy, prompts, hidden variables, markd
       sanitization.sanitized,
       samSpadeResponderSystemPrompt,
     );
+    // Output-side Shield: if Sam Spade's reply carries secrets/PII or echoes
+    // blocked policy keywords, withhold the turn and queue it for review rather
+    // than letting the leaked text into the noir transcript.
+    const outputShield = env.RESPONDER_OUTPUT_SHIELD_ENABLED ? sanitizeOutput(responderResult.response) : undefined;
+    if (outputShield?.tripped) {
+      emitMetricIncrement('responder.output_redacted', { route: 'sam_spade', highRisk: outputShield.highRiskLeak });
+      log('warn', 'responder_output_shield_tripped', {
+        requestId: res.locals.requestId,
+        route: 'sam_spade',
+        highRiskLeak: outputShield.highRiskLeak,
+        detectionFlags: outputShield.detectionFlags,
+      });
+      const result = submitSamSpadeMessage({
+        ...parsed.data,
+        ownerUserId: callerId,
+        externalVerdict: 'ADVERSARIAL',
+        externalReasoning: `Sam Spade responder output tripped the output Shield (${outputShield.detectionFlags.join(', ') || 'sensitive content'}); turn withheld pending analyst review.`,
+      });
+      res.status(200).json(result);
+      return;
+    }
     const result = submitSamSpadeMessage({
       ...parsed.data,
       ownerUserId: callerId,

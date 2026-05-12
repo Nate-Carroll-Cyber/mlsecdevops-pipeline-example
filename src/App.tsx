@@ -12,7 +12,7 @@
  * the record, and Metrics summarizes the record.
  */
 // Import React and necessary hooks for state, side effects, refs, and memoization
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useRef, useMemo } from 'react';
 // Import Firebase configuration and utility functions
 import { 
   auth, 
@@ -78,9 +78,12 @@ import { ATLAS_TACTIC_VALUES, ATLAS_TECHNIQUE_ID_VALUES, LOCAL_ARCHETYPES, type 
 // Import ReactMarkdown for rendering markdown content
 import ReactMarkdown from 'react-markdown';
 import { z } from 'zod';
-// Import custom components for the dashboard and analyzer
-import { ThreatDashboard } from './components/ThreatDashboard';
-import { SyntacticAnalyzer } from './components/SyntacticAnalyzer';
+// Import custom components for the dashboard and analyzer.
+// ThreatDashboard (Metrics tab) and SyntacticAnalyzer (Playground tab — which
+// pulls in the ~21-transform obfuscation lab) are code-split: they are only
+// loaded when their tab is opened, keeping them out of the initial bundle.
+const ThreatDashboard = lazy(() => import('./components/ThreatDashboard').then((m) => ({ default: m.ThreatDashboard })));
+const SyntacticAnalyzer = lazy(() => import('./components/SyntacticAnalyzer').then((m) => ({ default: m.SyntacticAnalyzer })));
 import { HelpTooltip } from './components/HelpTooltip';
 
 // Import UI components from the shadcn/ui library
@@ -5918,12 +5921,14 @@ export default function App() {
           {/* Metrics Tab */}
           {activeTab === 'metrics' && (
             <div className="flex flex-col h-full min-h-0 gap-6 overflow-y-auto pr-2">
-              <ThreatDashboard
-                localReviewMode={localReviewMode}
-                localAuditLogs={mergedAuditLogs}
-                governanceConfig={governanceConfig}
-                onGovernanceConfigChange={setGovernanceConfig}
-              />
+              <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Loading metrics…</div>}>
+                <ThreatDashboard
+                  localReviewMode={localReviewMode}
+                  localAuditLogs={mergedAuditLogs}
+                  governanceConfig={governanceConfig}
+                  onGovernanceConfigChange={setGovernanceConfig}
+                />
+              </Suspense>
             </div>
           )}
 
@@ -6222,29 +6227,31 @@ export default function App() {
           {/* Playground Tab */}
           {activeTab === 'playground' && (
             <div className="h-full overflow-y-auto p-6 space-y-6">
-              {/* Syntactic Analyzer Component */}
-              <SyntacticAnalyzer
-                key={playgroundResetToken}
-                systemConfig={systemConfig}
-                activeGuardrails={activeGuardrails}
-                governanceConfig={governanceConfig}
-                latestSubmittedFeatureVector={latestSubmittedFeatureVector}
-                maxContextWindow={Number.isFinite(parsedContextWindowLimit) && parsedContextWindowLimit > 0 ? parsedContextWindowLimit : undefined}
-                estimatePromptTokens={(prompt) => {
-                  const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
-                  const finalSystemPrompt = buildDownstreamResponderSystemPrompt({
-                    prompt,
-                    systemConfig,
-                    policies,
-                  });
-                  return estimateResponderPromptTokens(finalSystemPrompt, prompt);
-                }}
-                isSubmitting={isProcessing}
-                onSubmitPrompt={async (prompt) => {
-                  await handleSendMessage(undefined, prompt, { source: 'playground' });
-                }}
-              />
-              
+              {/* Syntactic Analyzer Component (code-split: includes the obfuscation lab) */}
+              <Suspense fallback={<div className="p-6 text-sm text-muted-foreground">Loading playground…</div>}>
+                <SyntacticAnalyzer
+                  key={playgroundResetToken}
+                  systemConfig={systemConfig}
+                  activeGuardrails={activeGuardrails}
+                  governanceConfig={governanceConfig}
+                  latestSubmittedFeatureVector={latestSubmittedFeatureVector}
+                  maxContextWindow={Number.isFinite(parsedContextWindowLimit) && parsedContextWindowLimit > 0 ? parsedContextWindowLimit : undefined}
+                  estimatePromptTokens={(prompt) => {
+                    const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
+                    const finalSystemPrompt = buildDownstreamResponderSystemPrompt({
+                      prompt,
+                      systemConfig,
+                      policies,
+                    });
+                    return estimateResponderPromptTokens(finalSystemPrompt, prompt);
+                  }}
+                  isSubmitting={isProcessing}
+                  onSubmitPrompt={async (prompt) => {
+                    await handleSendMessage(undefined, prompt, { source: 'playground' });
+                  }}
+                />
+              </Suspense>
+
               {/* Bulk Ingest Simulator Card */}
               <Card className="border-border rounded-2xl shadow-sm bg-card">
                 <CardHeader className="border-b border-border bg-muted/30">

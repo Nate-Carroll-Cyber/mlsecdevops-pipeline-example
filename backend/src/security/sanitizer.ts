@@ -1499,3 +1499,89 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     decodeTelemetry,
   };
 }
+
+// --- Output-side Shield -----------------------------------------------------
+// The cardinal rule applies to model *output* as well: text coming back from the
+// responder LLM must not carry secrets/PII or echo blocked policy keywords to the
+// caller un-flagged. This is intentionally lighter than `sanitizePrompt` — model
+// text is not an adversarial vector for entropy/syntactic heuristics, so we only
+// run the redaction passes and a blocked-keyword check.
+
+export interface OutputSanitizationResult {
+  original: string;
+  sanitized: string;
+  redactions: string[];
+  detectionFlags: string[];
+  blockedKeywordHits: string[];
+  /** True when secret/credential material was found (canary, private/AWS/LLM keys). */
+  highRiskLeak: boolean;
+  /** True when anything at all was redacted or a blocked keyword matched. */
+  tripped: boolean;
+}
+
+const OUTPUT_HIGH_RISK_REDACTIONS = new Set([
+  'CANARY_TOKEN',
+  'CANARY_EXFIL',
+  'PRIVATE_KEY',
+  'AWS_KEY',
+  'LLM_API_KEY',
+  'SECRET_KEY',
+]);
+
+export function sanitizeOutput(text: string, tuning: Pick<BackendSanitizationTuning, 'blockedKeywords'> = {}): OutputSanitizationResult {
+  let sanitized = text;
+  const redactions = new Set<string>();
+  const detectionFlags = new Set<string>();
+
+  for (const pattern of SENSITIVE_PATTERNS) {
+    if (text.match(pattern.regex)) {
+      redactions.add(pattern.name);
+      detectionFlags.add(`OUTPUT_${pattern.name}`);
+      if (pattern.name === 'CANARY_TOKEN') {
+        redactions.add(CANARY_EXFIL_FLAG);
+        detectionFlags.add(`OUTPUT_${CANARY_EXFIL_FLAG}`);
+      }
+      sanitized = sanitized.replace(pattern.regex, `[REDACTED_${pattern.name}]`);
+    }
+  }
+
+  if (findCreditCards(text).length > 0) {
+    redactions.add('CREDIT_CARD');
+    detectionFlags.add('OUTPUT_CREDIT_CARD');
+    sanitized = redactCreditCardMatches(sanitized);
+  }
+
+  for (const match of text.matchAll(REDACTED_PLACEHOLDER_REGEX)) {
+    const placeholderName = match[1];
+    if (placeholderName) {
+      redactions.add(placeholderName);
+      detectionFlags.add(`OUTPUT_${placeholderName}`);
+    }
+  }
+
+  const configuredBlockedKeywords = (tuning.blockedKeywords ?? [])
+    .map((keyword) => keyword.trim().toLowerCase())
+    .filter(Boolean);
+  const keywordsToCheck = configuredBlockedKeywords.length > 0 ? configuredBlockedKeywords : BLOCKED_KEYWORDS;
+  const normalizedOutput = normalizeForPolicy(text);
+  const blockedKeywordHits = keywordsToCheck.filter((keyword) => normalizedOutput.includes(keyword));
+  for (const keyword of blockedKeywordHits) {
+    detectionFlags.add(`OUTPUT_BLOCKED_KEYWORD:${keyword}`);
+  }
+  if (blockedKeywordHits.length > 0) detectionFlags.add('OUTPUT_BLOCKED_KEYWORD');
+
+  const highRiskLeak = [...redactions].some((redaction) => OUTPUT_HIGH_RISK_REDACTIONS.has(redaction));
+  const tripped = redactions.size > 0 || blockedKeywordHits.length > 0;
+  if (tripped) detectionFlags.add('OUTPUT_REDACTED');
+  if (highRiskLeak) detectionFlags.add('OUTPUT_HIGH_RISK_LEAK');
+
+  return {
+    original: text,
+    sanitized,
+    redactions: [...redactions],
+    detectionFlags: [...detectionFlags],
+    blockedKeywordHits,
+    highRiskLeak,
+    tripped,
+  };
+}

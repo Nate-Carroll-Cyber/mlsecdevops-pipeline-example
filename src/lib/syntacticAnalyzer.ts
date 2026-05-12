@@ -8,6 +8,40 @@ const PAREN_WRAPPER_REGEX = /\(([A-Z0-9_:-]{3,})\)/g;
 const BASE64_BLOB_REGEX = /\b(?:[A-Za-z0-9+/]{20,}={0,2})\b/g;
 const ESCAPE_SEQUENCE_REGEX = /(?:\\x[0-9a-fA-F]{2}|\\u[0-9a-fA-F]{4}|%[0-9a-fA-F]{2}){3,}/g;
 
+// Operational keywords commonly used in prompt injection / jailbreaks. The
+// per-keyword word-boundary regexes are compiled once at module load instead of
+// on every analyzeSyntacticComplexity() call (this function runs several times
+// per prompt, and per-request RegExp compilation showed up as hot-path work).
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildKeywordMatchers(keywords: readonly string[], weight: number): ReadonlyArray<{ regex: RegExp; weight: number }> {
+  return keywords.map((keyword) => ({
+    // 'g' so String.match returns every occurrence; .match does not consult
+    // lastIndex, so reusing a shared instance across calls is safe.
+    regex: new RegExp(`\\b${escapeRegExp(keyword)}\\b`, 'g'),
+    weight,
+  }));
+}
+
+const HIGH_SIGNAL_KEYWORDS = [
+  'ignore', 'override', 'disregard', 'forget', 'jailbreak',
+  'act as', 'simulate', 'pretend', 'from now on', 'developer mode',
+  'unfiltered', 'uncensored', 'bypass', 'roleplay', 'persona',
+  'start over', 'new instructions', 'do anything now', 'dan',
+  'sudo', 'admin', 'root', 'system prompt', 'core instructions',
+  'base instructions', 'respond as', 'answer as', 'reply as', 'behave as',
+  'chatgpt', 'openai', 'gemini',
+] as const;
+const MEDIUM_SIGNAL_KEYWORDS = [
+  'must', 'always', 'never', 'instructions', 'output format',
+  'rules', 'guidelines', 'restriction', 'limitations', 'you are',
+  'you will', 'you must', 'you cannot', 'you shall',
+] as const;
+const HIGH_SIGNAL_KEYWORD_MATCHERS = buildKeywordMatchers(HIGH_SIGNAL_KEYWORDS, 1.4);
+const MEDIUM_SIGNAL_KEYWORD_MATCHERS = buildKeywordMatchers(MEDIUM_SIGNAL_KEYWORDS, 0.6);
+
 function countMatches(input: string, regex: RegExp): number {
   return input.match(regex)?.length ?? 0;
 }
@@ -81,42 +115,24 @@ export function analyzeSyntacticComplexity(prompt: string, threshold: number = 6
   // Convert the prompt to lowercase for case-insensitive keyword matching
   const lowerPrompt = normalizedPrompt.toLowerCase();
   
-  // 1. Constraint Density
-  // Define a list of operational keywords commonly used in prompt injection and jailbreaks
-  const highSignalKeywords = [
-    'ignore', 'override', 'disregard', 'forget', 'jailbreak',
-    'act as', 'simulate', 'pretend', 'from now on', 'developer mode',
-    'unfiltered', 'uncensored', 'bypass', 'roleplay', 'persona',
-    'start over', 'new instructions', 'do anything now', 'dan',
-    'sudo', 'admin', 'root', 'system prompt', 'core instructions',
-    'base instructions', 'respond as', 'answer as', 'reply as', 'behave as',
-    'chatgpt', 'openai', 'gemini'
-  ];
-  const mediumSignalKeywords = [
-    'must', 'always', 'never', 'instructions', 'output format',
-    'rules', 'guidelines', 'restriction', 'limitations', 'you are',
-    'you will', 'you must', 'you cannot', 'you shall'
-  ];
-  
+  // 1. Constraint Density — match the precompiled operational-keyword regexes.
   // Initialize a counter for the number of operational keywords found
   let constraintCount = 0;
   let weightedConstraintScore = 0;
-  highSignalKeywords.forEach(keyword => {
-    const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+  for (const { regex, weight } of HIGH_SIGNAL_KEYWORD_MATCHERS) {
     const matches = lowerPrompt.match(regex);
     if (matches) {
       constraintCount += matches.length;
-      weightedConstraintScore += matches.length * 1.4;
+      weightedConstraintScore += matches.length * weight;
     }
-  });
-  mediumSignalKeywords.forEach(keyword => {
-    const regex = new RegExp(`\\b${keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'g');
+  }
+  for (const { regex, weight } of MEDIUM_SIGNAL_KEYWORD_MATCHERS) {
     const matches = lowerPrompt.match(regex);
     if (matches) {
       constraintCount += matches.length;
-      weightedConstraintScore += matches.length * 0.6;
+      weightedConstraintScore += matches.length * weight;
     }
-  });
+  }
 
   // Calculate the total number of words in the prompt by splitting on whitespace
   const totalWords = normalizedPrompt.trim().split(/\s+/).length;

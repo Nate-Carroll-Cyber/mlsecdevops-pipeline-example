@@ -1,18 +1,44 @@
+# Standalone Sam Spade CTF service.
+#
+# This is the same backend image booted with COUNTER_SPY_ROLE=sam-spade, so only
+# /healthz and /v1/ctf/sam-spade/* are served (on SAM_SPADE_SERVICE_PORT). Point
+# a gateway's SAM_SPADE_SERVICE_URL at http://<host>:18120 to delegate the CTF
+# surface to it. The demo stack (docker-compose.demo.yml) already wires this up;
+# this file is for running the CTF service on its own (e.g. alongside an
+# externally managed gateway) and stays behind the "sam-spade" profile.
 services:
   sam-spade-service:
-    image: node:22-alpine
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: counter-spy-sam-spade-service
     container_name: counter-spy-sam-spade-service
     profiles: ["sam-spade"]
-    working_dir: /app
-    command: >
-      sh -lc "echo 'Sam Spade service stub. Replace this command with the standalone service entrypoint when the split happens.' && sleep infinity"
+    command: ["node", "backend/dist/server.js"]
+    env_file:
+      # Provider creds + INTERCEPT_BEARER_TOKEN (must match the gateway's token).
+      - .env.demo.local
     environment:
+      APP_ENV: "${APP_ENV:-dev}"
+      LOG_LEVEL: "${LOG_LEVEL:-info}"
+      COUNTER_SPY_ROLE: sam-spade
       SAM_SPADE_ENABLED: "true"
-      SAM_SPADE_DEFAULT_CASE_ID: "case-067"
-      SAM_SPADE_STORE_PATH: "backend/data/sam-spade-sessions.json"
+      SAM_SPADE_DEFAULT_CASE_ID: "${SAM_SPADE_DEFAULT_CASE_ID:-case-067}"
+      SAM_SPADE_STORE_PATH: "/app/backend/data/sam-spade.db"
       SAM_SPADE_SERVICE_PORT: "18120"
+      OTEL_SERVICE_NAME: "counter-spy-sam-spade-service"
+      # OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
     ports:
       - "18120:18120"
     volumes:
-      - ./:/app
+      - sam_spade_data:/app/backend/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18120/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     restart: unless-stopped
+
+volumes:
+  sam_spade_data:

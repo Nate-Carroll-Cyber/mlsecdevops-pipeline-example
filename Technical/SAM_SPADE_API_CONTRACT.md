@@ -219,16 +219,17 @@ For blocked CTF attempts:
 - the submitted input is cleared instead of restored for editing
 - the Analyst Chat mirror uses `Bad content.` for blocked CTF prompt/response display while Audit Logs retain the sanitized review details
 
-## Future Container Split
+## Container Split (implemented)
 
-The contract is intentionally stable enough to support:
+The CTF surface can now run as its own container. The backend image is role-aware:
 
-`Sam Spade frontend shell -> Counter-Spy.ai backend proxy -> Sam Spade service container`
+- `COUNTER_SPY_ROLE=gateway` (default) — the main Counter-Spy backend. When `SAM_SPADE_SERVICE_URL` is set it **reverse-proxies** `/v1/ctf/sam-spade/*` (method, JSON body, `Authorization`, `x-counter-spy-user-id`, and the W3C trace context) to the standalone service instead of mounting the CTF handlers in-process. Unauthenticated CTF requests are rejected at the gateway edge before any forward. When `SAM_SPADE_SERVICE_URL` is unset, the CTF routes are served in-process exactly as before (no regression for single-process dev).
+- `COUNTER_SPY_ROLE=sam-spade` — boots only `/healthz` and `/v1/ctf/sam-spade/*` on `SAM_SPADE_SERVICE_PORT` (default `18120`). It owns the SQLite session store and makes its own safeguard/responder calls. It runs the same `requireBackendAuth` (shared `INTERCEPT_BEARER_TOKEN`) and rate limiter.
 
-Possible later split:
+Demo topology (`docker-compose.demo.yml`):
 
-- `counter-spy-frontend`
-- `counter-spy-backend`
-- `sam-spade-service`
+`counter-spy-frontend -> counter-spy-backend (gateway) --/v1/ctf/sam-spade/*--> counter-spy-sam-spade-service`
 
-In that model, Counter-Spy.ai can remain the policy/governance/review surface while Sam Spade owns scenario logic and session progression.
+`docker-compose.sam-spade.yml` runs the CTF service on its own (behind the `sam-spade` profile) alongside an externally managed gateway. The HTTP contract above is unchanged across the split, so the only client that changes is the CTF UI itself when it later moves into its own frontend container.
+
+**Pending follow-up:** once the CTF UI moves out of the main frontend, the review-artifact "feed" into Counter-Spy (Analyst Chat + `audit_logs` source `ctf_chat`) — today driven by the main frontend's `appendSamSpadeReviewSurfaces()` — moves server-side (a `/v1/ctf/review-artifacts` ingest endpoint writing the audit doc). Until then the main frontend still drives the CTF routes through the gateway proxy and mirrors artifacts as it does today.

@@ -1,5 +1,9 @@
 # Minimal local demo stack for Counter-Spy.ai.
 # This is meant for laptop demos and smoke testing, not a production deployment.
+#
+# Topology: postgres + otel-collector(+jaeger) + counter-spy-sam-spade-service
+#           + counter-spy-backend (gateway, proxies /v1/ctf/sam-spade/* to the
+#           sam-spade service) + counter-spy-frontend.
 services:
   counter-spy-backend:
     build:
@@ -14,6 +18,7 @@ services:
       APP_PORT: 8080
       APP_ENV: dev
       LOG_LEVEL: info
+      COUNTER_SPY_ROLE: gateway
       # Instruction similarity monitor backed by PostgreSQL + pgvector.
       INSTRUCTION_MONITOR_ENABLED: "true"
       INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS: "${INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS:-768}"
@@ -26,11 +31,9 @@ services:
       SAFEGUARDS_API_BASE_URL: "http://192.168.0.183:1234/v1/chat/completions"
       SAFEGUARDS_MODEL_ID: "gpt-oss-safeguard-20b"
       SAFEGUARDS_TIMEOUT_MS: "30000"
-      # Sam Spade stays enabled in the demo so the CTF surface works out of the box.
+      # The CTF surface lives in its own container; the gateway just proxies to it.
       SAM_SPADE_ENABLED: "true"
-      SAM_SPADE_DEFAULT_CASE_ID: "case-067"
-      SAM_SPADE_STORE_PATH: "/app/backend/data/sam-spade.db"
-      SAM_SPADE_SERVICE_PORT: "18120"
+      SAM_SPADE_SERVICE_URL: "http://counter-spy-sam-spade-service:18120"
       # OpenTelemetry: export traces/metrics/logs over OTLP/HTTP to the collector.
       OTEL_SERVICE_NAME: "counter-spy-backend"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
@@ -42,12 +45,56 @@ services:
       # demo stack stays stable across rebuilds and restarts.
     ports:
       - "18080:8080"
-    volumes:
-      # Keep Sam Spade session data outside the container lifecycle.
-      - sam_spade_data:/app/backend/data
     depends_on:
       counter-spy-postgres:
         condition: service_healthy
+      counter-spy-sam-spade-service:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    restart: unless-stopped
+
+  # Standalone Sam Spade CTF service. Same image as the backend, booted with
+  # COUNTER_SPY_ROLE=sam-spade so only /healthz and /v1/ctf/sam-spade/* are served
+  # (on SAM_SPADE_SERVICE_PORT). It owns the SQLite session store volume and makes
+  # its own safeguard/responder calls.
+  counter-spy-sam-spade-service:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: counter-spy-sam-spade-service
+    env_file:
+      - .env.demo.local
+    environment:
+      APP_ENV: dev
+      LOG_LEVEL: info
+      COUNTER_SPY_ROLE: sam-spade
+      SAM_SPADE_ENABLED: "true"
+      SAM_SPADE_DEFAULT_CASE_ID: "case-067"
+      SAM_SPADE_STORE_PATH: "/app/backend/data/sam-spade.db"
+      SAM_SPADE_SERVICE_PORT: "18120"
+      SAFEGUARDS_API_BASE_URL: "http://192.168.0.183:1234/v1/chat/completions"
+      SAFEGUARDS_MODEL_ID: "gpt-oss-safeguard-20b"
+      SAFEGUARDS_TIMEOUT_MS: "30000"
+      OTEL_SERVICE_NAME: "counter-spy-sam-spade-service"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_EXPORTER_OTLP_PROTOCOL: "http/json"
+      OTEL_TRACES_SAMPLER: "${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}"
+      OTEL_TRACES_SAMPLER_ARG: "${OTEL_TRACES_SAMPLER_ARG:-1.0}"
+      OTEL_LOG_LEVEL: "${OTEL_LOG_LEVEL:-warn}"
+    command: ["node", "backend/dist/server.js"]
+    ports:
+      - "18120:18120"
+    volumes:
+      # Sam Spade session data lives with the service that owns it now.
+      - sam_spade_data:/app/backend/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18120/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    depends_on:
       otel-collector:
         condition: service_started
     restart: unless-stopped
@@ -131,5 +178,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  # Named volume used by the backend SQLite session store.
+  # Named volume used by the standalone Sam Spade service's SQLite session store.
   sam_spade_data:

@@ -84,7 +84,9 @@ counter-spy.ai/
 | :--- | :--- | :--- |
 | 🛡️ **The Shield** | `src/lib/sanitizer.ts` | Local sanitization engine — intercepts all adversarial payloads before any external API call is initiated. |
 | ⚔️ **The Sword** | `backend/src/server.ts` + `src/lib/backendApi.ts` | Backend-mediated inference path — local sanitizer, OpenAI-compatible safeguard judge, downstream responder, Sam Spade CTF persona/scenario handoff, and governed intercept result handling. |
-| 🕵️ **The Case File** | `backend/src/services/sam-spade/` | Sam Spade CTF session, review, and gameplay gatekeeping — clean turns reach the responder, while sensitive/adversarial turns are masked as `Bad content.` and routed to audit review. |
+| 🕵️ **The Case File** | `backend/src/services/sam-spade/` | Sam Spade CTF session, review, and gameplay gatekeeping — clean turns reach the responder, while sensitive/adversarial turns are masked as `Bad content.` and routed to audit review. The same backend image runs this surface as its own container via `COUNTER_SPY_ROLE=sam-spade`; a gateway delegates `/v1/ctf/sam-spade/*` to it through `SAM_SPADE_SERVICE_URL`. |
+| 🚧 **The Bulkhead** | `backend/src/middleware/rateLimit.ts` + `backend/src/security/urlGuard.ts` | Edge hardening — fixed-window rate limiter (bearer-token/IP keyed) and the SSRF egress guard that validates every outbound provider base URL. |
+| 📈 **The Glass** | `backend/src/telemetry.ts` + `otel/collector-config.yaml` | OpenTelemetry bootstrap (traces/metrics/logs over OTLP) and the demo-stack collector config. |
 | 📡 **The Radar** | `src/lib/anomalyDetector.ts` | Statistical anomaly engine — calculates real-time Z-Scores to detect coordinated automated attacks. |
 | 🔒 **The Vault** | `firestore.rules` | Database-layer enforcement — ensures data integrity and PII privacy even if the client layer is compromised. |
 | 📚 **The Manual** | `Technical/` + `Regulatory/` | Operational and assurance documentation — provides context for implementers, analysts, and compliance review. |

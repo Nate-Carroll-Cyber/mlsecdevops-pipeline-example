@@ -274,3 +274,14 @@ The backend is instrumented with the OpenTelemetry SDK (`backend/src/telemetry.t
 *   **Export:** Everything is OTLP/HTTP, driven by the standard `OTEL_*` environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`/`OTEL_TRACES_SAMPLER_ARG`, ...). `docker-compose.demo.yml` points the backend at a bundled `otel-collector` (`otel/collector-config.yaml`) that fans out to its stdout, Prometheus (`:8889/metrics`), and Jaeger (`:16686`).
 *   **No-op by default:** The SDK only starts when an OTLP endpoint/exporter is configured. With nothing set — or with `OTEL_SDK_DISABLED=true` — the OpenTelemetry API resolves to no-op providers and the only sink is the structured stdout JSON, so `npm run backend:dev` and the test suite stay quiet.
 *   **Production:** For the ECS task definition, set the same `OTEL_*` env vars (point them at an OTLP endpoint / the AWS Distro for OpenTelemetry sidecar). Browser-side OpenTelemetry for the frontends is a planned follow-up.
+
+---
+
+## 8. Sam Spade CTF Service Split
+
+The backend image is **role-aware** so the noir CTF surface can run as its own container without a code fork.
+
+*   `COUNTER_SPY_ROLE=gateway` (default) — the main backend. When `SAM_SPADE_SERVICE_URL` is set it **reverse-proxies** `/v1/ctf/sam-spade/*` (method, JSON body, `Authorization`, `x-counter-spy-user-id`, and the W3C trace context — so spans stitch across processes) to the standalone CTF service; unauthenticated CTF requests are rejected at the gateway edge before any forward. With `SAM_SPADE_SERVICE_URL` unset, the CTF routes are served in-process exactly as before (no regression for single-process dev or the test suite).
+*   `COUNTER_SPY_ROLE=sam-spade` — boots only `/healthz` and `/v1/ctf/sam-spade/*` on `SAM_SPADE_SERVICE_PORT` (default `18120`). It owns the SQLite session store volume and makes its own safeguard/responder calls; it runs the same `requireBackendAuth` (shared `INTERCEPT_BEARER_TOKEN`) and rate limiter.
+*   **Demo topology** (`docker-compose.demo.yml`): `counter-spy-frontend → counter-spy-backend (gateway) ──/v1/ctf/sam-spade/*──▶ counter-spy-sam-spade-service`, alongside `postgres`, `otel-collector`, and `jaeger`. `docker-compose.sam-spade.yml` runs just the CTF service (behind the `sam-spade` profile).
+*   The HTTP contract (see `Technical/SAM_SPADE_API_CONTRACT.md`) is unchanged across the split. **Pending follow-up:** when the CTF *UI* later moves to its own frontend container, the review-artifact "feed" into Counter-Spy (Analyst Chat + `audit_logs` source `ctf_chat`) moves server-side (`/v1/ctf/review-artifacts` ingest); today the main frontend still drives the CTF routes through the gateway proxy and mirrors artifacts via `appendSamSpadeReviewSurfaces()`.

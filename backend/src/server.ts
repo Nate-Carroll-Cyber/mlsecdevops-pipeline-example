@@ -58,6 +58,13 @@ const EnvSchema = z.object({
   LLM_API_KEY: z.string().optional(),
   LLM_MODEL_ID: z.string().optional(),
   INTERCEPT_BEARER_TOKEN: z.string().min(16).optional(),
+  // Deployment role: "gateway" (default) is the main Counter-Spy backend; "sam-spade"
+  // boots only the Sam Spade CTF routes on SAM_SPADE_SERVICE_PORT so the CTF surface
+  // can run as its own container. SAM_SPADE_SERVICE_URL, when set on a gateway, makes
+  // it reverse-proxy /v1/ctf/sam-spade/* to the standalone service instead of mounting
+  // the CTF handlers in-process.
+  COUNTER_SPY_ROLE: z.enum(['gateway', 'sam-spade']).default('gateway'),
+  SAM_SPADE_SERVICE_URL: z.string().url().optional(),
   RATE_LIMIT_WINDOW_MS: z.coerce.number().int().min(1_000).max(3_600_000).default(60_000),
   RATE_LIMIT_MAX: z.coerce.number().int().min(0).max(1_000_000).default(120),
   EGRESS_ALLOWLIST: z.string().optional(),
@@ -87,7 +94,15 @@ if (env.APP_ENV !== 'dev' && !env.INTERCEPT_BEARER_TOKEN) {
 }
 
 const app = express();
-const port = env.APP_PORT || env.PORT || 8080;
+const role = env.COUNTER_SPY_ROLE;
+const isSamSpadeService = role === 'sam-spade';
+// When set on a gateway, /v1/ctf/sam-spade/* is reverse-proxied to this URL
+// instead of being handled in-process.
+const samSpadeServiceUrl = env.SAM_SPADE_SERVICE_URL?.replace(/\/$/, '');
+const proxyToSamSpadeService = !isSamSpadeService && Boolean(samSpadeServiceUrl);
+const port = isSamSpadeService
+  ? samSpadeConfig.SAM_SPADE_SERVICE_PORT
+  : (env.APP_PORT || env.PORT || 8080);
 const appEnv = env.APP_ENV;
 const allowedOrigins = (
   env.ALLOWED_ORIGINS ||
@@ -1749,7 +1764,67 @@ app.use((req: Request, res: Response, next) => {
   next();
 });
 
+// Reverse-proxy a /v1/ctf/sam-spade/* request to the standalone Sam Spade
+// service. Forwards method, path, JSON body, auth, the caller-id header, and the
+// W3C trace context so spans stitch together across the two processes.
+async function proxyToSamSpade(req: Request, res: Response): Promise<void> {
+  const target = `${samSpadeServiceUrl}${req.originalUrl}`;
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  const auth = req.header('authorization');
+  if (auth) headers.authorization = auth;
+  const callerId = req.header('x-counter-spy-user-id');
+  if (callerId) headers['x-counter-spy-user-id'] = callerId;
+  const traceparent = req.header('traceparent');
+  if (traceparent) headers.traceparent = traceparent;
+  const tracestate = req.header('tracestate');
+  if (tracestate) headers.tracestate = tracestate;
+  try {
+    const upstream = await fetch(target, {
+      method: req.method,
+      headers,
+      body: req.method === 'GET' || req.method === 'HEAD' ? undefined : JSON.stringify(req.body ?? {}),
+    });
+    const text = await upstream.text();
+    const contentType = upstream.headers.get('content-type');
+    if (contentType) res.setHeader('content-type', contentType);
+    res.status(upstream.status).send(text);
+  } catch (error) {
+    log('warn', 'sam_spade_proxy_failed', {
+      requestId: res.locals.requestId,
+      target,
+      error: error instanceof Error ? error.message : 'proxy error',
+    });
+    res.status(502).json({ error: 'Sam Spade service is unavailable.' });
+  }
+}
+
+// Role-aware request gate (see COUNTER_SPY_ROLE / SAM_SPADE_SERVICE_URL):
+//  - on a gateway that delegates the CTF surface, intercept /v1/ctf/sam-spade/*
+//    and forward it to the standalone service instead of the in-process handlers;
+//  - on the standalone sam-spade service, only /healthz and /v1/ctf/sam-spade/*
+//    are reachable (everything else 404s).
+app.use((req: Request, res: Response, next) => {
+  const isCtfPath = req.path === '/v1/ctf/sam-spade' || req.path.startsWith('/v1/ctf/sam-spade/');
+  if (proxyToSamSpadeService && isCtfPath) {
+    if (!env.INTERCEPT_BEARER_TOKEN || req.header('authorization') !== `Bearer ${env.INTERCEPT_BEARER_TOKEN}`) {
+      res.status(401).json({ error: 'Unauthorized protected route request.' });
+      return;
+    }
+    void proxyToSamSpade(req, res);
+    return;
+  }
+  if (isSamSpadeService && !isCtfPath && req.path !== '/healthz') {
+    res.status(404).json({ error: 'Not found.' });
+    return;
+  }
+  next();
+});
+
 app.get('/healthz', (_req: Request, res: Response) => {
+  if (isSamSpadeService) {
+    res.status(200).json({ ok: true, service: 'counter-spy-sam-spade-service', environment: appEnv, samSpadeEnabled: samSpadeConfig.SAM_SPADE_ENABLED });
+    return;
+  }
   const embeddingsRuntime = getInstructionEmbeddingsRuntimeConfig();
   res.status(200).json({
     ok: true,
@@ -2311,11 +2386,12 @@ export { app };
 if (process.env.COUNTER_SPY_DISABLE_SERVER_LISTEN !== 'true') {
   app.listen(port, '0.0.0.0', () => {
     log('info', 'backend_listening', {
+      role,
       port,
-      safeguardsModelId,
-      responderModelId,
+      ...(isSamSpadeService ? {} : { safeguardsModelId, responderModelId }),
       samSpadeEnabled: samSpadeConfig.SAM_SPADE_ENABLED,
       samSpadeStorePath: samSpadeConfig.SAM_SPADE_STORE_PATH,
+      ...(proxyToSamSpadeService ? { samSpadeServiceUrl } : {}),
     });
   });
 }

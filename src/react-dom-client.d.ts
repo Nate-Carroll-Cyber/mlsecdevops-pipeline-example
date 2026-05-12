@@ -7,4 +7,5 @@ declare module 'react-dom/client' {
   }
 
   export function createRoot(container: Element | DocumentFragment): Root;
+  export function hydrateRoot(container: Element | Document, initialChildren: ReactNode): Root;
 }

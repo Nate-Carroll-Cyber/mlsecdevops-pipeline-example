@@ -1,9 +1,9 @@
 // Import Firebase app initialization function
-import { initializeApp } from 'firebase/app';
+import { initializeApp, type FirebaseApp } from 'firebase/app';
 // Import Firebase authentication functions and providers
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, type Auth } from 'firebase/auth';
 // Import Firestore database functions
-import { getFirestore, doc, setDoc, getDoc, collection, addDoc, serverTimestamp, query, orderBy, limit, onSnapshot } from 'firebase/firestore';
+import { getFirestore, type Firestore } from 'firebase/firestore';
 import { z } from 'zod';
 // Import the Firebase configuration object
 import firebaseConfig from '../../firebase-applet-config.json';
@@ -28,16 +28,25 @@ if (!parsedFirebaseConfigResult.success) {
 }
 const parsedFirebaseConfig = parsedFirebaseConfigResult.data;
 
-// Initialize the Firebase app with the provided configuration
-const app = initializeApp(parsedFirebaseConfig);
+// The Firebase Web SDK is browser-only — it touches `window`, IndexedDB and popup
+// auth flows. This module is still imported during server-side rendering (App.tsx
+// pulls it in eagerly), so initialization is deferred to the browser. On the server
+// `app`/`auth`/`db`/`googleProvider` are `undefined`; every consumer touches them
+// only from a `useEffect` or event handler, which never runs during SSR.
+const isBrowser = typeof window !== 'undefined';
+
+const app: FirebaseApp | undefined = isBrowser ? initializeApp(parsedFirebaseConfig) : undefined;
+
 // Initialize and export the Firebase Auth instance
-export const auth = getAuth(app);
+export const auth = (app ? getAuth(app) : undefined) as Auth;
 // Initialize and export the Firestore database instance, using the specific database ID if provided
-export const db = parsedFirebaseConfig.firestoreDatabaseId
-  ? getFirestore(app, parsedFirebaseConfig.firestoreDatabaseId)
-  : getFirestore(app);
+export const db = (app
+  ? parsedFirebaseConfig.firestoreDatabaseId
+    ? getFirestore(app, parsedFirebaseConfig.firestoreDatabaseId)
+    : getFirestore(app)
+  : undefined) as Firestore;
 // Initialize and export the Google Auth Provider for sign-in
-export const googleProvider = new GoogleAuthProvider();
+export const googleProvider = (isBrowser ? new GoogleAuthProvider() : undefined) as GoogleAuthProvider;
 
 // Enum defining the types of Firestore operations for error tracking
 export enum OperationType {
@@ -67,8 +76,8 @@ export function handleFirestoreError(error: unknown, operationType: OperationTyp
     // Extract the error message, handling both Error objects and strings
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
-      userId: auth.currentUser?.uid,
-      hasAuthenticatedUser: Boolean(auth.currentUser),
+      userId: auth?.currentUser?.uid,
+      hasAuthenticatedUser: Boolean(auth?.currentUser),
     },
     operationType,
     path

@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict } from './security/sanitizer.js';
 import { assertEgressAllowed } from './security/urlGuard.js';
 import { createRateLimiter } from './middleware/rateLimit.js';
+import { mountWebApp } from './web/ssr.js';
 import { appendCtfReviewArtifact, listCtfReviewArtifacts } from './ctf/reviewArtifactStore.js';
 import {
   createSamSpadeSession,
@@ -1771,11 +1772,14 @@ app.use((req: Request, res: Response, next) => {
 app.use(express.json({ limit: '256kb' }));
 
 // Fixed-window rate limiter keyed by bearer token / client IP so a leaked token
-// cannot be used to flood the safeguard/responder LLMs. /healthz stays exempt.
+// cannot be used to flood the safeguard/responder LLMs. Exempt: /healthz, and
+// GET requests for the analyst console itself (the HTML shell + static assets) —
+// loading a page fans out into many asset requests and must not burn the quota
+// that protects the LLM-backed /v1 routes.
 app.use(createRateLimiter({
   windowMs: env.RATE_LIMIT_WINDOW_MS,
   max: env.RATE_LIMIT_MAX,
-  exempt: (req) => req.path === '/healthz',
+  exempt: (req) => req.path === '/healthz' || ((req.method === 'GET' || req.method === 'HEAD') && req.path !== '/v1' && !req.path.startsWith('/v1/')),
   onLimited: (req) => emitMetricIncrement('ratelimit.dropped', { path: req.path, method: req.method }),
 }));
 
@@ -2491,6 +2495,14 @@ app.get('/v1/ctf/review-artifacts', requireBackendAuth, (req: AuthenticatedReque
   });
   res.status(200).json({ artifacts });
 });
+
+// Analyst console: server-render the React app and serve its built assets from the
+// gateway itself. Mounted after every /v1 route (so API paths win) and before the
+// JSON 404 handler. Not mounted on the standalone sam-spade service, whose role
+// gate already rejects non-CTF paths.
+if (!isSamSpadeService) {
+  mountWebApp(app, { isDev: appEnv === 'dev' });
+}
 
 app.use((_req: Request, res: Response) => {
   res.status(404).json({ error: 'Not found.' });

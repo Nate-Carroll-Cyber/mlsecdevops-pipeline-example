@@ -53,6 +53,7 @@ import { generateSecurityAdvice, ChatMessage } from './lib/gemini';
 import {
   checkBackendHealth,
   createSamSpadeSession,
+  getCtfReviewArtifacts,
   interceptPrompt,
   lookupInstructionMonitorRecord,
   observeReviewedAdversarialInstruction,
@@ -260,6 +261,11 @@ type BackendSafeguardExecution = Pick<
 
 const PII_OR_SECRET_REDACTIONS = ['EMAIL', 'PHONE', 'ADDRESS', 'ZIPCODE', 'MAC_ADDRESS', 'IP_ADDRESS', 'CREDIT_CARD', 'SSN', 'AWS_KEY', 'LLM_API_KEY', 'PRIVATE_KEY', 'API_KEY', 'JWT', 'CANARY_TOKEN', 'CANARY_EXFIL', 'SECRET_KEY'];
 const SAM_SPADE_BLOCKED_CONTENT_LABEL = 'Bad content.';
+// When set, the Sam Spade tab embeds the standalone CTF frontend container and the
+// main app polls the gateway's review-artifact feed for CTF activity instead of
+// driving the CTF API itself. Unset = render the in-app CTF UI as before.
+const CTF_FRONTEND_URL = (import.meta.env.VITE_CTF_FRONTEND_URL ?? '').trim();
+const CTF_REVIEW_POLL_INTERVAL_MS = 6000;
 const SANITIZATION_REDOS_LATENCY_THRESHOLD_MS = 1000;
 
 interface WakeLockSentinelLike {
@@ -2874,6 +2880,136 @@ export default function App() {
     }
   };
 
+  // When the Sam Spade UI runs in its own container, the main app no longer drives
+  // the CTF API directly — instead it polls the gateway's review-artifact feed and
+  // mirrors each new turn into Analyst Chat + Audit Logs (same shape as the in-app
+  // path above), without re-running responder inference.
+  const ingestExternalCtfReviewArtifact = async (review: SamSpadeReviewArtifact) => {
+    const reviewBlocked = isSamSpadeReviewBlocked(review);
+    const actionLabel = review.action === 'solve' ? 'Solve Attempt' : 'Question';
+    const displayedPrompt = `[Sam Spade / case-067 / ${actionLabel}] ${reviewBlocked ? SAM_SPADE_BLOCKED_CONTENT_LABEL : review.sanitizedPrompt}`;
+    setMessages((prev) => [
+      ...prev,
+      { role: 'user', text: displayedPrompt },
+      { role: 'model', text: reviewBlocked ? SAM_SPADE_BLOCKED_CONTENT_LABEL : review.response },
+    ]);
+
+    if (review.responderStatus === 'COMPLETED') {
+      const forwardedPromptHash = await sha256Hex(review.sanitizedPrompt);
+      setLastResponderRun({
+        status: 'completed',
+        timestamp: new Date(review.timestamp).toISOString(),
+        provider: review.responderProvider ?? displayedResponderProvider,
+        modelId: review.responderModel ?? displayedResponderModelId,
+        promptProfile: review.responderPromptProfile,
+        baseUrl: displayedResponderBaseUrl,
+        latencyMs: review.responderLatencyMs,
+        forwardedPromptHash,
+        sanitizedPromptPreview: normalizePromptExcerpt(review.sanitizedPrompt, 240),
+        responsePreview: normalizePromptExcerpt(review.response, 300),
+      });
+    }
+
+    if (!activeGuardrails.sessionAudit || !profile) return;
+
+    const auditEntry: AuditLog = {
+      id: review.requestId,
+      userId: profile.uid,
+      userRole: profile.role,
+      sessionId: review.sessionId,
+      timestamp: new Date(review.timestamp),
+      sanitizedPrompt: review.sanitizedPrompt,
+      detectionFlags: review.detectionFlags,
+      obfuscationSummary: buildObfuscationSummary(review.detectionFlags, review.decodeTelemetry),
+      entropy: review.entropy,
+      globalEntropy: review.globalEntropy,
+      suspiciousChunks: review.suspiciousChunks,
+      escalationRecommended: review.escalationRecommended,
+      detectionLevel: mapSamSpadeDetectionLevel(review.detectionLevel),
+      modelId: review.responderModel ?? 'sam-spade-ctf',
+      source: 'ctf_chat',
+      status: review.status,
+      response: review.response,
+      latencyMs: review.latencyMs,
+      responderPromptProfile: review.responderPromptProfile,
+      responderProvider: review.responderProvider,
+      responderModel: review.responderModel,
+      responderStatus: review.responderStatus,
+      responderLatencyMs: review.responderLatencyMs,
+    };
+
+    if (localReviewMode) {
+      setAuditLogs((prev) => [auditEntry, ...prev]);
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, 'audit_logs'), {
+        userId: auditEntry.userId,
+        userRole: auditEntry.userRole,
+        sessionId: auditEntry.sessionId,
+        timestamp: serverTimestamp(),
+        sanitizedPrompt: auditEntry.sanitizedPrompt,
+        detectionFlags: auditEntry.detectionFlags,
+        obfuscationSummary: auditEntry.obfuscationSummary,
+        entropy: auditEntry.entropy,
+        globalEntropy: auditEntry.globalEntropy,
+        suspiciousChunks: auditEntry.suspiciousChunks,
+        escalationRecommended: auditEntry.escalationRecommended,
+        detectionLevel: auditEntry.detectionLevel,
+        modelId: auditEntry.modelId,
+        source: auditEntry.source,
+        status: auditEntry.status,
+        response: auditEntry.response,
+        latencyMs: auditEntry.latencyMs,
+        responderPromptProfile: auditEntry.responderPromptProfile ?? null,
+        responderProvider: auditEntry.responderProvider ?? null,
+        responderModel: auditEntry.responderModel ?? null,
+        responderStatus: auditEntry.responderStatus ?? null,
+        responderLatencyMs: auditEntry.responderLatencyMs ?? null,
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
+    }
+  };
+
+  // Poll the gateway's CTF review-artifact feed when the Sam Spade UI is the
+  // standalone container. Only artifacts created after the poll starts are
+  // ingested, so stale buffer entries don't flood the audit trail.
+  const ctfReviewPollStateRef = useRef<{ sinceTimestamp: string; seen: Set<string> } | null>(null);
+  useEffect(() => {
+    if (!CTF_FRONTEND_URL || !profile) return;
+    if (!ctfReviewPollStateRef.current) {
+      ctfReviewPollStateRef.current = { sinceTimestamp: new Date().toISOString(), seen: new Set<string>() };
+    }
+    let cancelled = false;
+    const tick = async () => {
+      const state = ctfReviewPollStateRef.current;
+      if (!state) return;
+      try {
+        const artifacts = await getCtfReviewArtifacts({ sinceTimestamp: state.sinceTimestamp, limit: 100 });
+        if (cancelled) return;
+        for (const artifact of artifacts) {
+          if (state.seen.has(artifact.requestId)) continue;
+          state.seen.add(artifact.requestId);
+          if (Date.parse(artifact.timestamp) > Date.parse(state.sinceTimestamp)) {
+            state.sinceTimestamp = artifact.timestamp;
+          }
+          await ingestExternalCtfReviewArtifact(artifact);
+        }
+        if (state.seen.size > 2000) {
+          state.seen = new Set(Array.from(state.seen).slice(-1000));
+        }
+      } catch {
+        // Backend unreachable or no CTF activity — retry on the next tick.
+      }
+    };
+    void tick();
+    const interval = window.setInterval(() => { void tick(); }, CTF_REVIEW_POLL_INTERVAL_MS);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [profile]);
+
   // Lazily create or restore the Sam Spade session the first time the CTF tab is used.
   const ensureSamSpadeSession = async (): Promise<SamSpadeSession> => {
     if (!profile) {
@@ -3280,6 +3416,7 @@ export default function App() {
   }, [profile, localReviewMode]);
 
   useEffect(() => {
+    if (CTF_FRONTEND_URL) return; // CTF runs in its own container; no in-app session.
     if (!profile) return;
     if (activeTab !== 'sam_spade') return;
     if (samSpadeSession || samSpadeStatus !== 'idle') return;
@@ -4677,6 +4814,16 @@ export default function App() {
         <div className={`flex-1 min-h-0 p-6 ${activeTab === 'sam_spade' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
           {/* Sam Spade CTF Tab */}
           {activeTab === 'sam_spade' && (
+            CTF_FRONTEND_URL ? (
+            <div className="h-full overflow-hidden bg-black">
+              <iframe
+                src={CTF_FRONTEND_URL}
+                title="Sam Spade CTF"
+                className="h-full w-full border-0"
+                allow="clipboard-write"
+              />
+            </div>
+            ) : (
             <div className="relative h-full overflow-hidden">
               <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(20,20,20,0)_0%,rgba(0,0,0,0.8)_100%)]" />
               <div className="relative flex h-full flex-col items-center p-4 md:p-8">
@@ -4833,6 +4980,7 @@ export default function App() {
                 </main>
               </div>
             </div>
+            )
           )}
 
           <Dialog

@@ -1,0 +1,27 @@
+{
+  "name": "counter-spy-ctf-frontend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Standalone Sam Spade CTF frontend. Talks to the Counter-Spy gateway, which proxies /v1/ctf/sam-spade/* to the standalone CTF service. Its review artifacts are posted to /v1/ctf/review-artifacts so the main Counter-Spy frontend keeps surfacing CTF activity in Audit/Metrics.",
+  "scripts": {
+    "dev": "vite --port=3001 --host=0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "tsc --noEmit"
+  },
+  "dependencies": {
+    "lucide-react": "^0.546.0",
+    "react": "~19.0.4",
+    "react-dom": "~19.0.4"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.14",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.4",
+    "tailwindcss": "^4.1.14",
+    "typescript": "~5.8.2",
+    "vite": "^8.0.5"
+  }
+}

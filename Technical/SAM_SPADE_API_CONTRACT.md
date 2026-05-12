@@ -230,6 +230,15 @@ Demo topology (`docker-compose.demo.yml`):
 
 `counter-spy-frontend -> counter-spy-backend (gateway) --/v1/ctf/sam-spade/*--> counter-spy-sam-spade-service`
 
-`docker-compose.sam-spade.yml` runs the CTF service on its own (behind the `sam-spade` profile) alongside an externally managed gateway. The HTTP contract above is unchanged across the split, so the only client that changes is the CTF UI itself when it later moves into its own frontend container.
+`docker-compose.sam-spade.yml` runs the CTF service on its own (behind the `sam-spade` profile) alongside an externally managed gateway. The HTTP contract above is unchanged across the split.
 
-**Pending follow-up:** once the CTF UI moves out of the main frontend, the review-artifact "feed" into Counter-Spy (Analyst Chat + `audit_logs` source `ctf_chat`) — today driven by the main frontend's `appendSamSpadeReviewSurfaces()` — moves server-side (a `/v1/ctf/review-artifacts` ingest endpoint writing the audit doc). Until then the main frontend still drives the CTF routes through the gateway proxy and mirrors artifacts as it does today.
+### CTF frontend container + the review-artifact feed
+
+The noir CTF UI also runs as its own container (`ctf-frontend/`, image `Dockerfile.ctf-frontend`). It talks to the **gateway** (`BACKEND_PROXY_TARGET`), which reverse-proxies `/v1/ctf/sam-spade/*` to the CTF service and handles the review-artifact feed itself:
+
+- `POST /v1/ctf/review-artifacts` — body `{ "artifact": <SamSpadeReviewArtifact> }`. The CTF frontend posts each turn's review artifact here (best-effort). The gateway pushes it onto an **in-memory ring buffer** (last 500), emits a `ctf.review_artifact` metric, and logs `ctf_review_artifact`. Returns `202 { "ok": true }`. (Auth: `requireBackendAuth`.)
+- `GET /v1/ctf/review-artifacts?sinceTimestamp=<ISO>&limit=<n>` — returns `{ "artifacts": [ ... ] }` (oldest→newest, optionally filtered to artifacts strictly after `sinceTimestamp`, capped at `limit`).
+
+The main Counter-Spy frontend, when `VITE_CTF_FRONTEND_URL` is set, embeds the CTF app in the Sam Spade tab via an `<iframe>` and **polls** `GET /v1/ctf/review-artifacts` (only artifacts created after the poll starts) — for each new one it mirrors the turn into Analyst Chat and writes an `audit_logs` doc (source `ctf_chat`), exactly the shape the in-app path produced. The buffer is intentionally in-memory and lossy (a UI that wasn't open misses turns that scrolled out); it's a demo bridge, not durable storage. When `VITE_CTF_FRONTEND_URL` is unset, the main frontend renders the in-app CTF UI and drives the CTF routes directly as before.
+
+Demo topology (`docker-compose.demo.yml`): `counter-spy-frontend` (embeds) + `counter-spy-ctf-frontend` (plays) → `counter-spy-backend` (gateway) → `counter-spy-sam-spade-service`, plus `postgres`, `otel-collector`, `jaeger`.

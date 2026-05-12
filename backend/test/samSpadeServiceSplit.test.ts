@@ -115,3 +115,52 @@ test('non-CTF routes on a delegating gateway are unaffected', async () => {
   assert.equal(health.status, 200);
   assert.equal((health.payload as { service?: string }).service, 'counter-spy-backend');
 });
+
+test('review-artifact feed: POST stores, GET returns (with since/limit filtering)', async () => {
+  const auth = { authorization: 'Bearer split-test-token-1234567', 'content-type': 'application/json' };
+  const baseArtifact = {
+    requestId: 'art-1',
+    sessionId: 's1',
+    source: 'ctf_chat' as const,
+    action: 'message' as const,
+    timestamp: '2026-05-12T10:00:00.000Z',
+    sanitizedPrompt: 'What did the witness see?',
+    detectionFlags: [],
+    entropy: 3.1,
+    globalEntropy: 3.0,
+    suspiciousChunks: [],
+    detectionLevel: 'Clean' as const,
+    escalationRecommended: false,
+    response: 'A switch, maybe. Hard to say.',
+    analystReasoning: 'clean',
+    latencyMs: 5,
+    decodeTelemetry: 'plain_text' as const,
+    status: 'REVIEWED' as const,
+  };
+
+  const post1 = await requestApp('/v1/ctf/review-artifacts', { method: 'POST', headers: auth, body: { artifact: baseArtifact } });
+  assert.equal(post1.status, 202);
+  const post2 = await requestApp('/v1/ctf/review-artifacts', {
+    method: 'POST',
+    headers: auth,
+    body: { artifact: { ...baseArtifact, requestId: 'art-2', timestamp: '2026-05-12T11:00:00.000Z', detectionLevel: 'Adversarial', escalationRecommended: true, status: 'PENDING_REVIEW', response: 'Bad content.' } },
+  });
+  assert.equal(post2.status, 202);
+
+  const all = await requestApp('/v1/ctf/review-artifacts', { headers: auth });
+  assert.equal(all.status, 200);
+  const artifacts = (all.payload as { artifacts: Array<{ requestId: string }> }).artifacts;
+  assert.ok(artifacts.some((a) => a.requestId === 'art-1'));
+  assert.ok(artifacts.some((a) => a.requestId === 'art-2'));
+
+  const since = await requestApp('/v1/ctf/review-artifacts?sinceTimestamp=2026-05-12T10:30:00.000Z', { headers: auth });
+  const sinceArtifacts = (since.payload as { artifacts: Array<{ requestId: string }> }).artifacts;
+  assert.ok(sinceArtifacts.every((a) => a.requestId !== 'art-1'));
+  assert.ok(sinceArtifacts.some((a) => a.requestId === 'art-2'));
+
+  const rejected = await requestApp('/v1/ctf/review-artifacts', { method: 'POST', headers: auth, body: { artifact: { requestId: 'bad' } } });
+  assert.equal(rejected.status, 400);
+
+  const unauth = await requestApp('/v1/ctf/review-artifacts', { headers: { 'content-type': 'application/json' } });
+  assert.equal(unauth.status, 401);
+});

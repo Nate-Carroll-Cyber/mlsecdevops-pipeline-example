@@ -108,9 +108,31 @@ services:
       # Frontend uses the backend container by service name through Vite's proxy.
       BACKEND_PROXY_TARGET: "http://counter-spy-backend:8080"
       VITE_BACKEND_BEARER_TOKEN: "${VITE_BACKEND_BEARER_TOKEN:-local-demo-backend-token-123456}"
+      # The Sam Spade tab embeds the standalone CTF frontend; the main app polls
+      # the gateway's review-artifact feed for CTF activity.
+      VITE_CTF_FRONTEND_URL: "http://localhost:3001"
       DISABLE_HMR: "true"
     ports:
       - "3000:3000"
+    depends_on:
+      - counter-spy-backend
+      - counter-spy-ctf-frontend
+    restart: unless-stopped
+
+  # Standalone Sam Spade CTF frontend (noir "Case 067" surface). Talks to the
+  # Counter-Spy gateway (which proxies /v1/ctf/sam-spade/* to the CTF service and
+  # handles /v1/ctf/review-artifacts) and posts each turn's review artifact there.
+  counter-spy-ctf-frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.ctf-frontend
+    container_name: counter-spy-ctf-frontend
+    environment:
+      BACKEND_PROXY_TARGET: "http://counter-spy-backend:8080"
+      VITE_BACKEND_BEARER_TOKEN: "${VITE_BACKEND_BEARER_TOKEN:-local-demo-backend-token-123456}"
+      DISABLE_HMR: "true"
+    ports:
+      - "3001:3001"
     depends_on:
       - counter-spy-backend
     restart: unless-stopped

@@ -32,6 +32,7 @@
   "exclude": [
     "backend/dist",
     "dist",
+    "ctf-frontend",
     "node_modules"
   ]
 }

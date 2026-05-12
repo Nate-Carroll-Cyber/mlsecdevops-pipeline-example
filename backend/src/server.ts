@@ -145,6 +145,12 @@ for (const [label, value] of [
 }
 const recentPromptHashes = new Map<string, number>();
 const RETRY_WINDOW_MS = 5 * 60_000;
+// In-memory ring buffer of recent Sam Spade review artifacts, fed by the
+// standalone CTF frontend via POST /v1/ctf/review-artifacts so the main
+// Counter-Spy frontend can poll GET /v1/ctf/review-artifacts and surface CTF
+// activity in its Audit/Metrics views without the frontends sharing a database.
+const ctfReviewArtifacts: SamSpadeReviewArtifact[] = [];
+const CTF_REVIEW_ARTIFACTS_MAX = 500;
 let instructionMonitorPromise: Promise<PgvectorInstructionMonitor | null> | undefined;
 const DEFAULT_SAM_SPADE_PERSONA_PROMPT = `You are Sam Spade inside the Counter-Spy.ai Sam Spade CTF.
 Stay in character as a guarded noir private detective helping a player solve Case 067 through earned inference.
@@ -1385,6 +1391,31 @@ const SamSpadeSessionMessageSchema = z.object({
   reviewDisposition: z.enum(['clean', 'intercepted', 'queued']),
 });
 
+const SamSpadeReviewArtifactSchema = z.object({
+  requestId: z.string(),
+  sessionId: z.string(),
+  source: z.literal('ctf_chat'),
+  action: z.enum(['message', 'solve']),
+  timestamp: z.string(),
+  sanitizedPrompt: z.string(),
+  detectionFlags: z.array(z.string()),
+  entropy: z.number(),
+  globalEntropy: z.number(),
+  suspiciousChunks: z.array(z.string()),
+  detectionLevel: z.enum(['Clean', 'Informational', 'Suspicious', 'Adversarial']),
+  escalationRecommended: z.boolean(),
+  response: z.string(),
+  analystReasoning: z.string(),
+  latencyMs: z.number(),
+  decodeTelemetry: z.enum(['plain_text', 'single_hop_decode', 'recursive_decode']),
+  status: z.enum(['REVIEWED', 'PENDING_REVIEW']),
+  responderPromptProfile: z.literal('sam_spade_ctf').optional(),
+  responderProvider: z.enum(['openai_compatible', 'gemini']).optional(),
+  responderModel: z.string().optional(),
+  responderStatus: z.string().optional(),
+  responderLatencyMs: z.number().optional(),
+});
+
 const SamSpadeSessionSchema = z.object({
   sessionId: z.string(),
   caseId: z.string(),
@@ -1393,30 +1424,7 @@ const SamSpadeSessionSchema = z.object({
   updatedAt: z.string(),
   solvedAt: z.string().optional(),
   messages: z.array(SamSpadeSessionMessageSchema),
-  lastReview: z.object({
-    requestId: z.string(),
-    sessionId: z.string(),
-    source: z.literal('ctf_chat'),
-    action: z.enum(['message', 'solve']),
-    timestamp: z.string(),
-    sanitizedPrompt: z.string(),
-    detectionFlags: z.array(z.string()),
-    entropy: z.number(),
-    globalEntropy: z.number(),
-    suspiciousChunks: z.array(z.string()),
-    detectionLevel: z.enum(['Clean', 'Informational', 'Suspicious', 'Adversarial']),
-    escalationRecommended: z.boolean(),
-    response: z.string(),
-    analystReasoning: z.string(),
-    latencyMs: z.number(),
-    decodeTelemetry: z.enum(['plain_text', 'single_hop_decode', 'recursive_decode']),
-    status: z.enum(['REVIEWED', 'PENDING_REVIEW']),
-    responderPromptProfile: z.literal('sam_spade_ctf').optional(),
-    responderProvider: z.enum(['openai_compatible', 'gemini']).optional(),
-    responderModel: z.string().optional(),
-    responderStatus: z.string().optional(),
-    responderLatencyMs: z.number().optional(),
-  }).optional(),
+  lastReview: SamSpadeReviewArtifactSchema.optional(),
 });
 
 const SamSpadeCreateSessionRequestSchema = z.object({
@@ -2375,6 +2383,57 @@ app.post('/v1/ctf/sam-spade/solve', requireBackendAuth, (req: AuthenticatedReque
     const status = /access denied/i.test(message) ? 403 : /not found/i.test(message) ? 404 : 500;
     res.status(status).json({ error: message });
   }
+});
+
+// Sam Spade review-artifact feed.
+// The standalone CTF frontend POSTs each turn's review artifact here so the main
+// Counter-Spy frontend (which no longer drives the CTF API) can poll for them and
+// mirror CTF activity into its Audit/Metrics surfaces. Buffer is in-memory only.
+const CtfReviewArtifactIngestSchema = z.object({ artifact: SamSpadeReviewArtifactSchema }).strict();
+const CtfReviewArtifactListQuerySchema = z.object({
+  sinceTimestamp: z.string().min(1).max(64).optional(),
+  limit: z.coerce.number().int().min(1).max(CTF_REVIEW_ARTIFACTS_MAX).optional(),
+}).partial();
+
+app.post('/v1/ctf/review-artifacts', requireBackendAuth, (req: AuthenticatedRequest, res: Response<{ ok: true } | { error: string }>) => {
+  const parsed = CtfReviewArtifactIngestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid review artifact payload.' });
+    return;
+  }
+  const artifact = parsed.data.artifact;
+  ctfReviewArtifacts.push(artifact);
+  if (ctfReviewArtifacts.length > CTF_REVIEW_ARTIFACTS_MAX) {
+    ctfReviewArtifacts.splice(0, ctfReviewArtifacts.length - CTF_REVIEW_ARTIFACTS_MAX);
+  }
+  emitMetricIncrement('ctf.review_artifact', { action: artifact.action, detectionLevel: artifact.detectionLevel, escalated: artifact.escalationRecommended });
+  log('info', 'ctf_review_artifact', {
+    requestId: res.locals.requestId,
+    artifactRequestId: artifact.requestId,
+    sessionId: artifact.sessionId,
+    action: artifact.action,
+    detectionLevel: artifact.detectionLevel,
+    escalationRecommended: artifact.escalationRecommended,
+    detectionFlags: artifact.detectionFlags,
+  });
+  res.status(202).json({ ok: true });
+});
+
+app.get('/v1/ctf/review-artifacts', requireBackendAuth, (req: AuthenticatedRequest, res: Response<{ artifacts: SamSpadeReviewArtifact[] } | { error: string }>) => {
+  const parsed = CtfReviewArtifactListQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid review artifact query.' });
+    return;
+  }
+  const sinceMs = parsed.data.sinceTimestamp ? Date.parse(parsed.data.sinceTimestamp) : undefined;
+  let artifacts = ctfReviewArtifacts;
+  if (sinceMs !== undefined && Number.isFinite(sinceMs)) {
+    artifacts = artifacts.filter((artifact) => Date.parse(artifact.timestamp) > sinceMs);
+  }
+  if (parsed.data.limit !== undefined) {
+    artifacts = artifacts.slice(-parsed.data.limit);
+  }
+  res.status(200).json({ artifacts });
 });
 
 app.use((_req: Request, res: Response) => {

@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { Pool, type PoolClient, type PoolConfig } from 'pg';
 import pgvector from 'pgvector/pg';
@@ -21,6 +21,9 @@ type MonitorOptions = {
   hammingThreshold?: number;
   chunkQueryConcurrency?: number;
   poolConfig?: Omit<PoolConfig, 'connectionString'>;
+  // When set, exported seed snapshots are HMAC-signed and imports require a valid
+  // signature (so seed-file tampering is detectable, not just accidental corruption).
+  seedHmacKey?: string;
 };
 
 type CandidatePartial = {
@@ -82,6 +85,9 @@ const SeedSnapshotSchema = z.object({
   embeddingDimensions: z.number().int().positive(),
   records: z.array(SeedRecordSchema),
   seedSnapshotHash: z.string().regex(/^[a-f0-9]{64}$/),
+  // Optional HMAC-SHA256 of seedSnapshotHash; required on import when the monitor
+  // is configured with a seed HMAC key.
+  seedSnapshotSignature: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 });
 
 export type InstructionSeedImportResult = {
@@ -110,6 +116,7 @@ export class PgvectorInstructionMonitor {
   private readonly similarityThreshold: number;
   private readonly hammingThreshold: number;
   private readonly chunkQueryConcurrency: number;
+  private readonly seedHmacKey?: string;
 
   constructor(options: MonitorOptions) {
     this.embeddingDimensions = options.embeddingDimensions ?? 768;
@@ -117,6 +124,7 @@ export class PgvectorInstructionMonitor {
     this.similarityThreshold = options.similarityThreshold ?? 0.78;
     this.hammingThreshold = options.hammingThreshold ?? 12;
     this.chunkQueryConcurrency = options.chunkQueryConcurrency ?? 4;
+    this.seedHmacKey = options.seedHmacKey?.trim() || undefined;
     this.pool = new Pool({
       max: 10,
       connectionTimeoutMillis: 5_000,
@@ -231,6 +239,15 @@ export class PgvectorInstructionMonitor {
     const snapshotHash = hashSeedSnapshot(snapshot);
     if (snapshotHash !== snapshot.seedSnapshotHash) {
       throw new Error(`Seed snapshot hash mismatch. Expected ${snapshot.seedSnapshotHash}, calculated ${snapshotHash}.`);
+    }
+    if (this.seedHmacKey) {
+      if (!snapshot.seedSnapshotSignature) {
+        throw new Error('Seed snapshot is unsigned but INSTRUCTION_MONITOR_SEED_HMAC_KEY is configured; refusing to import.');
+      }
+      const expectedSignature = signSeedSnapshotHash(snapshotHash, this.seedHmacKey);
+      if (!hmacSignaturesMatch(expectedSignature, snapshot.seedSnapshotSignature)) {
+        throw new Error('Seed snapshot HMAC signature mismatch; the seed file may have been tampered with.');
+      }
     }
 
     for (const record of snapshot.records) {
@@ -490,9 +507,11 @@ export class PgvectorInstructionMonitor {
       records,
     };
 
+    const seedSnapshotHash = hashSeedSnapshot(snapshotWithoutHash);
     return {
       ...snapshotWithoutHash,
-      seedSnapshotHash: hashSeedSnapshot(snapshotWithoutHash),
+      seedSnapshotHash,
+      ...(this.seedHmacKey ? { seedSnapshotSignature: signSeedSnapshotHash(seedSnapshotHash, this.seedHmacKey) } : {}),
     };
   }
 
@@ -951,6 +970,21 @@ function hashSeedRecord(record: Omit<z.infer<typeof SeedRecordSchema>, 'seedReco
     source: record.source,
     verdict: record.verdict,
   });
+}
+
+// HMAC-SHA256 of the seed snapshot's content hash. Signing the hash is enough —
+// the hash already covers every record's seedRecordHash and the snapshot metadata.
+function signSeedSnapshotHash(snapshotHash: string, key: string): string {
+  return createHmac('sha256', key).update(snapshotHash).digest('hex');
+}
+
+function hmacSignaturesMatch(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  try {
+    return timingSafeEqual(Buffer.from(a, 'utf8'), Buffer.from(b, 'utf8'));
+  } catch {
+    return false;
+  }
 }
 
 function hashSeedSnapshot(snapshot: Omit<z.infer<typeof SeedSnapshotSchema>, 'seedSnapshotHash'>): string {

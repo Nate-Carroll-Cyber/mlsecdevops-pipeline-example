@@ -17,6 +17,10 @@ mkdirSync(dirname(SAM_SPADE_STORE_PATH), { recursive: true });
 
 // Open the DB and make sure the single session table exists.
 const db = new DatabaseSync(SAM_SPADE_STORE_PATH);
+// WAL + a busy timeout keep concurrent access (e.g. the gateway and the
+// standalone service, or several test processes) from hitting SQLITE_BUSY.
+try { db.exec('PRAGMA journal_mode = WAL'); } catch { /* fall back to the default journal */ }
+db.exec('PRAGMA busy_timeout = 5000');
 db.exec(`
   CREATE TABLE IF NOT EXISTS sam_spade_sessions (
     session_id TEXT PRIMARY KEY,

@@ -18,12 +18,14 @@ Status legend: ✅ fixed in this branch · 🟡 partially mitigated · ⏭️ de
 | 4 | Medium | `firestore.rules` | Admin role hardcodes a personal email address in deployed rules. | ✅ |
 | 5 | Medium | `src/lib/syntacticAnalyzer.ts`, `src/lib/sanitizer.ts`, `backend/src/security/sanitizer.ts` | Per-request `new RegExp(...)` compilation in the hot path (keyword loops). | ✅ (syntactic analyzer) / 🟡 (sanitizer keyword loops left as-is — `String.includes`, no regex) |
 | 6 | Medium | `backend/src/services/sam-spade/store.ts` | `JSON.parse(row.payload)` with no try/catch and no schema validation — a corrupt/tampered SQLite row crashes the request. | ✅ |
-| 7 | Low | `backend/src/server.ts` | No caching of safeguard verdicts — identical prompts re-hit the safeguard LLM each time. | ⏭️ |
-| 8 | Low | `src/**` | ~38 `console.*` sites; a few echo Firebase/auth config on error. | ⏭️ (backend logging is replaced by OpenTelemetry in Phase 1) |
-| 9 | Low | `backend/src/services/instruction-monitor/` | The pgvector seed snapshot is content-hashed but not signed — write access to the seed file could poison the corpus. | ⏭️ |
-| O1 | Opt | `src/lib/obfuscation.ts` | ~21 `OBFUSCATION_TECHNIQUES` transforms are Playground-only but ship in the main bundle. | ✅ (lazy `import()`) |
+| 7 | Low | `backend/src/server.ts` | No caching of safeguard verdicts — identical prompts re-hit the safeguard LLM each time. | ✅ (opt-in `SAFEGUARD_CACHE_TTL_MS`, off by default) |
+| 8 | Low | `src/**` | ~38 `console.*` sites; a few echo Firebase/auth config on error. | 🟡 (`firebase.ts` config-parse no longer echoes config; the rest is debug noise and the backend's is replaced by OpenTelemetry) |
+| 9 | Low | `backend/src/services/instruction-monitor/` | The pgvector seed snapshot is content-hashed but not signed — write access to the seed file could poison the corpus. | ✅ (opt-in `INSTRUCTION_MONITOR_SEED_HMAC_KEY` — exports are HMAC-signed, imports require a valid signature when the key is set) |
+| 10 | Low | `ctf-frontend/` | The standalone CTF app can be `<iframe>`-embedded by any origin (clickjacking surface). | ✅ (dev server sets `Content-Security-Policy: frame-ancestors`, configurable via `CTF_ALLOWED_FRAME_ANCESTORS`; production behind the CFN-set CSP) |
+| O1 | Opt | `src/lib/obfuscation.ts` | ~21 `OBFUSCATION_TECHNIQUES` transforms are Playground-only but ship in the main bundle. | ✅ (`React.lazy` code-split) |
 | O2 | Opt | `backend/src/security/sanitizer.ts` | `analyzeSlidingWindowEntropy()` recomputes Shannon entropy per window (O(n·w)); a rolling-counts pass would be O(n). | ⏭️ (no behavior change desired without profiling) |
-| O3 | Opt | `backend/src/services/sam-spade/store.ts` | Synchronous SQLite (`node:sqlite` `DatabaseSync`) on the request path. | ⏭️ (acceptable at current scale; blast radius shrinks once the CTF service is its own process — Phase 2) |
+| O3 | Opt | `backend/src/services/sam-spade/store.ts` | Synchronous SQLite (`node:sqlite` `DatabaseSync`) on the request path. | 🟡 (still synchronous, but now opened WAL + `busy_timeout=5000` so concurrent access — gateway/service/test processes — no longer hits `SQLITE_BUSY`; an async/pooled driver is still a future option) |
+| O4 | Opt | `src/main.tsx`, `ctf-frontend/` | No browser-side tracing — frontend `/v1/*` calls aren't correlated with backend spans. | ✅ (opt-in `VITE_OTEL_EXPORTER_OTLP_ENDPOINT` — `@opentelemetry/sdk-trace-web` + fetch instrumentation with W3C propagation; loaded dynamically so it's a no-op when unset) |
 
 The cardinal rule ("nothing reaches the responder without first passing the sanitizer") **is** enforced on the inbound path — `backend/src/server.ts` always calls `sanitizePrompt()` before `generateSafeguardVerdict()` / `generateResponderOutput()` (`/v1/intercept` ~line 1681, `/v1/ctf/sam-spade/message` ~line 1969), and `src/lib/gemini.ts` is a static stub so the browser never calls a model directly. Finding #1 is the *outbound* counterpart of that rule.
 
@@ -86,13 +88,21 @@ A misconfigured/compromised env (or, for the key, a crafted request) can point t
 
 ---
 
-## Low severity / follow-ups
+## Follow-ups — implemented
 
-- **#7 — Safeguard verdict cache.** `recentPromptHashes` already tracks `{promptHash → firstSeenMs}` for retry detection (`backend/src/server.ts` ~line 832). An opt-in LRU of `{promptHash → {verdict, reasoning}}` with a short TTL (e.g. `SAFEGUARD_CACHE_TTL_MS`, default `0` = off) would cut redundant LLM calls without ever masking a tuning change (key the cache on `hash(sanitized + JSON(tuning) + effectiveSystemPrompt)`). Deferred — wants its own design + tests.
-- **#8 — Frontend `console.*`.** Mostly debug noise; a few (`src/lib/firebase.ts` config-load errors) print config. Low risk in a SOC-operator tool. Backend `console.log(JSON.stringify(...))` is superseded by the OpenTelemetry logs pipeline in Phase 1.
-- **#9 — Sign the instruction-monitor seed.** `seedRecordHash` / `seedSnapshotHash` are SHA-256 content hashes, not signatures. HMAC the snapshot with a server secret (`INSTRUCTION_MONITOR_SEED_HMAC_KEY`) and verify on load to make seed-file tampering detectable.
-- **O2 — Rolling entropy.** `analyzeSlidingWindowEntropy(prompt, 35, 5, ...)` recomputes a 35-char histogram every 5 chars. A single left-to-right pass maintaining add/remove counts is O(n). Not changed here — any rewrite must reproduce the exact `maxEntropy` / `globalEntropy` / `suspiciousChunks` outputs, which the test suite pins, so it deserves its own PR with before/after numbers.
-- **O3 — Async SQLite.** `node:sqlite` `DatabaseSync` blocks the event loop per query. Fine at demo scale; once the CTF service is its own container (Phase 2) the impact is isolated to that process. Revisit (`better-sqlite3` worker / connection pool / Postgres) if CTF traffic grows.
+- **#7 — Safeguard verdict cache (done).** `backend/src/server.ts` now has an opt-in cache keyed on `sha256(modelId + system prompt + constructed judge input)` — so a tuning/prompt change is a cache miss and a per-request safeguard API key override is never cached. `SAFEGUARD_CACHE_TTL_MS` (default `0` = off) and `SAFEGUARD_CACHE_MAX_ENTRIES` (default `256`, FIFO eviction). Emits `safeguard.cache` `{hit}` metrics when enabled. Covered by `backend/test/safeguardCache.test.ts`.
+- **#9 — Sign the instruction-monitor seed (done).** `backend/src/services/instruction-monitor/service.ts` now signs exported seed snapshots with `HMAC-SHA256(INSTRUCTION_MONITOR_SEED_HMAC_KEY, seedSnapshotHash)` (`seedSnapshotSignature` field), and `importSeedSnapshot` requires a valid signature whenever that key is configured (timing-safe compare; an unsigned snapshot is rejected). With the key unset, behavior is unchanged (signature ignored — backward compatible).
+- **#10 — CTF iframe clickjacking guard (done).** `ctf-frontend/vite.config.ts` adds a dev-server middleware that sets `Content-Security-Policy: frame-ancestors <list>` (+ `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`); `CTF_ALLOWED_FRAME_ANCESTORS` is configurable (default `'self' http://localhost:3000 http://127.0.0.1:3000`). For a static (CFN/CloudFront) deployment the CSP comes from the edge headers, as it already does for the main frontend.
+- **#8 — Frontend logging (partial).** `src/lib/firebase.ts` now `safeParse`s `firebase-applet-config.json` and throws a generic error naming only the bad keys (never echoing config values). The remaining `console.*` in `src/App.tsx` are debug noise; the backend's structured `console.log(JSON.stringify(...))` is the always-on fallback under the OpenTelemetry logs pipeline.
+- **O3 — SQLite concurrency (partial).** The Sam Spade store is still synchronous, but the DB is now opened with `PRAGMA journal_mode = WAL` + `PRAGMA busy_timeout = 5000`, so concurrent access (e.g. multiple test processes, or a gateway and the standalone service) no longer hits `SQLITE_BUSY`. An async/pooled driver remains a future option if CTF traffic grows.
+- **O4 — Browser-side OpenTelemetry (done).** `src/lib/webTelemetry.ts` and `ctf-frontend/src/lib/webTelemetry.ts` register `@opentelemetry/sdk-trace-web` + `FetchInstrumentation` (W3C `traceparent` propagation to `/v1/*`) when `VITE_OTEL_EXPORTER_OTLP_ENDPOINT` is set; the OTel web SDK is loaded via dynamic `import()` so it's a no-op with the env var unset. The demo collector's OTLP/HTTP receiver has a CORS allow-list for the two frontend origins.
+
+## Follow-ups — still deferred
+
+- **#8 (remaining) — `src/App.tsx` `console.*`.** ~38 sites, mostly debug; consider a `devLog()` no-op-in-prod helper as a later cleanup.
+- **O2 — Rolling entropy.** `analyzeSlidingWindowEntropy(prompt, 35, 5, ...)` recomputes a 35-char histogram every 5 chars; a single left-to-right add/remove pass is O(n). Not changed — any rewrite must reproduce the exact `maxEntropy` / `globalEntropy` / `suspiciousChunks` outputs, which the test suite pins, so it deserves its own PR with before/after numbers.
+- **CTF review-artifact buffer** is in-memory and lossy (a main-app tab that wasn't open misses turns that scrolled out of the 500-entry ring); a durable store / Firestore-direct-write from the CTF app would be the production version.
+- **Async OpenTelemetry chunking.** The browser OTel SDK currently lands in the eager `vendor` chunk under the repo's rolldown code-splitting config rather than a lazy chunk — a future tweak to the `vite.config.ts` codeSplitting groups could move it.
 
 ---
 
@@ -110,10 +120,10 @@ A misconfigured/compromised env (or, for the key, a crafted request) can point t
 
 ## Verification
 
-- `npm run lint` (frontend + backend tsc) and `npm test` (`backend/test/*.test.ts` + `src/lib/*.test.ts`) pass on this branch; `backend/test/phase0Hardening.test.ts` adds 13 cases covering findings #1, #2, #3, #6.
-- Manual: `POST /v1/intercept` with a benign prompt → `200 CLEAN`; with a redaction/jailbreak prompt → `403 INTERCEPTED`; flooding past `RATE_LIMIT_MAX` (default 120/min) → `429 Retry-After`; setting `RESPONDER_API_BASE_URL=http://169.254.169.254/...` (or any RFC1918 host) with `APP_ENV=prod` → backend refuses at startup.
+- `npm run lint` (frontend + backend tsc), `npm test` (`backend/test/*.test.ts` + `src/lib/*.test.ts`, 153 cases — `phase0Hardening.test.ts`, `safeguardCache.test.ts`, `samSpadeServiceSplit.test.ts` added), `npm run build`, and the `ctf-frontend` build all pass on this branch; both compose files validate.
+- Manual: `POST /v1/intercept` with a benign prompt → `200 CLEAN`; with a redaction/jailbreak prompt → `403 INTERCEPTED`; flooding past `RATE_LIMIT_MAX` (default 120/min) → `429 Retry-After`; setting `RESPONDER_API_BASE_URL=http://169.254.169.254/...` (or any RFC1918 host) with `APP_ENV=prod` → backend refuses at startup; with `SAFEGUARD_CACHE_TTL_MS>0`, the second identical `/v1/intercept` doesn't hit the safeguard LLM; with `INSTRUCTION_MONITOR_SEED_HMAC_KEY` set, importing a hand-edited seed file fails the signature check.
 
 ## Operational notes for deployers
 
 - `firestore.rules`: grant admin via a `admin: true` custom claim (backend / Cognito group sync), a `/config/admins/{uid}` doc, or a `users/{uid}.role == 'admin'` profile. The custom claim is the bootstrap path (no rule change needed for `/config/admins` — it's covered by the existing `config/{document=**}` rule).
-- New backend env vars: `RATE_LIMIT_WINDOW_MS` (default `60000`), `RATE_LIMIT_MAX` (default `120`, `0` = disabled), `EGRESS_ALLOWLIST` (comma-separated `host`/`host:port` to permit private targets outside dev), `RESPONDER_OUTPUT_SHIELD_ENABLED` (default `true`). See `.env.example`.
+- New backend env vars: `RATE_LIMIT_WINDOW_MS` (default `60000`), `RATE_LIMIT_MAX` (default `120`, `0` = disabled), `EGRESS_ALLOWLIST` (comma-separated `host`/`host:port` to permit private targets outside dev), `RESPONDER_OUTPUT_SHIELD_ENABLED` (default `true`), `SAFEGUARD_CACHE_TTL_MS` / `SAFEGUARD_CACHE_MAX_ENTRIES` (cache off by default), `INSTRUCTION_MONITOR_SEED_HMAC_KEY` (seed signing; unset = unsigned/backward-compatible). Frontend: `VITE_OTEL_EXPORTER_OTLP_ENDPOINT` (browser tracing; unset = off), `CTF_ALLOWED_FRAME_ANCESTORS` (CTF iframe embedders). `infra/cloudformation/dev/04-backend.yml` exposes `OtelExporterOtlpEndpoint`, `RateLimitMax`, and `EgressAllowlist` parameters on the ECS task. See `.env.example`.

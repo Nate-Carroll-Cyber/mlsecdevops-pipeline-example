@@ -41,6 +41,11 @@
 | `@opentelemetry/exporter-logs-otlp-http` | `^0.217.0` | OTLP/HTTP log exporter |
 | `@opentelemetry/resources` | `^2.7.1` | OpenTelemetry `Resource` (service.name/version/environment) |
 | `@opentelemetry/semantic-conventions` | `^1.41.1` | Semantic attribute keys |
+| `@opentelemetry/sdk-trace-web` | `^2.7.1` | Browser-side OpenTelemetry tracer (`src/lib/webTelemetry.ts`; loaded dynamically only when `VITE_OTEL_EXPORTER_OTLP_ENDPOINT` is set) |
+| `@opentelemetry/instrumentation-fetch` | `^0.217.0` | Browser `fetch` auto-instrumentation with W3C trace-context propagation |
+| `@opentelemetry/context-zone` | `^2.7.1` | Optional zone-based context manager for the browser tracer (installed; the default web context manager is used) |
+
+> The standalone `ctf-frontend/` app has its own `package.json` / lockfile pinning a subset of the above (`react`, `react-dom`, `lucide-react`, `tailwindcss`/`@tailwindcss/vite`, `vite`, `@vitejs/plugin-react`, `typescript`, and `@opentelemetry/{api,sdk-trace-web,instrumentation-fetch,context-zone,exporter-trace-otlp-http,resources,semantic-conventions}`) at the same versions.
 
 ### Runtime Container Packages
 

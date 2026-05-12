@@ -22,6 +22,7 @@ const monitor = new PgvectorInstructionMonitor({
   similarityThreshold: instructionMonitorConfig.INSTRUCTION_MONITOR_SIMILARITY_THRESHOLD,
   hammingThreshold: instructionMonitorConfig.INSTRUCTION_MONITOR_HAMMING_THRESHOLD,
   chunkQueryConcurrency: instructionMonitorConfig.INSTRUCTION_MONITOR_CHUNK_QUERY_CONCURRENCY,
+  ...(instructionMonitorConfig.INSTRUCTION_MONITOR_SEED_HMAC_KEY ? { seedHmacKey: instructionMonitorConfig.INSTRUCTION_MONITOR_SEED_HMAC_KEY } : {}),
 });
 
 try {

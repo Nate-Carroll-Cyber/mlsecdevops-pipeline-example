@@ -19,7 +19,14 @@ const FirebaseConfigSchema = z.object({
   firestoreDatabaseId: z.string().optional(),
 });
 
-const parsedFirebaseConfig = FirebaseConfigSchema.parse(firebaseConfig);
+// Parse without echoing the (potentially sensitive) config values on failure —
+// just report which keys were missing/invalid.
+const parsedFirebaseConfigResult = FirebaseConfigSchema.safeParse(firebaseConfig);
+if (!parsedFirebaseConfigResult.success) {
+  const badKeys = parsedFirebaseConfigResult.error.issues.map((issue) => issue.path.join('.')).join(', ');
+  throw new Error(`Invalid firebase-applet-config.json (check: ${badKeys || 'schema'}).`);
+}
+const parsedFirebaseConfig = parsedFirebaseConfigResult.data;
 
 // Initialize the Firebase app with the provided configuration
 const app = initializeApp(parsedFirebaseConfig);

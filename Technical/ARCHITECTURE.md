@@ -128,7 +128,12 @@ The governance state is persisted in Firestore (`config/governance`).
 *   **Request overrides:** The per-request `metadata.safeguardApiKey` credential override on `/v1/intercept` is honored only when `APP_ENV=dev`; outside dev it is dropped and logged.
 
 ### 4.5 Persisted Session Integrity
-*   **Logic:** The Sam Spade SQLite session store (`backend/src/services/sam-spade/store.ts`) deserializes untrusted bytes off disk. Every read JSON-parses inside a `try/catch` and validates the result against `SamSpadeSessionRecordSchema` (Zod); a malformed/tampered row is logged (`sam_spade_session_payload_invalid`) and treated as "session not found" rather than crashing the request handler.
+*   **Logic:** The Sam Spade SQLite session store (`backend/src/services/sam-spade/store.ts`) deserializes untrusted bytes off disk. Every read JSON-parses inside a `try/catch` and validates the result against `SamSpadeSessionRecordSchema` (Zod); a malformed/tampered row is logged (`sam_spade_session_payload_invalid`) and treated as "session not found" rather than crashing the request handler. The DB is opened `journal_mode=WAL` with `busy_timeout=5000` so concurrent access doesn't hit `SQLITE_BUSY`.
+
+### 4.6 Opt-in Hardening
+*   **Safeguard verdict cache** — `SAFEGUARD_CACHE_TTL_MS` (default `0` = off) caches safeguard LLM verdicts keyed on `sha256(modelId + system prompt + constructed judge input)`, so any tuning/prompt change is a cache miss; a per-request safeguard API key override is never cached. `SAFEGUARD_CACHE_MAX_ENTRIES` (default `256`) bounds it (FIFO eviction). Emits `counterspy.safeguard.cache` `{hit}` when enabled.
+*   **Instruction-monitor seed signing** — `INSTRUCTION_MONITOR_SEED_HMAC_KEY` (unset = off): exported pgvector seed snapshots get `seedSnapshotSignature = HMAC-SHA256(key, seedSnapshotHash)`, and `importSeedSnapshot` requires a valid signature whenever the key is configured (timing-safe; an unsigned snapshot is rejected). The existing `seedSnapshotHash`/`seedRecordHash` content hashes still guard against accidental corruption.
+*   **CTF iframe embedding** — the standalone CTF frontend's dev server sets `Content-Security-Policy: frame-ancestors <list>` (`CTF_ALLOWED_FRAME_ANCESTORS`, default `'self' http://localhost:3000`) so only the main Counter-Spy app may embed it. A static (CloudFront) deployment supplies the same CSP via edge headers.
 
 ---
 
@@ -273,7 +278,8 @@ The backend is instrumented with the OpenTelemetry SDK (`backend/src/telemetry.t
     *   **Logs** — the `log()` helper emits through the OpenTelemetry Logs API **and** keeps the structured stdout JSON (CloudWatch-friendly). The active `trace_id`/`span_id` are stamped onto the stdout record so logs and traces correlate.
 *   **Export:** Everything is OTLP/HTTP, driven by the standard `OTEL_*` environment variables (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`, `OTEL_TRACES_SAMPLER`/`OTEL_TRACES_SAMPLER_ARG`, ...). `docker-compose.demo.yml` points the backend at a bundled `otel-collector` (`otel/collector-config.yaml`) that fans out to its stdout, Prometheus (`:8889/metrics`), and Jaeger (`:16686`).
 *   **No-op by default:** The SDK only starts when an OTLP endpoint/exporter is configured. With nothing set — or with `OTEL_SDK_DISABLED=true` — the OpenTelemetry API resolves to no-op providers and the only sink is the structured stdout JSON, so `npm run backend:dev` and the test suite stay quiet.
-*   **Production:** For the ECS task definition, set the same `OTEL_*` env vars (point them at an OTLP endpoint / the AWS Distro for OpenTelemetry sidecar). Browser-side OpenTelemetry for the frontends is a planned follow-up.
+*   **Browser:** Both frontends optionally run `@opentelemetry/sdk-trace-web` + `FetchInstrumentation` (`src/lib/webTelemetry.ts`, `ctf-frontend/src/lib/webTelemetry.ts`) when `VITE_OTEL_EXPORTER_OTLP_ENDPOINT` is set — `/v1/*` fetches become spans carrying a W3C `traceparent` header, which the backend's auto-instrumentation continues, so a CTF/intercept request shows up as one trace across browser → gateway → CTF service / safeguard / responder. The web SDK is loaded via dynamic `import()`, so it's a no-op with the env var unset. The demo collector's OTLP/HTTP receiver has a CORS allow-list for the frontend origins; `docker-compose.demo.yml` sets `VITE_OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`.
+*   **Production:** For the ECS task definition, set the same `OTEL_*` env vars — `infra/cloudformation/dev/04-backend.yml` exposes an `OtelExporterOtlpEndpoint` parameter (point it at an OTLP endpoint / the AWS Distro for OpenTelemetry sidecar at `http://localhost:4318`); blank leaves the SDK off (stdout JSON only, which CloudWatch ingests).
 
 ---
 

@@ -12,6 +12,9 @@ const InstructionMonitorEnvSchema = z.object({
   INSTRUCTION_MONITOR_SIMILARITY_THRESHOLD: z.coerce.number().min(0).max(1).default(0.78),
   INSTRUCTION_MONITOR_HAMMING_THRESHOLD: z.coerce.number().int().min(0).max(64).default(12),
   INSTRUCTION_MONITOR_CHUNK_QUERY_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
+  // When set, exported pgvector seed snapshots are HMAC-signed and imports require
+  // a valid signature (detects seed-file tampering, not just accidental corruption).
+  INSTRUCTION_MONITOR_SEED_HMAC_KEY: z.string().min(16).optional(),
 });
 
 export const instructionMonitorConfig = InstructionMonitorEnvSchema.parse(process.env);

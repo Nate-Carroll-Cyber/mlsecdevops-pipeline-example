@@ -2,10 +2,14 @@
 import {StrictMode} from 'react';
 // Import createRoot from react-dom/client to create a root to display React components inside a browser DOM node
 import {createRoot} from 'react-dom/client';
+// Optional browser-side OpenTelemetry (no-op unless VITE_OTEL_EXPORTER_OTLP_ENDPOINT is set).
+import {startWebTelemetry} from './lib/webTelemetry.ts';
 // Import the main App component
 import App from './App.tsx';
 // Import the global CSS file containing Tailwind directives and custom styles
 import './index.css';
+
+void startWebTelemetry('counter-spy-frontend');
 
 // Create a React root for the element with the ID 'root' and render the application
 createRoot(document.getElementById('root')!).render(

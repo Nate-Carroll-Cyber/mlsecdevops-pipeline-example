@@ -72,6 +72,11 @@ const EnvSchema = z.object({
     .string()
     .optional()
     .transform((value) => (value === undefined ? true : value.toLowerCase() !== 'false')),
+  // Opt-in safeguard-verdict cache. 0 = disabled (default). Keyed by the exact
+  // (modelId + system prompt + constructed judge input), so a tuning/prompt
+  // change is a cache miss; a per-request safeguard API key override is never cached.
+  SAFEGUARD_CACHE_TTL_MS: z.coerce.number().int().min(0).max(86_400_000).default(0),
+  SAFEGUARD_CACHE_MAX_ENTRIES: z.coerce.number().int().min(1).max(100_000).default(256),
   LARA_ACCESS_KEY_ID: z.string().optional(),
   LARA_ACCESS_KEY_SECRET: z.string().optional(),
   LARA_API_BASE_URL: z.string().url().optional(),
@@ -145,6 +150,19 @@ for (const [label, value] of [
 }
 const recentPromptHashes = new Map<string, number>();
 const RETRY_WINDOW_MS = 5 * 60_000;
+// Opt-in safeguard-verdict cache (see SAFEGUARD_CACHE_TTL_MS). Map insertion
+// order gives us a cheap FIFO eviction once we exceed SAFEGUARD_CACHE_MAX_ENTRIES.
+interface CachedSafeguardVerdict {
+  modelId: string;
+  verdict: FirewallVerdict;
+  analystReasoning: string;
+  responseShape: SafeguardResponseShape;
+  gatewayStatus?: 'QUEUED';
+  rawReasoningTrace?: string;
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+  expiresAt: number;
+}
+const safeguardVerdictCache = new Map<string, CachedSafeguardVerdict>();
 // In-memory ring buffer of recent Sam Spade review artifacts, fed by the
 // standalone CTF frontend via POST /v1/ctf/review-artifacts so the main
 // Counter-Spy frontend can poll GET /v1/ctf/review-artifacts and surface CTF
@@ -430,6 +448,29 @@ Deterministic preprocessing evidence. This is not a verdict:
 - Global entropy: ${riskEvidence.globalEntropy.toFixed(3)}
 - Syntactic score: ${riskEvidence.syntacticScore.toFixed(1)}`;
 
+  // Optional verdict cache: key on the exact (model + system prompt + judge input)
+  // so any tuning/prompt change is a miss. Never used when a per-request safeguard
+  // API key override is present (dev-only path), so the cache only holds env-key results.
+  const cacheEnabled = env.SAFEGUARD_CACHE_TTL_MS > 0 && !runtimeConfig?.apiKey?.trim();
+  const cacheKey = cacheEnabled ? createHash('sha256').update(`${modelId}\n${instructions}\n${input}`).digest('hex') : '';
+  if (cacheEnabled) {
+    const cached = safeguardVerdictCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      emitMetricIncrement('safeguard.cache', { hit: true });
+      return {
+        modelId: cached.modelId,
+        verdict: cached.verdict,
+        analystReasoning: cached.analystReasoning,
+        latencyMs: 0,
+        responseShape: cached.responseShape,
+        ...(cached.usage ? { usage: cached.usage } : {}),
+        ...(cached.gatewayStatus ? { gatewayStatus: cached.gatewayStatus } : {}),
+        ...(cached.rawReasoningTrace ? { rawReasoningTrace: cached.rawReasoningTrace } : {}),
+      };
+    }
+    if (cached) safeguardVerdictCache.delete(cacheKey);
+  }
+
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), safeguardsTimeoutMs);
   let response: globalThis.Response;
@@ -499,7 +540,7 @@ Deterministic preprocessing evidence. This is not a verdict:
   const verdictPayload = parseSafeguardJudgePayload(text);
   const rawReasoningTrace = payload.choices?.[0]?.message?.reasoning;
   const usage = extractOpenAiCompatibleUsage(payload);
-  return {
+  const result = {
     modelId,
     verdict: verdictPayload.verdict,
     analystReasoning: verdictPayload.analystReasoning,
@@ -509,6 +550,31 @@ Deterministic preprocessing evidence. This is not a verdict:
     ...(verdictPayload.gatewayStatus ? { gatewayStatus: verdictPayload.gatewayStatus } : {}),
     ...(typeof rawReasoningTrace === 'string' && rawReasoningTrace.trim() ? { rawReasoningTrace } : {}),
   };
+
+  if (cacheEnabled) {
+    emitMetricIncrement('safeguard.cache', { hit: false });
+    const now = Date.now();
+    safeguardVerdictCache.set(cacheKey, {
+      modelId: result.modelId,
+      verdict: result.verdict,
+      analystReasoning: result.analystReasoning,
+      responseShape: result.responseShape,
+      ...(result.usage ? { usage: result.usage } : {}),
+      ...(result.gatewayStatus ? { gatewayStatus: result.gatewayStatus } : {}),
+      ...(typeof rawReasoningTrace === 'string' && rawReasoningTrace.trim() ? { rawReasoningTrace } : {}),
+      expiresAt: now + env.SAFEGUARD_CACHE_TTL_MS,
+    });
+    for (const [key, entry] of safeguardVerdictCache) {
+      if (entry.expiresAt <= now) safeguardVerdictCache.delete(key);
+    }
+    while (safeguardVerdictCache.size > env.SAFEGUARD_CACHE_MAX_ENTRIES) {
+      const oldestKey = safeguardVerdictCache.keys().next().value;
+      if (oldestKey === undefined) break;
+      safeguardVerdictCache.delete(oldestKey);
+    }
+  }
+
+  return result;
 }
 
 function inferResponderProvider(provider?: string, baseUrl?: string): ResponderProvider {
@@ -615,6 +681,7 @@ async function getInstructionMonitor(): Promise<PgvectorInstructionMonitor | nul
         similarityThreshold: instructionMonitorConfig.INSTRUCTION_MONITOR_SIMILARITY_THRESHOLD,
         hammingThreshold: instructionMonitorConfig.INSTRUCTION_MONITOR_HAMMING_THRESHOLD,
         chunkQueryConcurrency: instructionMonitorConfig.INSTRUCTION_MONITOR_CHUNK_QUERY_CONCURRENCY,
+        ...(instructionMonitorConfig.INSTRUCTION_MONITOR_SEED_HMAC_KEY ? { seedHmacKey: instructionMonitorConfig.INSTRUCTION_MONITOR_SEED_HMAC_KEY } : {}),
       });
       await monitor.initialize();
       log('info', 'instruction_monitor_initialized', {

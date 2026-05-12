@@ -33,6 +33,22 @@ Parameters:
   ResponderModelId:
     Type: String
     Default: amazon.nova-micro-v1:0
+  OtelExporterOtlpEndpoint:
+    Type: String
+    Default: ""
+    Description: >-
+      OTLP/HTTP endpoint for OpenTelemetry export (e.g. a colocated AWS Distro for
+      OpenTelemetry sidecar at http://localhost:4318, or a managed OTLP collector).
+      Leave blank to disable the OpenTelemetry SDK (the backend still emits
+      structured stdout JSON, which CloudWatch ingests).
+  RateLimitMax:
+    Type: Number
+    Default: 120
+    Description: Per-caller (bearer token / IP) requests per RATE_LIMIT_WINDOW_MS; 0 disables.
+  EgressAllowlist:
+    Type: String
+    Default: ""
+    Description: Comma-separated host[:port] entries permitted past the SSRF egress guard (for private-network safeguard/responder endpoints).
 
 Resources:
   Repository:
@@ -174,6 +190,23 @@ Resources:
               Value: !Ref SafeguardsModelId
             - Name: RESPONDER_MODEL_ID
               Value: !Ref ResponderModelId
+            - Name: RATE_LIMIT_MAX
+              Value: !Sub "${RateLimitMax}"
+            - Name: EGRESS_ALLOWLIST
+              Value: !Ref EgressAllowlist
+            # OpenTelemetry. When OtelExporterOtlpEndpoint is blank the SDK stays
+            # off (stdout JSON only, ingested by CloudWatch); set it to a colocated
+            # ADOT sidecar (http://localhost:4318) or a managed OTLP collector.
+            - Name: OTEL_SERVICE_NAME
+              Value: !Sub "counter-spy-backend-${Environment}"
+            - Name: OTEL_EXPORTER_OTLP_ENDPOINT
+              Value: !Ref OtelExporterOtlpEndpoint
+            - Name: OTEL_EXPORTER_OTLP_PROTOCOL
+              Value: "http/json"
+            - Name: OTEL_TRACES_SAMPLER
+              Value: "parentbased_traceidratio"
+            - Name: OTEL_TRACES_SAMPLER_ARG
+              Value: "1.0"
           LogConfiguration:
             LogDriver: awslogs
             Options:

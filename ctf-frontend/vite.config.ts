@@ -36,5 +36,21 @@ export default defineConfig(() => {
         '/healthz': { target: backendProxyTarget, changeOrigin: true },
       },
     },
+    build: {
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              // OpenTelemetry web SDK is only imported dynamically by
+              // src/lib/webTelemetry.ts — isolate it so it isn't fetched unless
+              // VITE_OTEL_EXPORTER_OTLP_ENDPOINT is set.
+              { name: 'otel-vendor', test: /node_modules[\\/]@opentelemetry[\\/]/, priority: 30 },
+              { name: 'react-vendor', test: /node_modules[\\/](react|react-dom)[\\/]/, priority: 20 },
+              { name: 'vendor', test: /node_modules[\\/]/, priority: 10 },
+            ],
+          },
+        },
+      },
+    },
   };
 });

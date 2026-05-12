@@ -52,18 +52,14 @@ import { sanitizeInput, sanitizeOutput, SanitizationResult, DetectionLevel, SUSP
 import { generateSecurityAdvice, ChatMessage } from './lib/gemini';
 import {
   checkBackendHealth,
-  createSamSpadeSession,
   getCtfReviewArtifacts,
   interceptPrompt,
   lookupInstructionMonitorRecord,
   observeReviewedAdversarialInstruction,
-  sendSamSpadeMessage,
-  solveSamSpadeCase,
   type BackendInterceptResponse,
   type BackendHealthResponse,
   type InstructionMonitorRecord,
   type SamSpadeReviewArtifact,
-  type SamSpadeSession,
 } from './lib/backendApi';
 import {
   clearPlaygroundMetrics,
@@ -73,6 +69,7 @@ import {
   type PromptFeatureVector,
 } from './lib/playgroundMetrics';
 import { buildPromptFeatureVector } from './lib/promptFeatureVector';
+import { devLog, devWarn } from './lib/devLog';
 // Import default security policies
 import { MCP_AGENT_SAFETY_POLICY_TITLE, POLICIES, extractMcpA2AHardBlockPhrases, type Policy } from './lib/policies';
 import { ATLAS_TACTIC_VALUES, ATLAS_TECHNIQUE_ID_VALUES, LOCAL_ARCHETYPES, type AtlasTaxonomyFields } from './lib/atlasTaxonomy';
@@ -137,7 +134,6 @@ import {
   ArrowDown,
   Download,
   Database
-  ,Unlock
 } from 'lucide-react';
 // Import toast notification components
 import { Toaster, toast } from 'sonner';
@@ -1850,12 +1846,6 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // State for the current input in the chat box
   const [input, setInput] = useState('');
-  const [samSpadeInput, setSamSpadeInput] = useState('');
-  const [samSpadeTheory, setSamSpadeTheory] = useState('');
-  const [samSpadeSession, setSamSpadeSession] = useState<SamSpadeSession | null>(null);
-  const [samSpadeStatus, setSamSpadeStatus] = useState<'idle' | 'connecting' | 'ready' | 'sending' | 'error'>('idle');
-  const [samSpadeInputAlert, setSamSpadeInputAlert] = useState(false);
-  const [samSpadeUnapprovedNotice, setSamSpadeUnapprovedNotice] = useState<{ prompt: string } | null>(null);
   const [safeguardRuntimeConfig, setSafeguardRuntimeConfig] = useState<SafeguardRuntimeConfig>(() => loadSafeguardRuntimeConfig());
   const [safeguardApiKey, setSafeguardApiKey] = useState('');
   const [responderTelemetryConfig, setResponderTelemetryConfig] = useState<ResponderTelemetryConfig>(() => loadResponderTelemetryConfig());
@@ -1969,8 +1959,6 @@ export default function App() {
   // Ref for the chat scroll area to auto-scroll to the bottom
   const scrollRef = useRef<HTMLDivElement>(null);
   const analystTranscriptEndRef = useRef<HTMLDivElement>(null);
-  const samSpadeSessionPromiseRef = useRef<Promise<SamSpadeSession> | null>(null);
-  const samSpadeTranscriptEndRef = useRef<HTMLDivElement>(null);
   const effectiveSafeguardPolicies = customPolicies.length > 0 ? customPolicies : POLICIES;
   const effectiveSafeguardPromptPreview = useMemo(() => buildCanonicalSafeguardPromptForHash({
     systemConfig,
@@ -2061,8 +2049,6 @@ export default function App() {
   const allGuardrailsDisabled = guardrailStates.every((enabled) => !enabled);
   const governanceReduced = !allGuardrailsDisabled && guardrailStates.some((enabled) => !enabled);
   const configDrifted = recommendedConfigHash !== '' && currentConfigHash !== '' && recommendedConfigHash !== currentConfigHash;
-  const samSpadeCaseSolved = samSpadeSession?.status === 'SOLVED';
-  const visibleSamSpadeMessages = (samSpadeSession?.messages ?? []).filter((message) => message.reviewDisposition === 'clean');
   const canViewKnowledgeBase = profile?.role === 'admin';
 
   const handleProviderLlmRoutingChange = (checked: boolean) => {
@@ -2086,7 +2072,7 @@ export default function App() {
     setGovernanceConfig(nextGovernanceConfig);
 
     if (localReviewMode) {
-      console.warn('Global System Pause activated in local review mode.', reason);
+      devWarn('Global System Pause activated in local review mode.', reason);
       return;
     }
 
@@ -2345,7 +2331,7 @@ export default function App() {
     if (wakeLockNavigator.wakeLock) {
       try {
         wakeLock = await wakeLockNavigator.wakeLock.request('screen');
-        console.log("System will stay awake for ingest...");
+        devLog('System will stay awake for ingest...');
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown wake lock failure';
         console.error(`Wake lock request failed: ${message}`);
@@ -2434,7 +2420,7 @@ export default function App() {
     
     // Release the wake lock when finished
     if (wakeLock) {
-      wakeLock.release().then(() => console.log("Wake Lock released."));
+      wakeLock.release().then(() => devLog('Wake Lock released.'));
     }
 
     // Reset processing state
@@ -2501,21 +2487,6 @@ export default function App() {
         resultantSeverity,
         status: 'REVIEWED'
       } : log));
-      if (targetLog?.source === 'ctf_chat') {
-        setSamSpadeSession((prev) => {
-          if (!prev || prev.lastReview?.requestId !== logId) return prev;
-          return {
-            ...prev,
-            status: prev.status === 'INTERCEPTED' ? 'ACTIVE' : prev.status,
-            lastReview: {
-              ...prev.lastReview,
-              status: 'REVIEWED',
-              escalationRecommended: resultantSeverity === 'Suspicious' || resultantSeverity === 'Adversarial',
-              detectionLevel: resultantSeverity,
-            },
-          };
-        });
-      }
       await observeReviewedAdversarialLog(targetLog, logId, resultantSeverity);
       toast.success(`Log marked as reviewed (${resultantSeverity})`);
       return;
@@ -2533,21 +2504,6 @@ export default function App() {
         resultantSeverity,
         status: 'REVIEWED'
       } : log));
-      if (targetLog?.source === 'ctf_chat') {
-        setSamSpadeSession((prev) => {
-          if (!prev || prev.lastReview?.requestId !== logId) return prev;
-          return {
-            ...prev,
-            status: prev.status === 'INTERCEPTED' ? 'ACTIVE' : prev.status,
-            lastReview: {
-              ...prev.lastReview,
-              status: 'REVIEWED',
-              escalationRecommended: resultantSeverity === 'Suspicious' || resultantSeverity === 'Adversarial',
-              detectionLevel: resultantSeverity,
-            },
-          };
-        });
-      }
       await observeReviewedAdversarialLog(targetLog, logId, resultantSeverity);
       toast.success(`Log marked as reviewed (${resultantSeverity})`);
     } catch (error) {
@@ -2756,10 +2712,6 @@ export default function App() {
     setAuditLogs([]);
     setEphemeralAuditLogs([]);
     setInput('');
-    setSamSpadeInput('');
-    setSamSpadeTheory('');
-	    setSamSpadeSession(null);
-	    setSamSpadeStatus('idle');
 	    setLatency(null);
 	    setSanitizationPreview(null);
 	    setLastBackendSafeguardOutcome(null);
@@ -2782,103 +2734,6 @@ export default function App() {
     review.status === 'PENDING_REVIEW' ||
     review.escalationRecommended ||
     mapSamSpadeDetectionLevel(review.detectionLevel) >= DetectionLevel.SUSPICIOUS;
-
-  // Sam Spade submissions are governed by the backend CTF route, then mirrored into
-  // Analyst Chat and Audit Logs without re-running responder inference.
-  const appendSamSpadeReviewSurfaces = async (
-    review: SamSpadeReviewArtifact,
-    session: SamSpadeSession,
-  ) => {
-    const reviewBlocked = isSamSpadeReviewBlocked(review);
-    const latestPlayerPrompt = reviewBlocked
-      ? SAM_SPADE_BLOCKED_CONTENT_LABEL
-      : session.messages.filter((message) => message.role === 'player').at(-1)?.text ?? review.sanitizedPrompt;
-    const actionLabel = review.action === 'solve' ? 'Solve Attempt' : 'Question';
-    const displayedPrompt = `[Sam Spade / ${session.caseId} / ${actionLabel}] ${latestPlayerPrompt}`;
-    setMessages((prev) => [
-      ...prev,
-      { role: 'user', text: displayedPrompt },
-      { role: 'model', text: reviewBlocked ? SAM_SPADE_BLOCKED_CONTENT_LABEL : review.response },
-    ]);
-
-    if (review.responderStatus === 'COMPLETED') {
-      const forwardedPromptHash = await sha256Hex(review.sanitizedPrompt);
-      setLastResponderRun({
-        status: 'completed',
-        timestamp: new Date(review.timestamp).toISOString(),
-        provider: review.responderProvider ?? displayedResponderProvider,
-        modelId: review.responderModel ?? displayedResponderModelId,
-        promptProfile: review.responderPromptProfile,
-        baseUrl: displayedResponderBaseUrl,
-        latencyMs: review.responderLatencyMs,
-        forwardedPromptHash,
-        sanitizedPromptPreview: normalizePromptExcerpt(review.sanitizedPrompt, 240),
-        responsePreview: normalizePromptExcerpt(review.response, 300),
-      });
-    }
-
-    if (!activeGuardrails.sessionAudit || !profile) return;
-
-    const auditEntry: AuditLog = {
-      id: review.requestId,
-      userId: profile.uid,
-      userRole: profile.role,
-      sessionId: review.sessionId,
-      timestamp: new Date(review.timestamp),
-      sanitizedPrompt: review.sanitizedPrompt,
-      detectionFlags: review.detectionFlags,
-      obfuscationSummary: buildObfuscationSummary(review.detectionFlags, review.decodeTelemetry),
-      entropy: review.entropy,
-      globalEntropy: review.globalEntropy,
-      suspiciousChunks: review.suspiciousChunks,
-      escalationRecommended: review.escalationRecommended,
-      detectionLevel: mapSamSpadeDetectionLevel(review.detectionLevel),
-      modelId: review.responderModel ?? 'sam-spade-ctf',
-      source: 'ctf_chat',
-      status: review.status,
-      response: review.response,
-      latencyMs: review.latencyMs,
-      responderPromptProfile: review.responderPromptProfile,
-      responderProvider: review.responderProvider,
-      responderModel: review.responderModel,
-      responderStatus: review.responderStatus,
-      responderLatencyMs: review.responderLatencyMs,
-    };
-
-    if (localReviewMode) {
-      setAuditLogs((prev) => [auditEntry, ...prev]);
-      return;
-    }
-
-    try {
-      await addDoc(collection(db, 'audit_logs'), {
-        userId: auditEntry.userId,
-        userRole: auditEntry.userRole,
-        sessionId: auditEntry.sessionId,
-        timestamp: serverTimestamp(),
-        sanitizedPrompt: auditEntry.sanitizedPrompt,
-        detectionFlags: auditEntry.detectionFlags,
-        obfuscationSummary: auditEntry.obfuscationSummary,
-        entropy: auditEntry.entropy,
-        globalEntropy: auditEntry.globalEntropy,
-        suspiciousChunks: auditEntry.suspiciousChunks,
-        escalationRecommended: auditEntry.escalationRecommended,
-        detectionLevel: auditEntry.detectionLevel,
-        modelId: auditEntry.modelId,
-        source: auditEntry.source,
-        status: auditEntry.status,
-        response: auditEntry.response,
-        latencyMs: auditEntry.latencyMs,
-        responderPromptProfile: auditEntry.responderPromptProfile ?? null,
-        responderProvider: auditEntry.responderProvider ?? null,
-        responderModel: auditEntry.responderModel ?? null,
-        responderStatus: auditEntry.responderStatus ?? null,
-        responderLatencyMs: auditEntry.responderLatencyMs ?? null,
-      });
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
-    }
-  };
 
   // When the Sam Spade UI runs in its own container, the main app no longer drives
   // the CTF API directly — instead it polls the gateway's review-artifact feed and
@@ -3010,52 +2865,12 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile]);
 
-  // Lazily create or restore the Sam Spade session the first time the CTF tab is used.
-  const ensureSamSpadeSession = async (): Promise<SamSpadeSession> => {
-    if (!profile) {
-      throw new Error('Sign in before starting Sam Spade.');
-    }
-    if (samSpadeSession) {
-      return samSpadeSession;
-    }
-
-    if (samSpadeSessionPromiseRef.current) {
-      return samSpadeSessionPromiseRef.current;
-    }
-
-    setSamSpadeStatus('connecting');
-    const sessionPromise = createSamSpadeSession({ caseId: 'case-067', callerUserId: profile.uid })
-      .then((session) => {
-        setSamSpadeSession(session);
-        setSamSpadeStatus('ready');
-        return session;
-      })
-      .catch((error) => {
-        setSamSpadeStatus('error');
-        throw error;
-      })
-      .finally(() => {
-        samSpadeSessionPromiseRef.current = null;
-      });
-
-    samSpadeSessionPromiseRef.current = sessionPromise;
-    return sessionPromise;
-  };
-
   const deleteAllAuditLogs = async (): Promise<number> => {
     if (localReviewMode) {
       const retainedLogs = auditLogs.filter((log) => log.status === 'PENDING_REVIEW');
       const removedCount = auditLogs.length - retainedLogs.length;
       setAuditLogs(retainedLogs);
       setEphemeralAuditLogs((prev) => prev.filter((log) => log.status === 'PENDING_REVIEW'));
-      if (!retainedLogs.some((log) => log.source === 'ctf_chat')) {
-        setSamSpadeSession(null);
-        setSamSpadeInput('');
-        setSamSpadeTheory('');
-        setSamSpadeInputAlert(false);
-        setSamSpadeUnapprovedNotice(null);
-        setSamSpadeStatus('idle');
-      }
       return removedCount;
     }
 
@@ -3415,27 +3230,6 @@ export default function App() {
     return unsubscribe;
   }, [profile, localReviewMode]);
 
-  useEffect(() => {
-    if (CTF_FRONTEND_URL) return; // CTF runs in its own container; no in-app session.
-    if (!profile) return;
-    if (activeTab !== 'sam_spade') return;
-    if (samSpadeSession || samSpadeStatus !== 'idle') return;
-
-    let cancelled = false;
-
-    void ensureSamSpadeSession()
-      .catch((error) => {
-        if (!cancelled) {
-          console.error(error);
-          setSamSpadeStatus('error');
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [activeTab, profile, samSpadeSession, samSpadeStatus]);
-
   // Effect hook to listen for real-time updates to the knowledge base policies
   useEffect(() => {
     if (!profile) return;
@@ -3562,11 +3356,6 @@ export default function App() {
     if (activeTab !== 'chat') return;
     analystTranscriptEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
   }, [activeTab, messages, isProcessing]);
-
-  useEffect(() => {
-    if (activeTab !== 'sam_spade') return;
-    samSpadeTranscriptEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  }, [activeTab, visibleSamSpadeMessages]);
 
   // Function to handle changes in the chat input field
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
@@ -3960,7 +3749,7 @@ export default function App() {
           }
           return patch;
         } catch (error) {
-          console.warn('Backend instruction monitor observation failed.', error);
+          devWarn('Backend instruction monitor observation failed.', error);
           return null;
         }
       };
@@ -4178,7 +3967,7 @@ export default function App() {
 		              : await generateSecurityAdvice(sanitization.sanitized, messages, "", finalSystemPrompt);
 		          }
         } catch (backendError) {
-          console.warn('Backend intercept unavailable.', backendError);
+          devWarn('Backend intercept unavailable.', backendError);
           const backendMessage = backendError instanceof Error ? backendError.message : 'Backend inference is unavailable for this session.';
           if (options?.source === 'bulk_ingest') {
             bulkBackendErrorRef.current = backendMessage;
@@ -4427,150 +4216,6 @@ export default function App() {
     }
   };
 
-  // Sam Spade question flow is now separate from Analyst Chat transport, but it still
-  // feeds reviewed artifacts into the same downstream audit/review surfaces.
-  const handleSamSpadeSubmit = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!samSpadeInput.trim() || samSpadeStatus === 'sending') return;
-
-    const submittedPrompt = samSpadeInput;
-    let optimisticPlayerMessageId: string | null = null;
-    setSamSpadeStatus('sending');
-
-    try {
-      const session = await ensureSamSpadeSession();
-      const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
-      const { blockedKeywords, forbiddenTopics, regexRules } = buildPolicyOverrides(systemConfig, policies);
-      const downstreamResponderPrompt = buildDownstreamResponderSystemPrompt({
-        prompt: submittedPrompt,
-        systemConfig,
-        policies,
-      });
-      const safeguardSystemPrompt = buildFirewallDecisionSystemPrompt({
-        prompt: submittedPrompt,
-        systemConfig,
-        policies,
-        blockedTopicsActive: activeGuardrails.blockedTopics,
-      });
-      optimisticPlayerMessageId = crypto.randomUUID();
-      setSamSpadeSession((prev) => {
-        const activeSession = prev ?? session;
-        return {
-          ...activeSession,
-          updatedAt: new Date().toISOString(),
-          messages: [
-            ...activeSession.messages,
-            {
-              id: optimisticPlayerMessageId!,
-              role: 'player',
-              text: submittedPrompt,
-              createdAt: new Date().toISOString(),
-              reviewDisposition: 'queued',
-            },
-          ],
-        };
-      });
-
-      const result = await sendSamSpadeMessage({
-        sessionId: session.sessionId,
-        prompt: submittedPrompt,
-        callerUserId: session.ownerUserId,
-		        metadata: {
-			          providerLlmRoutingEnabled: true,
-		            responderLlmRoutingEnabled: effectiveResponderLlmRoutingEnabled,
-		            safeguardEffectivePrompt: effectiveSafeguardPromptPreview,
-		        },
-        tuning: {
-          entropyThreshold: governanceConfig.entropyThreshold,
-          syntacticThreshold: governanceConfig.syntacticThreshold,
-          blockedKeywords,
-          forbiddenTopics,
-          regexRules,
-        },
-      });
-      setSamSpadeSession(result.session);
-      if (result.review.status === 'PENDING_REVIEW' || result.review.escalationRecommended) {
-        setSamSpadeInput('');
-        setSamSpadeInputAlert(true);
-        setSamSpadeUnapprovedNotice({
-          prompt: SAM_SPADE_BLOCKED_CONTENT_LABEL,
-        });
-        toast.error('Unapproved content detected');
-      } else {
-        setSamSpadeInput('');
-        setSamSpadeInputAlert(false);
-        setSamSpadeUnapprovedNotice(null);
-        toast.success('Sam Spade answered');
-      }
-      void appendSamSpadeReviewSurfaces(result.review, result.session);
-    } catch (error) {
-      console.error(error);
-      setSamSpadeStatus('error');
-      setSamSpadeInput(submittedPrompt);
-      setSamSpadeSession((prev) => {
-        if (!prev) return prev;
-        return {
-          ...prev,
-          updatedAt: new Date().toISOString(),
-          messages: [
-            ...prev.messages.filter((message) => message.id !== optimisticPlayerMessageId),
-            {
-              id: crypto.randomUUID(),
-              role: 'system',
-              text: error instanceof Error ? error.message : 'Sam Spade intake failed.',
-              createdAt: new Date().toISOString(),
-              reviewDisposition: 'queued',
-            },
-          ],
-        };
-      });
-      toast.error(error instanceof Error ? error.message : 'Sam Spade intake failed.');
-    } finally {
-      setSamSpadeStatus('ready');
-    }
-  };
-
-  // Solve attempts use the dedicated Sam Spade API and generate their own review artifact
-  // so theory submissions show up in the same governed trail as question turns.
-  const handleSamSpadeSolve = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!samSpadeTheory.trim() || samSpadeStatus === 'sending') return;
-
-    try {
-      const session = await ensureSamSpadeSession();
-      const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
-      const { blockedKeywords, forbiddenTopics, regexRules } = buildPolicyOverrides(systemConfig, policies);
-      setSamSpadeStatus('sending');
-      const result = await solveSamSpadeCase({
-        sessionId: session.sessionId,
-        theory: samSpadeTheory,
-        callerUserId: session.ownerUserId,
-        metadata: {
-          providerLlmRoutingEnabled: true,
-          responderLlmRoutingEnabled: effectiveResponderLlmRoutingEnabled,
-          safeguardEffectivePrompt: effectiveSafeguardPromptPreview,
-        },
-        tuning: {
-          entropyThreshold: governanceConfig.entropyThreshold,
-          syntacticThreshold: governanceConfig.syntacticThreshold,
-          blockedKeywords,
-          forbiddenTopics,
-          regexRules,
-        },
-      });
-      setSamSpadeSession(result.session);
-      setSamSpadeTheory('');
-      void appendSamSpadeReviewSurfaces(result.review, result.session);
-      toast.success(result.solved ? 'Case solved' : 'Theory submitted');
-    } catch (error) {
-      console.error(error);
-      setSamSpadeStatus('error');
-      toast.error(error instanceof Error ? error.message : 'Case solve request failed.');
-    } finally {
-      setSamSpadeStatus('ready');
-    }
-  };
-
   // --- Render Helpers ---
 
   // Render a loading screen while initializing
@@ -4814,207 +4459,25 @@ export default function App() {
         <div className={`flex-1 min-h-0 p-6 ${activeTab === 'sam_spade' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
           {/* Sam Spade CTF Tab */}
           {activeTab === 'sam_spade' && (
-            CTF_FRONTEND_URL ? (
             <div className="h-full overflow-hidden bg-black">
-              <iframe
-                src={CTF_FRONTEND_URL}
-                title="Sam Spade CTF"
-                className="h-full w-full border-0"
-                allow="clipboard-write"
-              />
-            </div>
-            ) : (
-            <div className="relative h-full overflow-hidden">
-              <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_50%_50%,rgba(20,20,20,0)_0%,rgba(0,0,0,0.8)_100%)]" />
-              <div className="relative flex h-full flex-col items-center p-4 md:p-8">
-                <header className="z-10 mb-8 flex w-full max-w-4xl items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    {samSpadeCaseSolved ? (
-                      <Unlock className="h-5 w-5 text-green-500" />
-                    ) : (
-                      <Lock className="h-5 w-5 text-amber-400" />
-                    )}
-                    <span className={`font-mono text-xs uppercase tracking-[0.22em] ${samSpadeCaseSolved ? 'text-green-400' : 'text-amber-300'}`}>
-                      {samSpadeCaseSolved ? 'Case Solved' : 'Case Pending'}
-                    </span>
-                  </div>
-                  <h2 className="text-center font-serif text-3xl uppercase tracking-[0.22em] text-[#f5f2ed] md:text-4xl">
-                    Sam Spade, P.I.
-                  </h2>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="font-mono text-[11px] uppercase tracking-[0.18em] text-slate-500 hover:text-slate-300"
-                    onClick={() => setActiveTab('chat')}
-                  >
-                    Analyst Chat
-                  </Button>
-                </header>
-
-                <main className={`z-10 flex w-full max-w-4xl flex-1 min-h-0 flex-col gap-8 overflow-hidden rounded-lg border bg-[#0a0a0a]/80 p-4 shadow-2xl backdrop-blur-sm md:flex-row md:p-6 ${samSpadeCaseSolved ? 'border-green-500/40' : 'border-amber-500/30'}`}>
-                  <aside className="flex w-full min-h-0 flex-col space-y-4 overflow-y-auto pr-2 md:w-1/3">
-                    <div className="relative aspect-[3/4] w-full overflow-hidden rounded grayscale contrast-125 sepia-[.2]">
-                      <img
-                        src="/sam-spade-ctf-logo.png"
-                        alt="Sam Spade noir office portrait"
-                        className="absolute inset-0 h-full w-full object-cover object-[62%_center]"
-                      />
-                      <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(60,60,60,0.18),rgba(8,8,8,0.88)),radial-gradient(circle_at_50%_20%,rgba(180,180,180,0.2),transparent_35%)]" />
-                      <div className="absolute inset-0 shadow-[inset_0_0_100px_rgba(0,0,0,0.9)]" />
-                    </div>
-
-                    <div className="border-t border-slate-800 pt-4 text-sm text-slate-500">
-                      <h3 className="mb-2 font-serif text-xl text-slate-300">The Objective</h3>
-                      <div className="mb-4 space-y-1 leading-5">
-                        <p>You are a journalist meeting a private detective. Your goal is to elicit hidden information about his recent case.</p>
-                        <p>Good luck...</p>
-                      </div>
-                      <div className="space-y-1">
-                        <p className="italic text-slate-400">Rules of Engagement:</p>
-                        <ul className="list-disc space-y-1 pl-4 text-xs italic opacity-80">
-                          <li>Direct questions usually fail.</li>
-                          <li>Emotional intelligence and inference are rewarded.</li>
-                          <li>Advance by reconstructing motive, risk, and contradiction.</li>
-                          <li>The final secret must feel earned.</li>
-                        </ul>
-                      </div>
-                    </div>
-
-                    <div className="mt-auto rounded border border-slate-800 bg-black/40 p-4">
-                      <h3 className="mb-2 font-serif text-sm uppercase tracking-[0.22em] text-slate-300">Submit Solution</h3>
-                      <form onSubmit={handleSamSpadeSolve} className="flex flex-col space-y-3">
-                        <Input
-                          value={samSpadeTheory}
-                          onChange={(e) => setSamSpadeTheory(e.target.value)}
-                          placeholder="What's the scoop?"
-                          className="w-full rounded-none border-0 border-b border-slate-700 bg-transparent px-2 py-2 text-sm text-slate-200 placeholder:text-slate-600 focus-visible:ring-0"
-                          disabled={samSpadeStatus === 'sending'}
-                        />
-                        <Button type="submit" disabled={!samSpadeTheory.trim() || samSpadeStatus === 'sending'} className="w-full rounded-none border border-slate-700 bg-transparent font-mono text-xs uppercase tracking-[0.2em] text-slate-400 hover:bg-transparent">
-                          Solve the Case
-                        </Button>
-                      </form>
-                    </div>
-                  </aside>
-
-                  <section className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                    <div className="mb-4 border-b border-slate-800 pb-4">
-                      <p className="font-serif text-2xl uppercase tracking-[0.22em] text-[#f5f2ed] md:text-3xl">Case 067</p>
-                      <p className="mt-2 font-mono text-xs uppercase tracking-[0.22em] text-slate-500">
-                        A film noir capture the flag experience
-                      </p>
-                    </div>
-
-                    <ScrollArea className="flex-1 min-h-0 pr-2">
-                      <div className="space-y-6">
-                        {visibleSamSpadeMessages.map((message) => (
-                          <div key={message.id} className={`flex ${message.role === 'player' ? 'justify-end' : 'justify-start'}`}>
-                            <div className={`max-w-[85%] rounded-2xl border p-5 ${
-                              message.role === 'player'
-                                ? 'border-amber-500/20 bg-amber-500/5'
-                                : message.role === 'system'
-                                  ? 'border-red-500/20 bg-red-500/5'
-                                  : 'border-slate-800 bg-slate-900/40'
-                            }`}>
-                              <div className="mb-3 flex items-center gap-2">
-                                <Search className="h-3.5 w-3.5 text-slate-300" />
-                                <span className="font-mono text-xs font-semibold uppercase tracking-[0.22em] text-slate-500">
-                                  {message.role === 'player' ? 'Journalist' : message.role === 'system' ? 'Counter-Spy Review' : 'Sam Spade'}
-                                </span>
-                              </div>
-                              <p className="text-sm leading-7 text-slate-200">
-                                {message.text}
-                              </p>
-                            </div>
-                          </div>
-                        ))}
-
-                        {visibleSamSpadeMessages.length === 0 && (
-                          <div className="flex justify-center py-10 text-center opacity-55">
-                            <div className="space-y-3">
-                              <p className="font-mono text-xs uppercase tracking-[0.22em] text-slate-500">
-                                Interrogation Interface
-                              </p>
-                              <p className="text-sm text-slate-400">
-                                Questions route into the Sam Spade API first, then into Counter-Spy review surfaces.
-                              </p>
-                            </div>
-                          </div>
-                        )}
-                        <div ref={samSpadeTranscriptEndRef} />
-                      </div>
-                    </ScrollArea>
-
-                    <div className="mt-4 border-t border-slate-800 pt-4">
-                      <form onSubmit={handleSamSpadeSubmit} className="space-y-2">
-                        <div className="flex items-end gap-3">
-                          <Input
-                            value={samSpadeInput}
-                            onChange={(e) => {
-                              setSamSpadeInput(e.target.value);
-                              if (samSpadeInputAlert) setSamSpadeInputAlert(false);
-                            }}
-                            placeholder="Try your angle, sweetheart..."
-                            className={`h-12 rounded-xl text-sm placeholder:text-slate-600 ${samSpadeInputAlert ? 'border-red-500 bg-red-950/20 text-red-100 focus-visible:ring-red-500/40' : 'border-slate-800 bg-slate-900/40'}`}
-                            disabled={samSpadeStatus === 'sending'}
-                          />
-                          <Button type="submit" disabled={samSpadeStatus === 'sending' || !samSpadeInput.trim()} className="h-12 rounded-xl px-8 font-medium">
-                            Ask a Question
-                          </Button>
-                        </div>
-                        <p className="text-xs text-slate-500">
-                          Prompts from this case file are sent to the dedicated Sam Spade API first, then mirrored into Analyst Chat and Audit Logs under a dedicated CTF source.
-                        </p>
-                        {samSpadeInputAlert && (
-                          <Alert className="border-red-500/40 bg-red-950/30 text-red-100">
-                            <ShieldAlert className="h-4 w-4 text-red-300" />
-                            <AlertTitle className="text-red-200">Unapproved Content Detected</AlertTitle>
-                            <AlertDescription className="text-red-100/90">
-                              This question was intercepted before it could be approved for gameplay. Revise the prompt and try again.
-                            </AlertDescription>
-                          </Alert>
-                        )}
-                      </form>
-                    </div>
-                  </section>
-                </main>
-              </div>
-            </div>
-            )
-          )}
-
-          <Dialog
-            open={Boolean(samSpadeUnapprovedNotice)}
-            onOpenChange={(open) => {
-              if (!open) setSamSpadeUnapprovedNotice(null);
-            }}
-          >
-            <DialogContent className="border-red-500/30 bg-[#120909] text-slate-100 sm:max-w-md">
-              <DialogHeader>
-                <DialogTitle className="flex items-center gap-2 text-red-300">
-                  <ShieldAlert className="h-5 w-5" />
-                  Unapproved Content Detected
-                </DialogTitle>
-                <DialogDescription className="text-slate-400">
-                  Counter-Spy intercepted this Sam Spade question before it could be approved for gameplay.
-                </DialogDescription>
-              </DialogHeader>
-              <div className="space-y-3">
-                <div className="rounded-lg border border-red-500/20 bg-black/30 p-3">
-                  <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.2em] text-red-300">Submitted Prompt</p>
-                  <p className="text-sm text-slate-200">{samSpadeUnapprovedNotice?.prompt}</p>
+              {CTF_FRONTEND_URL ? (
+                <iframe
+                  src={CTF_FRONTEND_URL}
+                  title="Sam Spade CTF"
+                  className="h-full w-full border-0"
+                  allow="clipboard-write"
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center p-8 text-center text-sm text-slate-400">
+                  <p className="max-w-md leading-6">
+                    The Sam Spade CTF runs as its own container. Set <code className="font-mono text-slate-300">VITE_CTF_FRONTEND_URL</code> to embed it here
+                    (the demo stack points it at <code className="font-mono text-slate-300">http://localhost:3001</code>), or open the CTF app directly.
+                    Its review artifacts still flow into the Audit and Metrics tabs.
+                  </p>
                 </div>
-              </div>
-              <DialogFooter>
-                <Button
-                  onClick={() => setSamSpadeUnapprovedNotice(null)}
-                  className="bg-red-600 text-white hover:bg-red-500"
-                >
-                  Revise Prompt
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+              )}
+            </div>
+          )}
 
           <Dialog open={isEditingRuntimeApiConfig} onOpenChange={setIsEditingRuntimeApiConfig}>
             <DialogContent className="sm:max-w-[560px]">

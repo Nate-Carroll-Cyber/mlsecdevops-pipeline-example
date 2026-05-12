@@ -47,6 +47,8 @@ counter-spy.ai/
 │   │   ├── anomalyDetector.ts            # Statistical engine (Z-Score, rolling baselines)
 │   │   ├── firebase.ts                   # Firestore & Auth initialization
 │   │   ├── backendApi.ts                 # Backend gateway client for intercept, responder, CTF, translation, and governed 403 result handling
+│   │   ├── devLog.ts                     # devLog/devWarn — no-ops in production builds
+│   │   ├── webTelemetry.ts               # Optional browser OpenTelemetry (fetch tracing; dynamic import, no-op unless VITE_OTEL_EXPORTER_OTLP_ENDPOINT is set)
 │   │   ├── gemini.ts                     # Legacy deterministic fallback helpers retained for local/demo paths
 │   │   ├── metrics.ts                    # Telemetry aggregation & filtering logic
 │   │   ├── playgroundMetrics.ts          # Browser-local Playground/Bulk metric records, including backend safeguard attribution fields
@@ -84,7 +86,7 @@ counter-spy.ai/
 | :--- | :--- | :--- |
 | 🛡️ **The Shield** | `src/lib/sanitizer.ts` | Local sanitization engine — intercepts all adversarial payloads before any external API call is initiated. |
 | ⚔️ **The Sword** | `backend/src/server.ts` + `src/lib/backendApi.ts` | Backend-mediated inference path — local sanitizer, OpenAI-compatible safeguard judge, downstream responder, Sam Spade CTF persona/scenario handoff, and governed intercept result handling. |
-| 🕵️ **The Case File** | `backend/src/services/sam-spade/` + `ctf-frontend/` | Sam Spade CTF session, review, and gameplay gatekeeping — clean turns reach the responder, while sensitive/adversarial turns are masked as `Bad content.` and routed to audit review. The backend image runs this surface as its own container via `COUNTER_SPY_ROLE=sam-spade` (a gateway delegates `/v1/ctf/sam-spade/*` to it through `SAM_SPADE_SERVICE_URL`); the noir UI is the standalone `ctf-frontend/` Vite app, which posts review artifacts to `/v1/ctf/review-artifacts` so the main frontend (when `VITE_CTF_FRONTEND_URL` is set) embeds it and mirrors CTF activity into Audit/Metrics. |
+| 🕵️ **The Case File** | `backend/src/services/sam-spade/` + `backend/src/ctf/reviewArtifactStore.ts` + `ctf-frontend/` | Sam Spade CTF session, review, and gameplay gatekeeping — clean turns reach the responder, while sensitive/adversarial turns are masked as `Bad content.` and routed to audit review. The backend image runs this surface as its own container via `COUNTER_SPY_ROLE=sam-spade` (a gateway delegates `/v1/ctf/sam-spade/*` to it through `SAM_SPADE_SERVICE_URL`); the noir UI is the standalone `ctf-frontend/` Vite app, which posts review artifacts to `/v1/ctf/review-artifacts` (a SQLite-backed store on the gateway) so the main frontend's Sam Spade tab embeds the CTF app via `<iframe>` and mirrors CTF activity into Audit/Metrics. |
 | 🚧 **The Bulkhead** | `backend/src/middleware/rateLimit.ts` + `backend/src/security/urlGuard.ts` | Edge hardening — fixed-window rate limiter (bearer-token/IP keyed) and the SSRF egress guard that validates every outbound provider base URL. |
 | 📈 **The Glass** | `backend/src/telemetry.ts` + `otel/collector-config.yaml` | OpenTelemetry bootstrap (traces/metrics/logs over OTLP) and the demo-stack collector config. |
 | 📡 **The Radar** | `src/lib/anomalyDetector.ts` | Statistical anomaly engine — calculates real-time Z-Scores to detect coordinated automated attacks. |

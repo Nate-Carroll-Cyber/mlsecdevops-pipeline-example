@@ -54,6 +54,15 @@ export default defineConfig(() => {
                 priority: 30,
               },
               {
+                // OpenTelemetry web SDK is only imported dynamically by
+                // src/lib/webTelemetry.ts, so isolating it keeps it out of the
+                // eager bundle — the chunk is only fetched when
+                // VITE_OTEL_EXPORTER_OTLP_ENDPOINT is set.
+                name: 'otel-vendor',
+                test: /node_modules[\\/]@opentelemetry[\\/]/,
+                priority: 28,
+              },
+              {
                 name: 'ui-vendor',
                 test: /node_modules[\\/](@base-ui|lucide-react|sonner|next-themes|class-variance-authority|tailwind-merge|clsx|motion)[\\/]/,
                 priority: 20,

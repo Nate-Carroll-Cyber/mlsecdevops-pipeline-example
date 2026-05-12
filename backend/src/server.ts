@@ -15,6 +15,7 @@ import { z } from 'zod';
 import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict } from './security/sanitizer.js';
 import { assertEgressAllowed } from './security/urlGuard.js';
 import { createRateLimiter } from './middleware/rateLimit.js';
+import { appendCtfReviewArtifact, listCtfReviewArtifacts } from './ctf/reviewArtifactStore.js';
 import {
   createSamSpadeSession,
   getSamSpadeSession,
@@ -163,12 +164,6 @@ interface CachedSafeguardVerdict {
   expiresAt: number;
 }
 const safeguardVerdictCache = new Map<string, CachedSafeguardVerdict>();
-// In-memory ring buffer of recent Sam Spade review artifacts, fed by the
-// standalone CTF frontend via POST /v1/ctf/review-artifacts so the main
-// Counter-Spy frontend can poll GET /v1/ctf/review-artifacts and surface CTF
-// activity in its Audit/Metrics views without the frontends sharing a database.
-const ctfReviewArtifacts: SamSpadeReviewArtifact[] = [];
-const CTF_REVIEW_ARTIFACTS_MAX = 500;
 let instructionMonitorPromise: Promise<PgvectorInstructionMonitor | null> | undefined;
 const DEFAULT_SAM_SPADE_PERSONA_PROMPT = `You are Sam Spade inside the Counter-Spy.ai Sam Spade CTF.
 Stay in character as a guarded noir private detective helping a player solve Case 067 through earned inference.
@@ -2455,11 +2450,12 @@ app.post('/v1/ctf/sam-spade/solve', requireBackendAuth, (req: AuthenticatedReque
 // Sam Spade review-artifact feed.
 // The standalone CTF frontend POSTs each turn's review artifact here so the main
 // Counter-Spy frontend (which no longer drives the CTF API) can poll for them and
-// mirror CTF activity into its Audit/Metrics surfaces. Buffer is in-memory only.
+// mirror CTF activity into its Audit/Metrics surfaces. Backed by SQLite
+// (backend/src/ctf/reviewArtifactStore.ts) so a restart doesn't drop the queue.
 const CtfReviewArtifactIngestSchema = z.object({ artifact: SamSpadeReviewArtifactSchema }).strict();
 const CtfReviewArtifactListQuerySchema = z.object({
   sinceTimestamp: z.string().min(1).max(64).optional(),
-  limit: z.coerce.number().int().min(1).max(CTF_REVIEW_ARTIFACTS_MAX).optional(),
+  limit: z.coerce.number().int().min(1).max(5000).optional(),
 }).partial();
 
 app.post('/v1/ctf/review-artifacts', requireBackendAuth, (req: AuthenticatedRequest, res: Response<{ ok: true } | { error: string }>) => {
@@ -2469,10 +2465,7 @@ app.post('/v1/ctf/review-artifacts', requireBackendAuth, (req: AuthenticatedRequ
     return;
   }
   const artifact = parsed.data.artifact;
-  ctfReviewArtifacts.push(artifact);
-  if (ctfReviewArtifacts.length > CTF_REVIEW_ARTIFACTS_MAX) {
-    ctfReviewArtifacts.splice(0, ctfReviewArtifacts.length - CTF_REVIEW_ARTIFACTS_MAX);
-  }
+  appendCtfReviewArtifact(artifact);
   emitMetricIncrement('ctf.review_artifact', { action: artifact.action, detectionLevel: artifact.detectionLevel, escalated: artifact.escalationRecommended });
   log('info', 'ctf_review_artifact', {
     requestId: res.locals.requestId,
@@ -2492,14 +2485,10 @@ app.get('/v1/ctf/review-artifacts', requireBackendAuth, (req: AuthenticatedReque
     res.status(400).json({ error: 'Invalid review artifact query.' });
     return;
   }
-  const sinceMs = parsed.data.sinceTimestamp ? Date.parse(parsed.data.sinceTimestamp) : undefined;
-  let artifacts = ctfReviewArtifacts;
-  if (sinceMs !== undefined && Number.isFinite(sinceMs)) {
-    artifacts = artifacts.filter((artifact) => Date.parse(artifact.timestamp) > sinceMs);
-  }
-  if (parsed.data.limit !== undefined) {
-    artifacts = artifacts.slice(-parsed.data.limit);
-  }
+  const artifacts = listCtfReviewArtifacts({
+    ...(parsed.data.sinceTimestamp ? { sinceTimestamp: parsed.data.sinceTimestamp } : {}),
+    ...(parsed.data.limit !== undefined ? { limit: parsed.data.limit } : {}),
+  });
   res.status(200).json({ artifacts });
 });
 

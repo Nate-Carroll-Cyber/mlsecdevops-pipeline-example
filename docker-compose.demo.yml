@@ -31,9 +31,11 @@ services:
       SAFEGUARDS_API_BASE_URL: "http://192.168.0.183:1234/v1/chat/completions"
       SAFEGUARDS_MODEL_ID: "gpt-oss-safeguard-20b"
       SAFEGUARDS_TIMEOUT_MS: "30000"
-      # The CTF surface lives in its own container; the gateway just proxies to it.
+      # The CTF surface lives in its own container; the gateway just proxies to it
+      # and persists CTF review artifacts (durable across restarts).
       SAM_SPADE_ENABLED: "true"
       SAM_SPADE_SERVICE_URL: "http://counter-spy-sam-spade-service:18120"
+      CTF_REVIEW_ARTIFACTS_STORE_PATH: "/app/backend/data/ctf-review-artifacts.db"
       # OpenTelemetry: export traces/metrics/logs over OTLP/HTTP to the collector.
       OTEL_SERVICE_NAME: "counter-spy-backend"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
@@ -45,6 +47,9 @@ services:
       # demo stack stays stable across rebuilds and restarts.
     ports:
       - "18080:8080"
+    volumes:
+      # Durable CTF review-artifact store.
+      - counter_spy_gateway_data:/app/backend/data
     depends_on:
       counter-spy-postgres:
         condition: service_healthy
@@ -206,3 +211,5 @@ services:
 volumes:
   # Named volume used by the standalone Sam Spade service's SQLite session store.
   sam_spade_data:
+  # Named volume for the gateway's durable CTF review-artifact store.
+  counter_spy_gateway_data:

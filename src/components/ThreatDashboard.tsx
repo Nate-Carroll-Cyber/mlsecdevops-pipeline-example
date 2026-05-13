@@ -468,6 +468,13 @@ export function ThreatDashboard({
 }: ThreatDashboardProps) {
   // State to hold the results of the anomaly detection analysis
   const [metrics, setMetrics] = useState<any>(null);
+  // Defer chart mount by one tick so the Card container has a real measured
+  // size before recharts' ResponsiveContainer runs its first layout pass.
+  // Without this, recharts measures width(-1) height(-1) on first paint and
+  // logs a noisy console warning (the chart still renders correctly once
+  // ResizeObserver fires, but the warning sticks around forever).
+  const [chartsReady, setChartsReady] = useState(false);
+  useEffect(() => { setChartsReady(true); }, []);
   // State to hold the calculated False Positive Rate metrics
   const [fprMetrics, setFprMetrics] = useState<any>(null);
   // State to hold the time-series data for the chart
@@ -1302,7 +1309,8 @@ export function ThreatDashboard({
             </CardTitle>
         </CardHeader>
         <CardContent className="h-[250px] pt-4">
-          <ResponsiveContainer width="100%" height="100%">
+          {chartsReady && (
+          <ResponsiveContainer width="100%" height="100%" minWidth={0}>
             {/* Render the LineChart using Recharts */}
             <LineChart data={chartData}>
               {/* Add a grid to the chart */}
@@ -1340,6 +1348,7 @@ export function ThreatDashboard({
               />
             </LineChart>
           </ResponsiveContainer>
+          )}
         </CardContent>
       </Card>
 
@@ -1352,7 +1361,8 @@ export function ThreatDashboard({
         </CardHeader>
         <CardContent className="space-y-3 pt-4">
           <div className="h-[180px]">
-            <ResponsiveContainer width="100%" height="100%">
+            {chartsReady && (
+            <ResponsiveContainer width="100%" height="100%" minWidth={0}>
               <AreaChart data={severityChartData} margin={{ top: 6, right: 12, bottom: 8, left: 0 }}>
               <CartesianGrid strokeDasharray="3 3" stroke="#333" vertical={false} />
               <XAxis
@@ -1382,6 +1392,7 @@ export function ThreatDashboard({
               <Area type="monotone" dataKey="clean" name="Clean" stackId="1" stroke="#22c55e" fill="#22c55e" fillOpacity={0.25} />
               </AreaChart>
             </ResponsiveContainer>
+            )}
           </div>
           <SeverityLegend />
         </CardContent>

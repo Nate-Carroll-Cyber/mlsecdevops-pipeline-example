@@ -126,12 +126,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ctf-frontend
+      args:
+        # Baked into the CTF iframe's production bundle at build time.
+        # VITE_BACKEND_BEARER_TOKEN must equal the gateway's runtime INTERCEPT_BEARER_TOKEN.
+        VITE_BACKEND_BEARER_TOKEN: "${VITE_BACKEND_BEARER_TOKEN:-local-demo-backend-token-123456}"
+        VITE_OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318"
     container_name: counter-spy-ctf-frontend
     environment:
+      # Runtime config: vite preview proxies /v1/* + /healthz to this target.
       BACKEND_PROXY_TARGET: "http://counter-spy-backend:8080"
-      VITE_BACKEND_BEARER_TOKEN: "${VITE_BACKEND_BEARER_TOKEN:-local-demo-backend-token-123456}"
-      VITE_OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318"
-      DISABLE_HMR: "true"
     ports:
       - "3001:3001"
     depends_on:

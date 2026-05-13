@@ -9,18 +9,20 @@ import { defineConfig, type Plugin } from 'vite';
 // CTF_ALLOWED_FRAME_ANCESTORS controls who may embed this app in an <iframe>
 // (clickjacking guard). Default allows same-origin plus the local main app.
 
-// Minimal security headers for the dev server (the main app embeds this in an iframe).
+// Minimal security headers for both the dev server (`vite`) AND the preview
+// server (`vite preview`), since the production demo container runs preview.
+// The main app embeds this in an iframe — frame-ancestors is the clickjacking guard.
 function securityHeadersPlugin(frameAncestors: string): Plugin {
+  const applyHeaders = (_req: unknown, res: { setHeader: (k: string, v: string) => void }, next: () => void) => {
+    res.setHeader('content-security-policy', `frame-ancestors ${frameAncestors}`);
+    res.setHeader('x-content-type-options', 'nosniff');
+    res.setHeader('referrer-policy', 'no-referrer');
+    next();
+  };
   return {
     name: 'ctf-frontend-security-headers',
-    configureServer(server) {
-      server.middlewares.use((_req, res, next) => {
-        res.setHeader('content-security-policy', `frame-ancestors ${frameAncestors}`);
-        res.setHeader('x-content-type-options', 'nosniff');
-        res.setHeader('referrer-policy', 'no-referrer');
-        next();
-      });
-    },
+    configureServer(server) { server.middlewares.use(applyHeaders); },
+    configurePreviewServer(server) { server.middlewares.use(applyHeaders); },
   };
 }
 
@@ -31,14 +33,23 @@ export default defineConfig(() => {
   // the CTF iframe. Override with CTF_ALLOWED_FRAME_ANCESTORS for non-localhost
   // deployments.
   const frameAncestors = process.env.CTF_ALLOWED_FRAME_ANCESTORS || "'self' http://localhost:18080 http://127.0.0.1:18080 http://localhost:3000 http://127.0.0.1:3000";
+  const proxy = {
+    '/v1': { target: backendProxyTarget, changeOrigin: true },
+    '/healthz': { target: backendProxyTarget, changeOrigin: true },
+  };
   return {
     plugins: [react(), tailwindcss(), securityHeadersPlugin(frameAncestors)],
     server: {
       hmr: process.env.DISABLE_HMR !== 'true',
-      proxy: {
-        '/v1': { target: backendProxyTarget, changeOrigin: true },
-        '/healthz': { target: backendProxyTarget, changeOrigin: true },
-      },
+      proxy,
+    },
+    // The demo container runs `vite preview` against the production build (no
+    // HMR client injected). The proxy + host/port mirror the dev server so the
+    // CTF iframe at :3001 still routes /v1/* and /healthz to the gateway.
+    preview: {
+      host: '0.0.0.0',
+      port: 3001,
+      proxy,
     },
     build: {
       rolldownOptions: {

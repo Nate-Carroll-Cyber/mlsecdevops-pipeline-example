@@ -2006,6 +2006,25 @@ export default function App() {
   // a separate origin/bundle, so it can't read the parent's localStorage; this
   // bridge keeps the two surfaces in sync without duplicating secrets.
   const samSpadeIframeRef = useRef<HTMLIFrameElement>(null);
+
+  // Once the operator opens the Sam Spade tab, keep the iframe MOUNTED for the
+  // life of the session (toggle visibility with display:none, don't unmount).
+  // Reason: Safari 26.2 / macOS 14.8.3 (and likely others) has a bug in its
+  // FormCredentialSaver::offerToSaveCredential path where removing a
+  // cross-origin iframe from the DOM triggers
+  // -[BrowserViewController saveUnsubmittedFormDataFromRemovedFrameIfNecessary…]
+  // which calls a selector the password-suggester object doesn't implement
+  // (bestUsernameSuggestionForUsernamePromptOnURL:inContext:completionHandler:),
+  // raises NSInvalidArgumentException, and SIGABRTs the entire browser
+  // process. Repro: open Sam Spade, switch to any other tab — Safari dies.
+  // Captured crash report `626BC344-CE31-4B9E-A15A-3B9F1DBDEEDF`. By keeping
+  // the iframe attached we never trigger the form-data-from-removed-frame
+  // path; the iframe just hides. We still gate on first-open so the CTF
+  // bundle isn't fetched until the operator actually visits the tab.
+  const [hasOpenedSamSpade, setHasOpenedSamSpade] = useState(false);
+  useEffect(() => {
+    if (activeTab === 'sam_spade') setHasOpenedSamSpade(true);
+  }, [activeTab]);
   const effectiveSafeguardPolicies = customPolicies.length > 0 ? customPolicies : POLICIES;
   const effectiveSafeguardPromptPreview = useMemo(() => buildCanonicalSafeguardPromptForHash({
     systemConfig,
@@ -4510,9 +4529,14 @@ export default function App() {
 
         {/* Content Body */}
         <div className={`flex-1 min-h-0 p-6 ${activeTab === 'sam_spade' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
-          {/* Sam Spade CTF Tab */}
-          {activeTab === 'sam_spade' && (
-            <div className="h-full overflow-hidden bg-black">
+          {/* Sam Spade CTF Tab — kept mounted (display:none when inactive) to
+              avoid the Safari 26.2 FormCredentialSaver crash on iframe unmount.
+              See samSpadeIframeRef declaration above for the full root cause. */}
+          {hasOpenedSamSpade && (
+            <div
+              className={`h-full overflow-hidden bg-black ${activeTab === 'sam_spade' ? '' : 'hidden'}`}
+              aria-hidden={activeTab !== 'sam_spade'}
+            >
               {CTF_FRONTEND_URL ? (
                 <iframe
                   ref={samSpadeIframeRef}

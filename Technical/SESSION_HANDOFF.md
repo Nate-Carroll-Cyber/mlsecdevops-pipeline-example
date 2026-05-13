@@ -177,6 +177,145 @@ Connection-string resolution mirrors the existing audit-store: `APP_CONFIG_DATAB
 
 **Branch state on entering this work:** `feat/server-hosted-app` at `59adca9` (Phase 3 step 3). Working tree clean modulo the user's untracked `Technical/PLATFORM_ROADMAP.md`. Demo stack containers are running; `docker compose -f docker-compose.demo.yml ps` confirms gateway healthy.
 
+### Monorepo source split (npm workspaces) — PLANNED for next session
+
+> **Context (2026-05-13):** Today's session completed Phase 3 step 4 commits 1 + 2 (governance + system config moved to Postgres) AND a network-level decoupling of the Sam Spade CTF from the gateway (commit `d0c24df`). With the gateway and sam-spade-service now running on independent ports with no proxy, the user asked whether the two are "still on the same container" — and yes, at the **source level** they still share `backend/Dockerfile`, `backend/src/**`, `package.json`, and `node_modules`. Any change in one forces an image rebuild of the other. The next decoupling axis is source.
+>
+> User-chosen approach (2026-05-13): **monorepo with npm workspaces**, executed **before** the rest of Phase 3 step 4 (user profiles + KB policies + cleanup) so those land on the cleaner two-service shape.
+
+**Target structure:**
+```
+counter-spy-claude.ai/
+├── package.json                       # workspaces: ["packages/*", "services/*"]
+├── packages/
+│   └── backend-shared/                # @counter-spy/backend-shared (both services)
+│       ├── package.json
+│       ├── tsconfig.json
+│       └── src/
+│           ├── security/sanitizer.ts
+│           ├── security/safeguardDefaults.ts
+│           ├── security/urlGuard.ts
+│           ├── middleware/rateLimit.ts
+│           ├── telemetry.ts
+│           └── index.ts
+├── services/
+│   ├── gateway/                       # @counter-spy/gateway
+│   │   ├── Dockerfile                 # replaces backend/Dockerfile (gateway role)
+│   │   ├── package.json               # deps: backend-shared workspace:*, express, pg, firebase-admin?, etc.
+│   │   ├── tsconfig.json
+│   │   └── src/
+│   │       ├── server.ts              # gateway routes only
+│   │       ├── analysis/*             # 8 files
+│   │       ├── audit/auditStore.ts
+│   │       ├── config/configStore.ts
+│   │       ├── ctf/reviewArtifactStore.ts
+│   │       ├── services/instruction-monitor/*
+│   │       └── web/ssr.ts
+│   └── sam-spade/                     # @counter-spy/sam-spade
+│       ├── Dockerfile                 # new, sam-spade-specific
+│       ├── package.json               # deps: backend-shared workspace:*, express, better-sqlite3, etc.
+│       ├── tsconfig.json
+│       └── src/
+│           ├── server.ts              # sam-spade routes only
+│           └── services/sam-spade/*   # 5 files (session store, service.ts, types, config)
+├── src/                               # Frontend (analyst console) — unchanged
+├── ctf-frontend/                      # CTF UI — unchanged
+└── (backend/ deleted at the end)
+```
+
+**Inventory (validated by `grep -E "^import .* from '\./(...)" backend/src/server.ts`):**
+
+| Module in `backend/src/...` | Destination |
+| :--- | :--- |
+| `security/sanitizer.ts` | `packages/backend-shared/src/security/` |
+| `security/safeguardDefaults.ts` | `packages/backend-shared/src/security/` |
+| `security/urlGuard.ts` | `packages/backend-shared/src/security/` |
+| `middleware/rateLimit.ts` | `packages/backend-shared/src/middleware/` |
+| `telemetry.ts` | `packages/backend-shared/src/` |
+| `analysis/*` (8 files) | `services/gateway/src/analysis/` |
+| `audit/auditStore.ts` | `services/gateway/src/audit/` |
+| `config/configStore.ts` | `services/gateway/src/config/` |
+| `ctf/reviewArtifactStore.ts` | `services/gateway/src/ctf/` |
+| `services/instruction-monitor/*` (7 files) | `services/gateway/src/services/instruction-monitor/` |
+| `web/ssr.ts` | `services/gateway/src/web/` |
+| `services/sam-spade/*` (5 files) | `services/sam-spade/src/services/sam-spade/` |
+
+**Shared boilerplate currently in `server.ts`** (needs a decision per commit):
+- Express setup, CORS middleware, JSON body parser
+- Bearer auth middleware (`requireBackendAuth`)
+- Caller ID extractor (`getAuthenticatedCallerId`)
+- Request ID + structured logger
+- `/healthz` handler
+- 404 handler
+- Env loading (`EnvSchema`)
+
+**Decision:** put auth helpers + logger + the env schema in `backend-shared` (~100 lines of helpers). Each service's `server.ts` instantiates its own Express app, applies the shared middleware, then registers its own routes. Duplication of the 30-line Express setup boilerplate is acceptable.
+
+**Commit sequence:**
+
+#### Commit 1: workspaces scaffold (no behavior change)
+- Add `"workspaces": ["packages/*", "services/*"]` to root `package.json`.
+- Create `packages/backend-shared/package.json` (empty stub: `name: "@counter-spy/backend-shared"`, `version: "0.1.0"`, `type: "module"`).
+- Create `services/gateway/package.json` and `services/sam-spade/package.json` stubs.
+- Run `npm install` — verify workspaces resolve.
+- **Verify:** `npm run lint` + `npm run backend:test` (existing `backend/**` untouched, all 108 tests still green) + the demo stack still runs.
+
+#### Commit 2: move shared modules into `backend-shared`
+- `git mv backend/src/security/* packages/backend-shared/src/security/`
+- `git mv backend/src/middleware/rateLimit.ts packages/backend-shared/src/middleware/rateLimit.ts`
+- `git mv backend/src/telemetry.ts packages/backend-shared/src/telemetry.ts`
+- Author `packages/backend-shared/src/index.ts` re-exporting all symbols.
+- Update `backend/src/server.ts` imports: `'./security/sanitizer.js'` → `'@counter-spy/backend-shared/security/sanitizer'` (or via the index re-export — decide once we see whether TS path resolution prefers one form).
+- Update `backend/test/*.ts` imports to `@counter-spy/backend-shared`.
+- Add `"exports"` to `backend-shared/package.json` mapping the sub-paths.
+- For the dev/tsx path: rely on tsconfig `paths` for source-to-source resolution. For the prod/tsc path: backend-shared compiles its own `dist/` and the `exports` field points at `dist/*.js`.
+- Add `packages/backend-shared/tsconfig.json` (minimal — `tsc -p` builds to `dist/`).
+- Add `"build"` script to `backend-shared/package.json`.
+- Update root `tsconfig` (or backend's) to add `paths` so existing tooling still resolves.
+- **Verify:** `npm run lint` + `npm run backend:test` (108 still green) + `npm run backend:build` (compiles both backend-shared AND backend) + demo stack rebuild + smoke test.
+
+#### Commit 3: extract `services/sam-spade`
+- Create `services/sam-spade/package.json` (deps: `@counter-spy/backend-shared: "workspace:*"`, `express`, `better-sqlite3`, `zod`, the ones sam-spade actually uses).
+- Create `services/sam-spade/tsconfig.json` (extends base; emits to `dist/`).
+- Create `services/sam-spade/Dockerfile` (modeled on `backend/Dockerfile` but only compiles backend-shared + services/sam-spade).
+- `git mv backend/src/services/sam-spade/* services/sam-spade/src/services/sam-spade/`
+- Author `services/sam-spade/src/server.ts` — extract the sam-spade routes from `backend/src/server.ts` (the four `/v1/ctf/sam-spade/*` route handlers + their imports). Use the shared middleware from backend-shared.
+- Update `docker-compose.demo.yml` `counter-spy-sam-spade-service` to build from `services/sam-spade/Dockerfile`.
+- Move/update `backend/test/samSpade*.test.ts` to `services/sam-spade/test/`.
+- **Verify:** `npm run lint` + service test (`npm run test --workspace=@counter-spy/sam-spade` or equivalent) + demo rebuild + smoke against `:18120` (session, message, solve all work).
+
+#### Commit 4: extract `services/gateway` + delete `backend/`
+- Create `services/gateway/package.json` (deps: `@counter-spy/backend-shared: "workspace:*"`, `express`, `pg`, etc.).
+- Create `services/gateway/tsconfig.json`.
+- Create `services/gateway/Dockerfile` (compiles backend-shared + services/gateway + runs vite client+ssr build for the analyst console).
+- `git mv backend/src/{analysis,audit,config,ctf,web} services/gateway/src/`
+- `git mv backend/src/services/instruction-monitor services/gateway/src/services/instruction-monitor`
+- Author `services/gateway/src/server.ts` — what's left of `backend/src/server.ts` after sam-spade extraction (all the gateway routes + SSR mount).
+- Update `docker-compose.demo.yml` `counter-spy-backend` to build from `services/gateway/Dockerfile`.
+- Move/update gateway-side tests to `services/gateway/test/`.
+- **Delete** `backend/` entirely.
+- Update root `package.json` scripts: `npm run backend:dev` → `npm run dev --workspace=@counter-spy/gateway`, etc.
+- **Verify:** lint + tests + builds + demo rebuild + full smoke (all `/v1/*` paths + analyst console SSR + sam-spade still works via `:18120`).
+
+#### Commit 5: docs + final polish
+- Update `CLAUDE.md`: the "File map" section, the architecture table, the security-critical file paths (now `packages/backend-shared/src/security/sanitizer.ts` etc.).
+- Update `Technical/ARCHITECTURE.md` with the new monorepo layout.
+- Update `Technical/LOCAL_DEVELOPMENT.md` with the new dev commands.
+- Update `Technical/SBOM.md` — each service now has its own `package.json` so the SBOM needs three entries (root frontend + backend-shared + gateway + sam-spade).
+- Update `File_Structure.md` to mirror the new tree.
+- Update `.env.example` if any new env vars surface.
+- **Verify:** `git ls-files | grep backend/` returns nothing; `docker compose up --build` builds all three images independently; touching `packages/backend-shared/src/security/sanitizer.ts` rebuilds both service images but touching `services/gateway/src/audit/auditStore.ts` only rebuilds the gateway image.
+
+**Risks / open questions:**
+- npm workspaces + `exports` field + TS path resolution can interact weirdly. The fallback is tsconfig `paths` everywhere. May need a couple of iterations in commit 2 to find a setup that works in both `tsx` (dev) and `tsc → node` (prod).
+- The current `backend/tsconfig.json` is shared between dev and prod. Splitting into multiple service tsconfigs needs care to keep `--noEmit` lint working (one `tsc --noEmit` per workspace, called from root).
+- Test ordering: `npm run backend:test` currently uses `backend/test/*.test.ts`. After the split, tests will live under each workspace. The root `test` script needs to fan out (or use `npm run test --workspaces`).
+- The `instructionMonitor:seed:core` + `instructionMonitor:export:core` scripts currently run via `tsx backend/src/services/instruction-monitor/seed-core.ts`. They become workspace-scoped.
+
+**Branch state on entering this work:** `feat/server-hosted-app` at `d0c24df` (network-level CTF decouple). Working tree clean modulo `Technical/PLATFORM_ROADMAP.md` untracked. Demo stack running; gateway + sam-spade-service + ctf-frontend all healthy at `:18080`, `:18120`, `:3001`.
+
+**After this work lands, resume the rest of Phase 3 step 4** (user profiles → KB policies → cleanup) against the new `services/gateway` shape. The remaining touchpoints are gateway-only, so those commits get smaller.
+
 ### Phase 4 (rest)
 Refresh `README.md`, `Technical/ARCHITECTURE.md`, `Technical/LOCAL_DEVELOPMENT.md`, `Technical/SBOM.md`, `File_Structure.md`, and `infra/cloudformation/{scripts/deploy-frontend.sh,dev/03-frontend.yml}` for the no-separate-frontend-container shape; convert `Dockerfile.ctf-frontend` to a production/static build (or fold the CTF surface into the gateway too).
 

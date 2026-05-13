@@ -108,6 +108,10 @@ const authHeaders = (userId = 'user-a') => ({
 });
 
 test('protected routes reject unauthenticated access', async () => {
+  // Gateway-side protected routes only. /v1/ctf/sam-spade/* lives on the
+  // standalone sam-spade-service now (the gateway 404s those paths;
+  // see samSpadeServiceSplit.test.ts) and its auth coverage lives in
+  // samSpadeRoutes.test.ts.
   const intercept = await requestApp('/v1/intercept', {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -118,15 +122,9 @@ test('protected routes reject unauthenticated access', async () => {
     headers: { 'content-type': 'application/json' },
     body: { text: 'hola' },
   });
-  const samSpade = await requestApp('/v1/ctf/sam-spade/session', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: { caseId: 'case-067' },
-  });
 
   assert.equal(intercept.status, 401);
   assert.equal(translate.status, 401);
-  assert.equal(samSpade.status, 401);
 });
 
 test('client-supplied backend execution overrides are rejected by request schemas', async () => {
@@ -234,36 +232,8 @@ test('translation fails closed when backend Lara configuration is missing', asyn
   assert.match(payload.error ?? '', /Lara Translate is not configured/);
 });
 
-test('Sam Spade sessions are scoped to the authenticated caller', async () => {
-  const created = await requestApp('/v1/ctf/sam-spade/session', {
-    method: 'POST',
-    headers: authHeaders('user-a'),
-    body: { caseId: 'case-067' },
-  });
-  assert.equal(created.status, 201);
-  const createdPayload = created.payload as { session: { sessionId: string; ownerUserId: string } };
-  assert.equal(createdPayload.session.ownerUserId, 'user-a');
-
-  const sameUserFetch = await requestApp(`/v1/ctf/sam-spade/session/${createdPayload.session.sessionId}`, {
-    headers: authHeaders('user-a'),
-  });
-  const crossUserFetch = await requestApp(`/v1/ctf/sam-spade/session/${createdPayload.session.sessionId}`, {
-    headers: authHeaders('user-b'),
-  });
-  const crossUserMessage = await requestApp('/v1/ctf/sam-spade/message', {
-    method: 'POST',
-    headers: authHeaders('user-b'),
-    body: {
-      sessionId: createdPayload.session.sessionId,
-      prompt: 'What happened at the hotel?',
-      metadata: { providerLlmRoutingEnabled: false },
-    },
-  });
-
-  assert.equal(sameUserFetch.status, 200);
-  assert.equal(crossUserFetch.status, 404);
-  assert.equal(crossUserMessage.status, 403);
-});
+// Sam Spade route coverage moved to backend/test/samSpadeRoutes.test.ts when
+// the CTF surface was network-split off the gateway.
 
 test('/v1/metrics/aggregate rejects unauthenticated requests', async () => {
   // Phase 3 step 3: the metrics-aggregate endpoint runs the moved analytics
@@ -409,70 +379,6 @@ test('/v1/system-config PUT validates the body shape', async () => {
   assert.equal(wrongType.status, 400);
 });
 
-test('Sam Spade message route forwards a metadata.safeguardApiKey as the upstream bearer', async () => {
-  // The analyst-chat parent window postMessages its Runtime Settings
-  // safeguardApiKey into the CTF iframe; the CTF echoes it back as
-  // metadata.safeguardApiKey. The backend must use it as the LM Studio
-  // (or whichever safeguard upstream) bearer instead of falling back to
-  // env.SAFEGUARDS_API_KEY (which isn't set in this test).
-  const session = await requestApp('/v1/ctf/sam-spade/session', {
-    method: 'POST',
-    headers: authHeaders('ctf-key-user'),
-    body: { caseId: 'case-067' },
-  });
-  assert.equal(session.status, 201);
-  const sessionId = (session.payload as { session: { sessionId: string } }).session.sessionId;
-
-  const startRequestCount = safeguardRequests.length;
-  const ctfSafeguardToken = 'ctf-supplied-safeguard-token-abc123';
-  const message = await requestApp('/v1/ctf/sam-spade/message', {
-    method: 'POST',
-    headers: authHeaders('ctf-key-user'),
-    body: {
-      sessionId,
-      prompt: 'Did the witness recognize the locksmith?',
-      metadata: { safeguardApiKey: ctfSafeguardToken },
-    },
-  });
-
-  assert.equal(message.status, 200);
-  assert.equal(safeguardRequests.length, startRequestCount + 1);
-  const forwardedHeaders = safeguardRequestHeaders.at(-1);
-  assert.equal(forwardedHeaders?.authorization, `Bearer ${ctfSafeguardToken}`);
-});
-
-test('Sam Spade message route falls back to DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT when metadata is absent', async () => {
-  // The CTF iframe doesn't share state with the Analyst Chat console and sends
-  // no metadata.safeguardEffectivePrompt; the route must still get a safeguard
-  // verdict by falling back to the backend's hardcoded default rubric. The
-  // analyst /v1/intercept path stays strict (covered by the
-  // "fail closed when safeguard effective prompt is absent" test above).
-  const { DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT } = await import('../src/security/safeguardDefaults.ts');
-
-  const session = await requestApp('/v1/ctf/sam-spade/session', {
-    method: 'POST',
-    headers: authHeaders('ctf-user'),
-    body: { caseId: 'case-067' },
-  });
-  assert.equal(session.status, 201);
-  const sessionId = (session.payload as { session: { sessionId: string } }).session.sessionId;
-
-  const startRequestCount = safeguardRequests.length;
-  const message = await requestApp('/v1/ctf/sam-spade/message', {
-    method: 'POST',
-    headers: authHeaders('ctf-user'),
-    body: {
-      sessionId,
-      prompt: 'What did the witness see in the alley?',
-      // Note: no `metadata` field at all — this is the real CTF browser shape.
-    },
-  });
-
-  assert.equal(message.status, 200);
-  assert.equal(safeguardRequests.length, startRequestCount + 1);
-  const forwarded = safeguardRequests.at(-1) as {
-    messages?: Array<{ role?: string; content?: string }>;
-  };
-  assert.equal(forwarded.messages?.[0]?.role, 'system');
-  assert.equal(forwarded.messages?.[0]?.content, DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT);
-});
+// Sam Spade safeguard-api-key forwarding + default-prompt fallback tests moved
+// to backend/test/samSpadeRoutes.test.ts when the CTF surface was network-split
+// off the gateway.

@@ -40,10 +40,11 @@ services:
       SAFEGUARDS_API_BASE_URL: "http://192.168.0.183:1234/v1/chat/completions"
       SAFEGUARDS_MODEL_ID: "gpt-oss-safeguard-20b"
       SAFEGUARDS_TIMEOUT_MS: "30000"
-      # The CTF surface lives in its own container; the gateway just proxies to it
-      # and persists CTF review artifacts (durable across restarts).
+      # The CTF surface lives in its own container at :18120. The gateway no
+      # longer proxies /v1/ctf/sam-spade/*; the CTF frontend talks to the
+      # sam-spade-service directly via its own proxy. The gateway only
+      # persists CTF review artifacts (durable across restarts).
       SAM_SPADE_ENABLED: "true"
-      SAM_SPADE_SERVICE_URL: "http://counter-spy-sam-spade-service:18120"
       CTF_REVIEW_ARTIFACTS_STORE_PATH: "/app/backend/data/ctf-review-artifacts.db"
       # OpenTelemetry: export traces/metrics/logs over OTLP/HTTP to the collector.
       OTEL_SERVICE_NAME: "counter-spy-backend"
@@ -62,8 +63,6 @@ services:
     depends_on:
       counter-spy-postgres:
         condition: service_healthy
-      counter-spy-sam-spade-service:
-        condition: service_started
       otel-collector:
         condition: service_started
     restart: unless-stopped
@@ -118,8 +117,9 @@ services:
   # Open http://localhost:18080/ ; its /v1/* calls are same-origin.
 
   # Standalone Sam Spade CTF frontend (noir "Case 067" surface). Talks to the
-  # Counter-Spy gateway (which proxies /v1/ctf/sam-spade/* to the CTF service and
-  # handles /v1/ctf/review-artifacts) and posts each turn's review artifact there.
+  # Counter-Spy CTF UI. Talks directly to the standalone sam-spade-service for
+  # /v1/ctf/sam-spade/* (so the CTF stays alive if the gateway is offline) and
+  # posts each turn's review artifact to the gateway's /v1/ctf/review-artifacts.
   # NOTE: this still runs the Vite dev server in-container (Dockerfile.ctf-frontend);
   # converting it to a server-rendered/static build is a follow-up.
   counter-spy-ctf-frontend:
@@ -128,17 +128,22 @@ services:
       dockerfile: Dockerfile.ctf-frontend
       args:
         # Baked into the CTF iframe's production bundle at build time.
-        # VITE_BACKEND_BEARER_TOKEN must equal the gateway's runtime INTERCEPT_BEARER_TOKEN.
+        # VITE_BACKEND_BEARER_TOKEN must equal both services' runtime INTERCEPT_BEARER_TOKEN
+        # (the gateway and sam-spade-service share the bearer for now).
         VITE_BACKEND_BEARER_TOKEN: "${VITE_BACKEND_BEARER_TOKEN:-local-demo-backend-token-123456}"
         VITE_OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318"
     container_name: counter-spy-ctf-frontend
     environment:
-      # Runtime config: vite preview proxies /v1/* + /healthz to this target.
+      # Runtime config: vite preview routes /v1/ctf/sam-spade/* + /healthz to the
+      # sam-spade-service and /v1/ctf/review-artifacts to the gateway. See
+      # ctf-frontend/vite.config.ts for the proxy table.
+      SAM_SPADE_PROXY_TARGET: "http://counter-spy-sam-spade-service:18120"
       BACKEND_PROXY_TARGET: "http://counter-spy-backend:8080"
     ports:
       - "3001:3001"
     depends_on:
       - counter-spy-backend
+      - counter-spy-sam-spade-service
     restart: unless-stopped
 
   counter-spy-postgres:

@@ -2,9 +2,14 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import { defineConfig, type Plugin } from 'vite';
 
-// The CTF frontend talks to the Counter-Spy gateway (which reverse-proxies
-// /v1/ctf/sam-spade/* to the standalone Sam Spade service and handles
-// /v1/ctf/review-artifacts itself). Set BACKEND_PROXY_TARGET to the gateway.
+// The CTF frontend has two API targets so the gateway and the standalone
+// sam-spade-service are network-independent:
+//   - /v1/ctf/sam-spade/*    -> sam-spade-service  (SAM_SPADE_PROXY_TARGET)
+//   - /v1/ctf/review-artifacts -> gateway          (BACKEND_PROXY_TARGET)
+//   - /healthz               -> sam-spade-service  (the CTF cares about CTF backend health)
+// If the gateway is offline, /v1/ctf/sam-spade/* and gameplay still work; only
+// the best-effort review-artifact bridge to the analyst console fails. If the
+// sam-spade-service is offline, the CTF UI shows an error and gameplay stops.
 //
 // CTF_ALLOWED_FRAME_ANCESTORS controls who may embed this app in an <iframe>
 // (clickjacking guard). Default allows same-origin plus the local main app.
@@ -28,14 +33,18 @@ function securityHeadersPlugin(frameAncestors: string): Plugin {
 
 export default defineConfig(() => {
   const backendProxyTarget = process.env.BACKEND_PROXY_TARGET || 'http://127.0.0.1:18080';
+  const samSpadeProxyTarget = process.env.SAM_SPADE_PROXY_TARGET || 'http://127.0.0.1:18120';
   // The analyst console is now gateway-served on :18080 (the older SPA-only shape
   // lived on :3000); both origins are listed so a clone on either shape can embed
   // the CTF iframe. Override with CTF_ALLOWED_FRAME_ANCESTORS for non-localhost
   // deployments.
   const frameAncestors = process.env.CTF_ALLOWED_FRAME_ANCESTORS || "'self' http://localhost:18080 http://127.0.0.1:18080 http://localhost:3000 http://127.0.0.1:3000";
+  // Order matters: the more specific path prefix must come first so vite picks
+  // it over the broader gateway prefix.
   const proxy = {
-    '/v1': { target: backendProxyTarget, changeOrigin: true },
-    '/healthz': { target: backendProxyTarget, changeOrigin: true },
+    '/v1/ctf/sam-spade': { target: samSpadeProxyTarget, changeOrigin: true },
+    '/v1/ctf/review-artifacts': { target: backendProxyTarget, changeOrigin: true },
+    '/healthz': { target: samSpadeProxyTarget, changeOrigin: true },
   };
   return {
     plugins: [react(), tailwindcss(), securityHeadersPlugin(frameAncestors)],

@@ -28,6 +28,35 @@ This page captures the current implementation state so a future Codex session ca
   - Verified: `npm run lint`, `npm run backend:test` (89/89), `npm run build`, `npm run backend:build`, `git diff --check` all pass. **Not** exercised against a live Postgres / running gateway in this sandbox — the changes are mechanical client-side rewires of calls that already had backend counterparts.
   - `Technical/SESSION_HANDOFF.md` (this file) updated. `CLAUDE.md`/`Technical/ARCHITECTURE.md` still describe Firestore-backed audit logs in places — those docs get refreshed in Phase 4 once the Firestore retirement (Phase 3 step 4) lands. Project memory `server-hosted-rewrite.md` updated.
 
+### Phase 3 step 2 — live-Postgres validation (2026-05-13 session)
+
+Exercised the new audit path against the demo-compose stack (gateway + pgvector Postgres + Sam Spade service + OTel collector + Jaeger + CTF frontend, all under `docker compose -f docker-compose.demo.yml`).
+
+**Audit endpoints (curl smoke):**
+- `POST /v1/audit-logs` → 201, server-stamps `id`/`userId`/`timestamp`, mirrors them into `record`. Indexed columns (`session_id`/`source`/`model_id`/`detection_level`) populated from the JSONB.
+- `GET /v1/audit-logs?limit=50` → 200, full shared trail (no implicit user filter; the `userId` query param is optional). `sinceTimestamp=...` filter works (strict `>`).
+- `PATCH /v1/audit-logs/:id` → 200; the `record = record || $patch::jsonb` merge plus the `CASE WHEN $patch ? 'detectionLevel' …` re-sync of column copies behaves correctly. Bad uuid → 400. Unknown uuid → 404.
+- `DELETE /v1/audit-logs?userId=<uid>` → 200 with `{deleted: N}`, scoped wipe. Unscoped `DELETE /v1/audit-logs` wipes the whole shared trail (the documented behavior change from the old Firestore `PENDING_REVIEW` carve-out).
+- Auth: requests without the shared bearer token → 401. With token + spoofable `x-counter-spy-user-id` header → routes accept; **cross-user reads/patches are allowed by design** (shared trail, RBAC deferred to step 4).
+
+**Postgres state (verified via `psql` inside the container):** schema exactly matches `auditStore.ts`'s `SCHEMA_SQL`; indexes are `audit_logs_pkey` (PK on `id`), `audit_logs_created_at_idx` (DESC), `audit_logs_user_id_idx`, `audit_logs_source_idx`. `relrowsecurity = f` (no Postgres-level RLS). Pool: `max: 5`, `application_name: 'counter-spy-audit-store'` — separate `Pool` instance from the instruction-monitor pool, so audit traffic doesn't share back-pressure.
+
+**Audit-store config:** falls back through `AUDIT_DATABASE_URL → DATABASE_URL → INSTRUCTION_MONITOR_DATABASE_URL`. The demo only sets the last; everything else works through the fallback. `initAuditStore()` is best-effort at boot (no `audit_store_init_failed` warnings in the logs).
+
+**Known gaps / drift surfaced but not fixed here:**
+- `auditStore.ts`'s header comment claims `session_id`/`model_id`/`detection_level` are indexed; the `CREATE INDEX` statements only cover `created_at`/`user_id`/`source`. Comment drift, not a functional bug — revisit when `ThreatDashboard.tsx` aggregation lands on those columns in step 3.
+- Cross-user reads/patches/clears go through (the route handlers authenticate the caller but don't compare against the row's `user_id`). This is the intentional "shared trail" posture for the demo; **step 4 must re-introduce per-row enforcement**, either at the route handler (`WHERE user_id = $caller` on mutations + an admin override) or in the DB (RLS + `SET LOCAL role`).
+
+**Three regressions found and fixed this session** (all surfaced because Phase 4 (partial) moved the analyst console from a separate `:3000` Vite container to the gateway on `:18080`, but a couple of co-located configs weren't updated):
+
+1. **`vite.config.ts` chunking bug** — the production rolldown build had `codeSplitting.maxSize: 450 * 1024`, which broke `markdown-vendor` into two chunks with a circular import. The browser threw `TypeError: a is not a function` from `markdown-vendor-*.js` during module evaluation, which killed hydration before `App.tsx`'s `useEffect`s mounted — `setLoading(false)` never fired and the SSR splash hung forever. **Pre-existing** (the config was authored for the SPA build) but invisible until `cb59ecf` made the gateway serve the production bundle. **Fix:** removed `maxSize` from `rolldownOptions.output.codeSplitting`. The single `markdown-vendor` chunk is now 115 KB (was split into 15 KB + ~100 KB). Re-tune by re-adding `maxSize` with a higher ceiling if any future vendor chunk grows uncontrolled.
+
+2. **OTel collector CORS** — `otel/collector-config.yaml`'s `receivers.otlp.protocols.http.cors.allowed_origins` listed only `:3000`/`:3001`, so browser spans from the gateway-served console at `:18080` were rejected with CORS errors. **Fix:** added `http://localhost:18080`/`http://127.0.0.1:18080` (and kept `:3000` for backwards-compat with older clones).
+
+3. **CTF frontend iframe-CSP** — `ctf-frontend/vite.config.ts`'s default for `frame-ancestors` was `'self' http://localhost:3000 http://127.0.0.1:3000`, so the Sam Spade tab embedded by the console at `:18080` rendered blank (CSP blocked the embed). **Fix:** added `http://localhost:18080`/`http://127.0.0.1:18080` to the default. `CTF_ALLOWED_FRAME_ANCESTORS` env-var override still wins for non-localhost deployments.
+
+**Not exercised through the UI:** the user was unable to complete Firebase Google sign-in because `localhost` isn't listed under the Firebase project's *Authorized domains* (this is a Firebase Console one-time setting, not a code fix). The `localReviewMode` workaround bypasses Firebase auth, but `App.tsx`'s audit-log polling effect short-circuits in that mode — so the new `/v1/audit-logs` path isn't exercised via the UI in `localReviewMode`. The headless curl smoke covered every CRUD endpoint, so the path is proven. Full UI validation is gated on either (a) adding `localhost` to Firebase Authorized domains, or (b) the auth-model decision in step 4 (which may replace Firebase OAuth entirely).
+
 ### Phase 3 step 3 — rewire `ThreatDashboard.tsx` + move `anomalyDetector`/`metrics` server-side (next)
 - `ThreatDashboard.tsx` imports `db` from `lib/firebase` and does `getDocs`/`onSnapshot`/`setDoc` directly — replace the audit reads with `listAuditLogs`, and the governance writes (`setDoc(doc(db,'config','governance'), ...)` for HITL/global-pause toggles) with the Phase 3(4) governance endpoint.
 - `src/lib/anomalyDetector.ts` (Z-score `detectThreatSpikes`) + `src/lib/metrics.ts` (`calculateFalsePositiveMetrics`) operate on the audit-log array. Add `POST /v1/metrics/aggregate` on the backend (it owns the audit data now — aggregate from `listAuditLogs`-equivalent SQL), `git mv` those two modules to `backend/src/analysis/` (fix `.js` imports), expose via the endpoint, and have `ThreatDashboard.tsx` call it. Then delete the `src/lib/` copies. (This is the deferred "Phase 2 (4/5)".)

@@ -41,7 +41,6 @@ export default defineConfig(({isSsrBuild}) => {
             rolldownOptions: {
               output: {
                 codeSplitting: {
-                  maxSize: 450 * 1024,
                   groups: [
                     {
                       name: 'react-vendor',

@@ -13,14 +13,18 @@ receivers:
         endpoint: 0.0.0.0:4317
       http:
         endpoint: 0.0.0.0:4318
-        # Allow the browser frontends (main app :3000, CTF app :3001) to POST
-        # spans to /v1/traces directly when VITE_OTEL_EXPORTER_OTLP_ENDPOINT is set.
+        # Allow the browser frontends (gateway-served analyst console :18080,
+        # CTF app :3001) to POST spans to /v1/traces directly when
+        # VITE_OTEL_EXPORTER_OTLP_ENDPOINT is set. The :3000 origin is the
+        # pre-server-hosted shape; kept for backwards-compat with older clones.
         cors:
           allowed_origins:
-            - http://localhost:3000
-            - http://127.0.0.1:3000
+            - http://localhost:18080
+            - http://127.0.0.1:18080
             - http://localhost:3001
             - http://127.0.0.1:3001
+            - http://localhost:3000
+            - http://127.0.0.1:3000
 
 processors:
   batch:

@@ -26,7 +26,11 @@ function securityHeadersPlugin(frameAncestors: string): Plugin {
 
 export default defineConfig(() => {
   const backendProxyTarget = process.env.BACKEND_PROXY_TARGET || 'http://127.0.0.1:18080';
-  const frameAncestors = process.env.CTF_ALLOWED_FRAME_ANCESTORS || "'self' http://localhost:3000 http://127.0.0.1:3000";
+  // The analyst console is now gateway-served on :18080 (the older SPA-only shape
+  // lived on :3000); both origins are listed so a clone on either shape can embed
+  // the CTF iframe. Override with CTF_ALLOWED_FRAME_ANCESTORS for non-localhost
+  // deployments.
+  const frameAncestors = process.env.CTF_ALLOWED_FRAME_ANCESTORS || "'self' http://localhost:18080 http://127.0.0.1:18080 http://localhost:3000 http://127.0.0.1:3000";
   return {
     plugins: [react(), tailwindcss(), securityHeadersPlugin(frameAncestors)],
     server: {

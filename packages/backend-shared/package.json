@@ -18,10 +18,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.217.0",
     "@opentelemetry/auto-instrumentations-node": "^0.75.0",
     "@opentelemetry/exporter-logs-otlp-http": "^0.217.0",
     "@opentelemetry/exporter-metrics-otlp-http": "^0.217.0",
@@ -29,7 +30,8 @@
     "@opentelemetry/resources": "^2.7.1",
     "@opentelemetry/sdk-logs": "^0.217.0",
     "@opentelemetry/sdk-metrics": "^2.7.1",
-    "@opentelemetry/sdk-node": "^0.217.0"
+    "@opentelemetry/sdk-node": "^0.217.0",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

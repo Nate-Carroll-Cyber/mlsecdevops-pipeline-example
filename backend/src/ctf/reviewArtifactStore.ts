@@ -10,7 +10,7 @@
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import type { SamSpadeReviewArtifact } from '../services/sam-spade/index.js';
+import type { SamSpadeReviewArtifact } from './types.js';
 
 const STORE_PATH = resolve(process.cwd(), process.env.CTF_REVIEW_ARTIFACTS_STORE_PATH || 'backend/data/ctf-review-artifacts.db');
 const MAX_ROWS = (() => {

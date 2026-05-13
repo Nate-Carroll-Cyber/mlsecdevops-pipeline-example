@@ -3,14 +3,16 @@
  *  - output-side Shield (sanitizeOutput)
  *  - SSRF egress guard (assertEgressAllowed)
  *  - in-memory rate limiter (createRateLimiter)
- *  - Sam Spade session payload validation schema
+ *
+ * The Sam Spade session payload schema coverage moved to
+ * services/sam-spade/test/sessionSchema.test.ts when sam-spade became its own
+ * workspace.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitizeOutput } from '@counter-spy/backend-shared/security/sanitizer.js';
 import { assertEgressAllowed } from '@counter-spy/backend-shared/security/urlGuard.js';
 import { createRateLimiter } from '@counter-spy/backend-shared/middleware/rateLimit.js';
-import { SamSpadeSessionRecordSchema } from '../src/services/sam-spade/types.ts';
 
 // --- sanitizeOutput ---------------------------------------------------------
 
@@ -126,22 +128,3 @@ test('createRateLimiter is a no-op when max is 0', () => {
   assert.equal(passed, 50);
 });
 
-// --- Sam Spade session payload schema --------------------------------------
-
-test('SamSpadeSessionRecordSchema accepts a well-formed session and rejects garbage', () => {
-  const valid = {
-    sessionId: 's1',
-    caseId: 'case-067',
-    ownerUserId: 'user-a',
-    status: 'ACTIVE',
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    messages: [
-      { id: 'm1', role: 'npc', text: 'What do you want?', createdAt: new Date().toISOString(), reviewDisposition: 'clean' },
-    ],
-  };
-  assert.equal(SamSpadeSessionRecordSchema.safeParse(valid).success, true);
-  assert.equal(SamSpadeSessionRecordSchema.safeParse({ sessionId: 's1' }).success, false);
-  assert.equal(SamSpadeSessionRecordSchema.safeParse('not an object').success, false);
-  assert.equal(SamSpadeSessionRecordSchema.safeParse({ ...valid, status: 'BOGUS' }).success, false);
-});

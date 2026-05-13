@@ -1,10 +1,9 @@
 /**
  * Route-level integration tests for the standalone sam-spade-service.
  *
- * These tests used to live in securityRoutes.test.ts when the gateway also
- * served the CTF surface in-process. Post network split (the gateway 404s
- * /v1/ctf/sam-spade/* now), they boot server.ts with COUNTER_SPY_ROLE=sam-spade
- * so the CTF route handlers register and can be exercised in-process here.
+ * The sam-spade-service is its own express app (services/sam-spade/src/server.ts);
+ * these tests boot it in-process and exercise the four /v1/ctf/sam-spade/*
+ * route handlers directly.
  *
  * Covered:
  *  - Session ownership / cross-user 403/404 (the per-caller scoping the service
@@ -13,7 +12,8 @@
  *    bearer (the cross-frame Runtime Settings bridge).
  *  - When the CTF browser sends no metadata.safeguardEffectivePrompt, the
  *    route falls back to DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT (the analyst chat
- *    /v1/intercept path stays strict; that's tested in securityRoutes.test.ts).
+ *    /v1/intercept path stays strict; that's tested in the gateway's
+ *    securityRoutes.test.ts).
  */
 import test, { after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,15 +23,11 @@ import { Socket } from 'node:net';
 process.env.COUNTER_SPY_DISABLE_SERVER_LISTEN = 'true';
 process.env.APP_ENV = 'dev';
 process.env.INTERCEPT_BEARER_TOKEN = 'sam-spade-route-token-12345';
-process.env.COUNTER_SPY_ROLE = 'sam-spade';
 delete process.env.SAFEGUARDS_API_KEY;
 delete process.env.RESPONDER_API_BASE_URL;
 delete process.env.RESPONDER_API_KEY;
 delete process.env.LLM_API_BASE_URL;
 delete process.env.LLM_API_KEY;
-delete process.env.LARA_ACCESS_KEY_ID;
-delete process.env.LARA_ACCESS_KEY_SECRET;
-delete process.env.LARA_API_BASE_URL;
 
 const safeguardRequests: unknown[] = [];
 const safeguardRequestHeaders: Array<Record<string, string | string[] | undefined>> = [];

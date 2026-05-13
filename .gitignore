@@ -9,3 +9,5 @@ coverage/
 !.env.example
 .git.corrupt-*
 backend/data/
+services/sam-spade/backend/data/
+services/sam-spade/data/

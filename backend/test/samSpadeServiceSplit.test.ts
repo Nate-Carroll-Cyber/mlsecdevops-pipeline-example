@@ -1,14 +1,14 @@
 /**
- * Verifies the COUNTER_SPY_ROLE network split:
+ * Verifies the gateway's hands-off behavior on the CTF surface:
  *  - the gateway 404s every /v1/ctf/sam-spade/* request (no reverse-proxy: the
- *    standalone sam-spade-service is now directly addressable, and the CTF
+ *    standalone sam-spade-service is directly addressable, and the CTF
  *    frontend's vite proxy routes those requests to it without the gateway in
  *    the path);
  *  - /v1/ctf/review-artifacts stays on the gateway (the analyst console reads
  *    that feed; CTF turns POST artifacts here).
  *
- * The standalone-service mode (COUNTER_SPY_ROLE=sam-spade) is exercised by the
- * unit-level Sam Spade tests plus the route registration.
+ * The standalone sam-spade-service routes themselves live in
+ * services/sam-spade and are covered by its own test suite.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -24,7 +24,6 @@ delete process.env.RESPONDER_API_BASE_URL;
 delete process.env.RESPONDER_API_KEY;
 delete process.env.LLM_API_BASE_URL;
 delete process.env.LLM_API_KEY;
-process.env.COUNTER_SPY_ROLE = 'gateway';
 
 const { app } = await import('../src/server.ts');
 

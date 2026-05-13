@@ -3,9 +3,10 @@
 #
 # Topology: postgres + otel-collector(+jaeger) + counter-spy-sam-spade-service
 #           + counter-spy-backend (the gateway — serves the server-rendered
-#           analyst console AND the /v1 API on :8080; proxies /v1/ctf/sam-spade/*
-#           to the sam-spade service) + counter-spy-ctf-frontend (the standalone
-#           noir CTF surface).
+#           analyst console AND the /v1 API on :8080) + counter-spy-ctf-frontend
+#           (the standalone noir CTF surface). The gateway 404s
+#           /v1/ctf/sam-spade/* now; the CTF frontend talks to the sam-spade
+#           service directly via its own proxy.
 # The analyst console is at http://localhost:18080/  (no separate frontend container).
 services:
   counter-spy-backend:
@@ -27,7 +28,6 @@ services:
       APP_PORT: 8080
       APP_ENV: dev
       LOG_LEVEL: info
-      COUNTER_SPY_ROLE: gateway
       # Instruction similarity monitor backed by PostgreSQL + pgvector.
       INSTRUCTION_MONITOR_ENABLED: "true"
       INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS: "${INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS:-768}"
@@ -67,24 +67,23 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  # Standalone Sam Spade CTF service. Same image as the backend, booted with
-  # COUNTER_SPY_ROLE=sam-spade so only /healthz and /v1/ctf/sam-spade/* are served
-  # (on SAM_SPADE_SERVICE_PORT). It owns the SQLite session store volume and makes
-  # its own safeguard/responder calls.
+  # Standalone Sam Spade CTF service. Its own image built from
+  # services/sam-spade/Dockerfile — only /healthz and /v1/ctf/sam-spade/* are
+  # served (on SAM_SPADE_SERVICE_PORT). It owns the SQLite session store
+  # volume and makes its own safeguard/responder calls.
   counter-spy-sam-spade-service:
     build:
       context: .
-      dockerfile: backend/Dockerfile
+      dockerfile: services/sam-spade/Dockerfile
     container_name: counter-spy-sam-spade-service
     env_file:
       - .env.demo.local
     environment:
       APP_ENV: dev
       LOG_LEVEL: info
-      COUNTER_SPY_ROLE: sam-spade
       SAM_SPADE_ENABLED: "true"
       SAM_SPADE_DEFAULT_CASE_ID: "case-067"
-      SAM_SPADE_STORE_PATH: "/app/backend/data/sam-spade.db"
+      SAM_SPADE_STORE_PATH: "/app/data/sam-spade.db"
       SAM_SPADE_SERVICE_PORT: "18120"
       SAFEGUARDS_API_BASE_URL: "http://192.168.0.183:1234/v1/chat/completions"
       SAFEGUARDS_MODEL_ID: "gpt-oss-safeguard-20b"
@@ -95,12 +94,11 @@ services:
       OTEL_TRACES_SAMPLER: "${OTEL_TRACES_SAMPLER:-parentbased_traceidratio}"
       OTEL_TRACES_SAMPLER_ARG: "${OTEL_TRACES_SAMPLER_ARG:-1.0}"
       OTEL_LOG_LEVEL: "${OTEL_LOG_LEVEL:-warn}"
-    command: ["node", "backend/dist/server.js"]
     ports:
       - "18120:18120"
     volumes:
       # Sam Spade session data lives with the service that owns it now.
-      - sam_spade_data:/app/backend/data
+      - sam_spade_data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18120/healthz || exit 1"]
       interval: 30s

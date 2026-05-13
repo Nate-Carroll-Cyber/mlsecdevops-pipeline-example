@@ -2,8 +2,8 @@
 # The gateway serves both the /v1 API (compiled from backend/) and the
 # server-rendered analyst console (Vite client + SSR bundles built from src/).
 # So this image produces backend/dist + dist/client + dist/server and keeps only
-# the production deps + those artifacts in the runtime stage. (The sam-spade role
-# builds from the same image but never serves the UI; the extra dist/ is unused there.)
+# the production deps + those artifacts in the runtime stage. The sam-spade-service
+# now ships its own image (services/sam-spade/Dockerfile).
 FROM node:22.14.0-alpine AS dependencies
 WORKDIR /app
 # Workspace package.jsons are required so npm ci can resolve the

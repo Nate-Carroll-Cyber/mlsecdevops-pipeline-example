@@ -301,6 +301,56 @@ test('/v1/metrics/aggregate validates the request body', async () => {
   assert.match((badBody.payload as { error?: string }).error ?? '', /Invalid metrics aggregate request/);
 });
 
+test('/v1/governance rejects unauthenticated GET + PUT', async () => {
+  // Phase 3 step 4: governance config moved from Firestore to Postgres-backed
+  // app_config. Both reads and writes must be auth-gated like the rest of /v1.
+  const getNoAuth = await requestApp('/v1/governance', { method: 'GET' });
+  assert.equal(getNoAuth.status, 401);
+
+  const putNoAuth = await requestApp('/v1/governance', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: { isHitlActive: false, isGlobalPause: false, entropyThreshold: 4.0, syntacticThreshold: 65 },
+  });
+  assert.equal(putNoAuth.status, 401);
+});
+
+test('/v1/governance returns 503 when the config store is not configured', async () => {
+  // The test bootstrap doesn't set APP_CONFIG_DATABASE_URL/DATABASE_URL/
+  // INSTRUCTION_MONITOR_DATABASE_URL, so an authenticated request 503s with
+  // a clear message.
+  const get = await requestApp('/v1/governance', { method: 'GET', headers: authHeaders() });
+  assert.equal(get.status, 503);
+  assert.match((get.payload as { error?: string }).error ?? '', /App config store is not configured/);
+
+  const put = await requestApp('/v1/governance', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: { isHitlActive: false, isGlobalPause: false, entropyThreshold: 4.0, syntacticThreshold: 65 },
+  });
+  assert.equal(put.status, 503);
+  assert.match((put.payload as { error?: string }).error ?? '', /App config store is not configured/);
+});
+
+test('/v1/governance PUT validates the body shape', async () => {
+  // Body validation runs before the store check (matching /v1/metrics/aggregate),
+  // so out-of-range thresholds always 400 even when the store is unconfigured.
+  const tooHighEntropy = await requestApp('/v1/governance', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: { isHitlActive: false, isGlobalPause: false, entropyThreshold: 99, syntacticThreshold: 65 },
+  });
+  assert.equal(tooHighEntropy.status, 400);
+  assert.match((tooHighEntropy.payload as { error?: string }).error ?? '', /Invalid governance config/);
+
+  const missingField = await requestApp('/v1/governance', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: { isHitlActive: false, entropyThreshold: 4.0, syntacticThreshold: 65 },
+  });
+  assert.equal(missingField.status, 400);
+});
+
 test('Sam Spade message route forwards a metadata.safeguardApiKey as the upstream bearer', async () => {
   // The analyst-chat parent window postMessages its Runtime Settings
   // safeguardApiKey into the CTF iframe; the CTF echoes it back as

@@ -815,6 +815,43 @@ export async function aggregateMetrics(options: AggregateMetricsOptions = {}, ca
   return MetricsAggregateResponseSchema.parse(payload);
 }
 
+// --- Governance config (Phase 3 step 4) ---
+// HITL toggle, Global Pause, entropy / syntactic thresholds. Used to live in
+// Firestore (`config/governance`); now backed by Postgres app_config via
+// /v1/governance.
+
+const GovernanceConfigResponseSchema = z.object({
+  isHitlActive: z.boolean(),
+  isGlobalPause: z.boolean(),
+  entropyThreshold: z.number(),
+  syntacticThreshold: z.number(),
+});
+export type GovernanceConfigDto = z.infer<typeof GovernanceConfigResponseSchema>;
+
+export async function getGovernanceConfig(callerUserId?: string): Promise<GovernanceConfigDto> {
+  const response = await fetch(resolveBackendUrl('/v1/governance'), { headers: getProtectedHeaders(callerUserId) });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Governance config fetch failed (HTTP ${response.status}).`);
+  }
+  return GovernanceConfigResponseSchema.parse(payload);
+}
+
+export async function putGovernanceConfig(config: GovernanceConfigDto, callerUserId?: string): Promise<GovernanceConfigDto> {
+  const response = await fetch(resolveBackendUrl('/v1/governance'), {
+    method: 'PUT',
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify(config),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Governance config update failed (HTTP ${response.status}).`);
+  }
+  return GovernanceConfigResponseSchema.parse(payload);
+}
+
 export async function lookupInstructionMonitorRecord(
   identifier: string,
   callerUserId?: string,

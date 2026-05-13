@@ -7,18 +7,15 @@
 import React, { useEffect, useState } from 'react';
 // Import UI components from shadcn/ui
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-// Import Firestore functions for governance config (the audit-log path moved to
-// Postgres in Phase 3 step 2; this file still uses Firestore for the
-// HITL/global-pause governance toggles until Phase 3 step 4 lands the
-// governance store backend-side).
-import { doc, onSnapshot, setDoc } from 'firebase/firestore';
-// Import the initialized Firebase database instance
-import { db } from '../lib/firebase';
 import { HelpTooltip } from './HelpTooltip';
-// Phase 3 step 3: audit-log reads + anomaly/FPR analytics now flow through the
+// Phase 3 step 3: audit-log reads + anomaly/FPR analytics flow through the
 // backend (Postgres-backed listAuditLogs + /v1/metrics/aggregate). The
 // anomalyDetector + metrics modules moved to backend/src/analysis/.
-import { aggregateMetrics, listAuditLogs } from '../lib/backendApi';
+// Phase 3 step 4: governance config (HITL/Global Pause/threshold sliders) also
+// moved to Postgres via /v1/governance, replacing the previous Firestore
+// onSnapshot listener with a parent-driven prop + putGovernanceConfig writes.
+import { aggregateMetrics, listAuditLogs, putGovernanceConfig } from '../lib/backendApi';
+import { devWarn } from '../lib/devLog';
 import { ATLAS_TACTICS, ATLAS_TECHNIQUE_DEFINITIONS } from '../lib/atlasTaxonomy';
 import { SUSPICIOUS_ENTROPY_THRESHOLD } from '../lib/analysisTypes';
 import { getFeaturePressure, getTopPressureDriver } from '../lib/playgroundMetrics';
@@ -500,107 +497,72 @@ export function ThreatDashboard({
     setSyntacticThreshold(governanceConfig.syntacticThreshold);
   }, [governanceConfig]);
 
-  // Effect hook to listen for real-time updates to the governance configuration
-  useEffect(() => {
-    if (localReviewMode) {
-      return;
+  // Phase 3 step 4: the old per-component onSnapshot to `config/governance` is
+  // gone. The parent (App.tsx) polls /v1/governance and feeds the current value
+  // down via the `governanceConfig` prop; the useEffect above (~line 495) keeps
+  // local state synced when the prop changes. Mutations call PUT /v1/governance
+  // and also bubble up via `onGovernanceConfigChange` so the parent doesn't
+  // have to wait for its next poll tick.
+
+  async function persistGovernance(next: {
+    isHitlActive: boolean;
+    isGlobalPause: boolean;
+    entropyThreshold: number;
+    syntacticThreshold: number;
+  }) {
+    onGovernanceConfigChange?.(next);
+    if (localReviewMode) return;
+    try {
+      await putGovernanceConfig(next);
+    } catch (error) {
+      devWarn('Failed to persist governance config update', error);
     }
-
-    // Reference the governance config document in Firestore
-    const configRef = doc(db, 'config', 'governance');
-    // Set up a real-time listener
-    const unsubscribe = onSnapshot(configRef, (docSnap) => {
-      if (docSnap.exists()) {
-        const data = docSnap.data();
-        // Update local state with fetched values, defaulting to false
-        setIsHitlActive(data.isHitlActive || false);
-        setIsGlobalPause(data.isGlobalPause || false);
-        setEntropyThreshold(typeof data.entropyThreshold === 'number' ? Math.max(data.entropyThreshold, SUSPICIOUS_ENTROPY_THRESHOLD) : 4.0);
-        setSyntacticThreshold(typeof data.syntacticThreshold === 'number' ? data.syntacticThreshold : 65);
-      } else {
-        // Initialize the document if it doesn't exist
-        setDoc(configRef, { isHitlActive: false, isGlobalPause: false, entropyThreshold: 4.0, syntacticThreshold: 65 });
-      }
-    });
-
-    // Cleanup function to unsubscribe when the component unmounts
-    return () => unsubscribe();
-  }, [localReviewMode]);
+  }
 
   // Function to toggle the Global System Pause state
   const handleGlobalPauseToggle = async () => {
-    const newState = !isGlobalPause;
-    if (localReviewMode) {
-      setIsGlobalPause(newState);
-      if (newState) {
-        setIsHitlActive(false);
-      }
-      onGovernanceConfigChange?.({
-        isHitlActive: newState ? false : isHitlActive,
-        isGlobalPause: newState,
-        entropyThreshold,
-        syntacticThreshold,
-      });
-      return;
-    }
-
-    const configRef = doc(db, 'config', 'governance');
-    // Update Firestore, merging with existing data. If pausing, disable HITL.
-    await setDoc(configRef, { 
-      isGlobalPause: newState, 
-      isHitlActive: newState ? false : isHitlActive,
+    const newPaused = !isGlobalPause;
+    const nextHitl = newPaused ? false : isHitlActive;
+    setIsGlobalPause(newPaused);
+    if (newPaused) setIsHitlActive(false);
+    await persistGovernance({
+      isHitlActive: nextHitl,
+      isGlobalPause: newPaused,
       entropyThreshold,
       syntacticThreshold,
-    }, { merge: true });
+    });
   };
 
   // Function to toggle the Human-in-the-Loop (HITL) mode
   const handleHitlToggle = async () => {
-    if (localReviewMode) {
-      const newState = !isHitlActive;
-      setIsHitlActive(newState);
-      onGovernanceConfigChange?.({
-        isHitlActive: newState,
-        isGlobalPause,
-        entropyThreshold,
-        syntacticThreshold,
-      });
-      return;
-    }
-
-    const configRef = doc(db, 'config', 'governance');
-    // Update Firestore, merging with existing data
-    await setDoc(configRef, { isHitlActive: !isHitlActive, entropyThreshold, syntacticThreshold }, { merge: true });
+    const newHitl = !isHitlActive;
+    setIsHitlActive(newHitl);
+    await persistGovernance({
+      isHitlActive: newHitl,
+      isGlobalPause,
+      entropyThreshold,
+      syntacticThreshold,
+    });
   };
 
   const handleEntropyThresholdChange = async (value: number) => {
     setEntropyThreshold(value);
-    if (localReviewMode) {
-      onGovernanceConfigChange?.({
-        isHitlActive,
-        isGlobalPause,
-        entropyThreshold: value,
-        syntacticThreshold,
-      });
-      return;
-    }
-    const configRef = doc(db, 'config', 'governance');
-    await setDoc(configRef, { entropyThreshold: value }, { merge: true });
+    await persistGovernance({
+      isHitlActive,
+      isGlobalPause,
+      entropyThreshold: value,
+      syntacticThreshold,
+    });
   };
 
   const handleSyntacticThresholdChange = async (value: number) => {
     setSyntacticThreshold(value);
-    if (localReviewMode) {
-      onGovernanceConfigChange?.({
-        isHitlActive,
-        isGlobalPause,
-        entropyThreshold,
-        syntacticThreshold: value,
-      });
-      return;
-    }
-    const configRef = doc(db, 'config', 'governance');
-    await setDoc(configRef, { syntacticThreshold: value }, { merge: true });
+    await persistGovernance({
+      isHitlActive,
+      isGlobalPause,
+      entropyThreshold,
+      syntacticThreshold: value,
+    });
   };
 
   // Effect hook to load and calculate metrics data

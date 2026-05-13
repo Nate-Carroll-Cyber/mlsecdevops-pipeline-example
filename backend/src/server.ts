@@ -31,6 +31,7 @@ import {
 } from './analysis/obfuscation.js';
 import { normalizeWithHeuristicSync, type NormalizationResult } from './analysis/spellNormalize.js';
 import { appendAuditLog, clearAuditLogs, initAuditStore, isAuditStoreConfigured, listAuditLogs, patchAuditLog, type AuditLogRow } from './audit/auditStore.js';
+import { getConfig, initConfigStore, isConfigStoreConfigured, putConfig } from './config/configStore.js';
 import { appendCtfReviewArtifact, listCtfReviewArtifacts } from './ctf/reviewArtifactStore.js';
 import {
   createSamSpadeSession,
@@ -2581,6 +2582,84 @@ app.post('/v1/metrics/aggregate', requireBackendAuth, async (req: AuthenticatedR
   }
 });
 
+// Governance config (HITL toggle, Global Pause, entropy / syntactic thresholds).
+// Phase 3 step 4: this doc used to live in Firestore (`config/governance`); it now
+// rides on the shared `app_config` table via the configStore. PUT is currently
+// gated only by the shared bearer token + caller-id header — admin-only role
+// enforcement is deferred to step 3 (user_profiles), where the role check
+// primitive will be added and back-applied here.
+function requireConfigStore(res: Response): boolean {
+  if (isConfigStoreConfigured()) return true;
+  res.status(503).json({ error: 'App config store is not configured (set APP_CONFIG_DATABASE_URL or DATABASE_URL).' });
+  return false;
+}
+
+const GovernanceConfigSchema = z.object({
+  isHitlActive: z.boolean(),
+  isGlobalPause: z.boolean(),
+  // Floor matches the frontend's SUSPICIOUS_ENTROPY_THRESHOLD (3.8) and the
+  // sanitizer's hard-coded suspicious band. Ceiling matches the analyst console
+  // slider range. The metrics-aggregate route clamps the same way.
+  entropyThreshold: z.number().min(3).max(4.6),
+  syntacticThreshold: z.number().min(40).max(90),
+}).strict();
+type GovernanceConfig = z.infer<typeof GovernanceConfigSchema>;
+
+const DEFAULT_GOVERNANCE_CONFIG: GovernanceConfig = {
+  isHitlActive: false,
+  isGlobalPause: false,
+  entropyThreshold: 4.0,
+  syntacticThreshold: 65,
+};
+
+const GOVERNANCE_CONFIG_KEY = 'governance';
+
+app.get('/v1/governance', requireBackendAuth, async (_req: AuthenticatedRequest, res: Response<GovernanceConfig | { error: string }>) => {
+  if (!requireConfigStore(res)) return;
+  try {
+    const row = await getConfig<unknown>(GOVERNANCE_CONFIG_KEY);
+    if (!row) {
+      // No row yet: return the defaults rather than seeding on read, so a stale
+      // GET doesn't write back arbitrary values. The first PUT (which the UI
+      // does on any toggle change) materializes the row.
+      res.status(200).json(DEFAULT_GOVERNANCE_CONFIG);
+      return;
+    }
+    const parsed = GovernanceConfigSchema.safeParse(row.value);
+    if (!parsed.success) {
+      // Stored value drifted from the schema (older app version, manual edit).
+      // Fall back to defaults rather than 500ing the dashboard.
+      log('warn', 'governance_config_parse_failed', { requestId: res.locals.requestId, error: parsed.error.message });
+      res.status(200).json(DEFAULT_GOVERNANCE_CONFIG);
+      return;
+    }
+    res.status(200).json(parsed.data);
+  } catch (error) {
+    log('warn', 'governance_config_get_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'get error' });
+    res.status(500).json({ error: 'Failed to read governance config.' });
+  }
+});
+
+app.put('/v1/governance', requireBackendAuth, async (req: AuthenticatedRequest, res: Response<GovernanceConfig | { error: string }>) => {
+  // Validate body first so malformed inputs always 400, even when the store
+  // happens to be unconfigured (same ordering as /v1/metrics/aggregate).
+  const parsed = GovernanceConfigSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid governance config.' });
+    return;
+  }
+  if (!requireConfigStore(res)) return;
+  const callerId = getAuthenticatedCallerId(req, res);
+  if (!callerId) return;
+  try {
+    const row = await putConfig<GovernanceConfig>(GOVERNANCE_CONFIG_KEY, parsed.data, callerId);
+    res.status(200).json(row.value);
+  } catch (error) {
+    log('warn', 'governance_config_put_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'put error' });
+    res.status(500).json({ error: 'Failed to update governance config.' });
+  }
+});
+
 // Translation proxy route:
 // keeps provider keys on the server side and gives the Playground a single stable
 // API shape no matter which translation vendor is in use.
@@ -2860,6 +2939,8 @@ if (!isSamSpadeService) {
   // Best-effort: create the audit_logs table at boot if Postgres is configured.
   // The /v1/audit-logs routes 503 when it isn't, so this never blocks startup.
   void initAuditStore().catch((error) => log('warn', 'audit_store_init_failed', { error: error instanceof Error ? error.message : 'init error' }));
+  // Same pattern for the app_config table that backs governance + system config.
+  void initConfigStore().catch((error) => log('warn', 'config_store_init_failed', { error: error instanceof Error ? error.message : 'init error' }));
 }
 
 app.use((_req: Request, res: Response) => {

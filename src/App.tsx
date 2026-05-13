@@ -59,6 +59,8 @@ import {
   listAuditLogs,
   patchAuditLog,
   clearAuditLogs,
+  getGovernanceConfig,
+  putGovernanceConfig,
   checkBackendHealth,
   getCtfReviewArtifacts,
   interceptPrompt,
@@ -272,6 +274,7 @@ const CTF_REVIEW_POLL_INTERVAL_MS = 6000;
 // The audit trail lives in Postgres behind /v1/audit-logs now (no Firestore
 // realtime listener), so the analyst console polls the shared trail on this cadence.
 const AUDIT_LOG_POLL_INTERVAL_MS = 5000;
+const GOVERNANCE_CONFIG_POLL_INTERVAL_MS = 5000;
 const AUDIT_LOG_POLL_LIMIT = 50;
 const SANITIZATION_REDOS_LATENCY_THRESHOLD_MS = 1000;
 
@@ -2166,7 +2169,7 @@ export default function App() {
     }
 
     try {
-      await setDoc(doc(db, 'config', 'governance'), nextGovernanceConfig, { merge: true });
+      await putGovernanceConfig(nextGovernanceConfig);
     } catch (error) {
       console.error('Failed to activate Global System Pause automatically.', error, reason);
     }
@@ -2223,7 +2226,6 @@ export default function App() {
   // Effect hook to handle authentication state changes and set up real-time listeners
   useEffect(() => {
     let profileUnsubscribe: (() => void) | null = null;
-    let governanceUnsubscribe: (() => void) | null = null;
 
     // Listen for changes in the Firebase authentication state
     const authUnsubscribe = onAuthStateChanged(auth, async (u) => {
@@ -2256,25 +2258,11 @@ export default function App() {
           handleFirestoreError(error, OperationType.GET, `users/${u.uid}`);
         });
 
-        // Listen to governance config in real-time
-        const govRef = doc(db, 'config', 'governance');
-        governanceUnsubscribe = onSnapshot(govRef, (snap) => {
-          if (snap.exists()) {
-            const parsedGovernanceConfig = parseGovernanceConfig(snap.data());
-            if (parsedGovernanceConfig) {
-              setGovernanceConfig(parsedGovernanceConfig);
-            } else {
-              toast.error('Governance configuration failed validation.');
-            }
-          }
-        });
-
       } else {
         // User is logged out, clear state and unsubscribe from listeners
         setUser(null);
         setProfile(null);
         if (profileUnsubscribe) profileUnsubscribe();
-        if (governanceUnsubscribe) governanceUnsubscribe();
       }
       // Mark loading as complete
       setLoading(false);
@@ -2284,9 +2272,40 @@ export default function App() {
     return () => {
       authUnsubscribe();
       if (profileUnsubscribe) profileUnsubscribe();
-      if (governanceUnsubscribe) governanceUnsubscribe();
     };
   }, []);
+
+  // Phase 3 step 4: governance config (HITL toggle, Global Pause, threshold
+  // sliders) used to ride on a Firestore onSnapshot in the auth-state effect
+  // above. It now polls /v1/governance every 5s while a signed-in non-local
+  // session is active. ThreatDashboard writes go straight to PUT /v1/governance
+  // and also propagate up via onGovernanceConfigChange so the operator doesn't
+  // wait a poll tick to see their own change reflected here.
+  useEffect(() => {
+    if (localReviewMode) return;
+    if (!user) return;
+
+    let cancelled = false;
+    const fetchGovernance = async () => {
+      try {
+        const next = await getGovernanceConfig();
+        if (!cancelled) {
+          const parsed = parseGovernanceConfig(next);
+          if (parsed) setGovernanceConfig(parsed);
+          else toast.error('Governance configuration failed validation.');
+        }
+      } catch (error) {
+        if (!cancelled) devWarn('governance_config_fetch_failed', error);
+      }
+    };
+
+    void fetchGovernance();
+    const intervalId = window.setInterval(fetchGovernance, GOVERNANCE_CONFIG_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [user, localReviewMode]);
 
   useEffect(() => {
     if (!profile) return;

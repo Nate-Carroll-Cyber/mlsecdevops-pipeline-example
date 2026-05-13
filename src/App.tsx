@@ -46,11 +46,15 @@ import {
   updateDoc,
   getDocFromServer
 } from 'firebase/firestore';
-// Import custom sanitization logic and types
-import { sanitizeInput, sanitizeOutput, SanitizationResult, DetectionLevel, SUSPICIOUS_ENTROPY_THRESHOLD } from './lib/sanitizer';
+// Sanitization shapes/constants only — the deterministic Shield itself now runs
+// server-side (backend/src/security/sanitizer.ts via /v1/analyze); the browser no
+// longer ships the engine. See runPromptShield / runOutputShield below.
+import { SanitizationResult, OutputSanitizationResult, DetectionLevel, SUSPICIOUS_ENTROPY_THRESHOLD } from './lib/sanitizer';
 // Import Gemini API integration and types
 import { generateSecurityAdvice, ChatMessage } from './lib/gemini';
 import {
+  analyzePrompt as analyzePromptViaBackend,
+  analyzeOutput as analyzeOutputViaBackend,
   checkBackendHealth,
   getCtfReviewArtifacts,
   interceptPrompt,
@@ -1550,6 +1554,61 @@ function buildDownstreamResponderSystemPrompt(args: {
   ]
     .filter(Boolean)
     .join('\n\n');
+}
+
+// Run the deterministic Shield on the backend (no safeguard/responder LLM, no
+// instruction-similarity lookup, no provider egress) and adapt its result to the
+// SanitizationResult shape the console works with. backend/src/security/sanitizer.ts
+// is the single trust boundary now — the browser never runs the engine. Note: the
+// backend always redacts PII and always applies blocked-keyword/topic/regex checks,
+// so the granular per-check guardrail toggles no longer gate sanitization (they
+// still drive what the console *displays*); the backend's redaction tokens,
+// entropy/syntactic scores and detection flags are authoritative.
+async function runPromptShield(
+  prompt: string,
+  blockedKeywords: string[],
+  forbiddenTopics: string[],
+  regexRules: string[],
+  tuning: { entropyThreshold: number; syntacticThreshold: number },
+): Promise<SanitizationResult> {
+  const r = await analyzePromptViaBackend(prompt, {
+    entropyThreshold: tuning.entropyThreshold,
+    syntacticThreshold: tuning.syntacticThreshold,
+    blockedKeywords,
+    forbiddenTopics,
+    regexRules,
+  });
+  const detectionLevel =
+    r.verdict === 'ADVERSARIAL' ? DetectionLevel.ADVERSARIAL
+    : r.verdict === 'SUSPICIOUS' ? DetectionLevel.SUSPICIOUS
+    : r.redactions.length > 0 ? DetectionLevel.INFORMATIONAL
+    : DetectionLevel.CLEAN;
+  return {
+    original: r.original,
+    sanitized: r.sanitized,
+    redactions: r.redactions,
+    entropy: r.entropy,
+    globalEntropy: r.globalEntropy,
+    suspiciousChunks: r.suspiciousChunks,
+    isPotentiallyAdversarial: r.verdict === 'ADVERSARIAL',
+    detectionLevel,
+    latencyMs: r.latencyMs,
+    syntacticScore: r.syntacticScore,
+    decodeTelemetry: r.decodeTelemetry,
+  };
+}
+
+// Output-side governance pass, server-side. Maps the backend's OutputSanitizationResult
+// onto the shape the console expects; "escalation" means secret leakage or a blocked
+// keyword hit (passive PII redaction alone is not escalation).
+async function runOutputShield(text: string, blockedKeywords: string[]): Promise<OutputSanitizationResult> {
+  const r = await analyzeOutputViaBackend(text, blockedKeywords);
+  return {
+    sanitized: r.sanitized,
+    triggeredEscalation: r.highRiskLeak || r.blockedKeywordHits.length > 0,
+    redactions: r.redactions,
+    decodeTelemetry: 'plain_text',
+  };
 }
 
 function buildAuditFeatureFields(
@@ -3359,20 +3418,33 @@ export default function App() {
 
   // Function to handle changes in the chat input field
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    const val = e.target.value;
-    setInput(val);
-    // Generate a real-time sanitization preview if there is input
-    if (val.trim()) {
-      const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
-      const { blockedKeywords: keywords, forbiddenTopics: topics, regexRules: regexes } = buildPolicyOverrides(systemConfig, policies);
-      setSanitizationPreview(sanitizeInput(val, keywords, topics, regexes, activeGuardrails, {
+    setInput(e.target.value);
+  };
+
+  // Live sanitization preview — runs the deterministic Shield server-side (the
+  // browser no longer carries the engine) ~300ms after the analyst stops typing,
+  // cancelling stale in-flight requests so the preview always reflects the latest input.
+  useEffect(() => {
+    if (!input.trim()) {
+      setSanitizationPreview(null);
+      return;
+    }
+    const policies = customPolicies.length > 0 ? customPolicies : POLICIES;
+    const { blockedKeywords: keywords, forbiddenTopics: topics, regexRules: regexes } = buildPolicyOverrides(systemConfig, policies);
+    let cancelled = false;
+    const timer = window.setTimeout(() => {
+      void runPromptShield(input, keywords, topics, regexes, {
         entropyThreshold: governanceConfig.entropyThreshold,
         syntacticThreshold: governanceConfig.syntacticThreshold,
-      }));
-    } else {
-      setSanitizationPreview(null);
-    }
-  };
+      })
+        .then((result) => { if (!cancelled) setSanitizationPreview(result); })
+        .catch(() => { if (!cancelled) setSanitizationPreview(null); });
+    }, 300);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [input, customPolicies, systemConfig, governanceConfig.entropyThreshold, governanceConfig.syntacticThreshold]);
 
   // Main Analyst Chat send path. All normal prompt traffic flows through here, gets
   // locally sanitized first, and then optionally continues into the backend intercept API.
@@ -3407,8 +3479,8 @@ export default function App() {
         systemConfig,
         policies,
       });
-      // Sanitize the input
-      const sanitization = sanitizeInput(textToProcess, keywords, topics, regexes, activeGuardrails, {
+      // Sanitize the input (server-side deterministic Shield)
+      const sanitization = await runPromptShield(textToProcess, keywords, topics, regexes, {
         entropyThreshold: governanceConfig.entropyThreshold,
         syntacticThreshold: governanceConfig.syntacticThreshold,
       });
@@ -3435,12 +3507,8 @@ export default function App() {
             setInput('');
           }
           if (activeGuardrails.sessionAudit) {
-            const logSanitization = activeGuardrails.piiRedaction
-              ? sanitization
-              : sanitizeInput(textToProcess, keywords, topics, regexes, { ...activeGuardrails, piiRedaction: true }, {
-                  entropyThreshold: governanceConfig.entropyThreshold,
-                  syntacticThreshold: governanceConfig.syntacticThreshold,
-                });
+            // The server-side Shield always redacts PII, so the audit-safe result is the same one.
+            const logSanitization = sanitization;
             const detectionFlags = Array.from(new Set([...logSanitization.redactions, 'MAX_CONTEXT_WINDOW_EXCEEDED']));
             const blockedDetectionLevel = Math.max(logSanitization.detectionLevel, DetectionLevel.SUSPICIOUS);
             const featureFields = buildAuditFeatureFields(textToProcess, logSanitization, governanceConfig);
@@ -3595,13 +3663,9 @@ export default function App() {
       let auditLogBase: AuditLog | null = null;
       // 2. Audit Log (Immutable)
       if (activeGuardrails.sessionAudit) {
-        // For the Audit Log, we ALWAYS redact PII even if the live guardrail is disabled
-        const logSanitization = activeGuardrails.piiRedaction
-          ? sanitization
-          : sanitizeInput(textToProcess, keywords, topics, regexes, { ...activeGuardrails, piiRedaction: true }, {
-              entropyThreshold: governanceConfig.entropyThreshold,
-              syntacticThreshold: governanceConfig.syntacticThreshold,
-            });
+        // The server-side Shield always redacts PII (the live guardrail toggle no longer
+        // gates redaction), so the audit-safe sanitization is just the one we already have.
+        const logSanitization = sanitization;
         const featureFields = buildAuditFeatureFields(textToProcess, logSanitization, governanceConfig);
 
         try {
@@ -4056,8 +4120,8 @@ export default function App() {
         const responderDecision = structuredResponderDecision ?? classifyResponderDecision(rawResponseForDecisioning);
         const responderEscalated = responderDecision !== 'allow';
 
-        // Sanitize the output from the LLM
-        const outputSanitization = sanitizeOutput(rawResponse, keywords, topics, activeGuardrails);
+        // Sanitize the output from the LLM (server-side output Shield)
+        const outputSanitization = await runOutputShield(rawResponse, keywords);
         responseText = outputSanitization.sanitized;
         responderAuditPatch = {
           ...responderAuditPatch,

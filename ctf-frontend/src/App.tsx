@@ -147,6 +147,12 @@ export function App() {
         <main className={`z-10 flex w-full max-w-4xl flex-1 min-h-0 flex-col gap-8 overflow-hidden rounded-lg border bg-[#0a0a0a]/80 p-4 shadow-2xl backdrop-blur-sm md:flex-row md:p-6 ${caseSolved ? 'border-green-500/40' : 'border-amber-500/30'}`}>
           <aside className="flex w-full min-h-0 flex-col space-y-4 overflow-y-auto pr-2 md:w-1/3">
             <div className="relative flex aspect-[3/4] w-full items-end overflow-hidden rounded border border-slate-800 bg-[radial-gradient(circle_at_50%_25%,rgba(120,120,120,0.18),rgba(6,6,6,0.95)_60%)]">
+              <img
+                src="/sam-spade-ctf-logo.png"
+                alt="Sam Spade noir office portrait"
+                className="absolute inset-0 h-full w-full object-cover object-[62%_center]"
+              />
+              <div className="absolute inset-0 bg-[linear-gradient(180deg,rgba(60,60,60,0.18),rgba(8,8,8,0.88)),radial-gradient(circle_at_50%_20%,rgba(180,180,180,0.2),transparent_35%)]" />
               <div className="absolute inset-0 shadow-[inset_0_0_120px_rgba(0,0,0,0.95)]" />
               <div className="absolute left-0 right-0 top-1/3 mx-auto h-px w-1/2 bg-amber-500/20" />
               <div className="relative w-full p-4">

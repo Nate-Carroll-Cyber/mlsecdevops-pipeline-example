@@ -442,6 +442,79 @@ export async function interceptPrompt(input: {
   return BackendInterceptResponseSchema.parse(payload);
 }
 
+// --- Deterministic Shield analysis (server-side; mirrors backend/src/security/sanitizer.ts) ---
+
+export const FIREWALL_VERDICTS = ['CLEAN', 'SUSPICIOUS', 'ADVERSARIAL'] as const;
+export type FirewallVerdict = (typeof FIREWALL_VERDICTS)[number];
+
+const BackendSanitizationResultSchema = z.object({
+  original: z.string(),
+  sanitized: z.string(),
+  detectionFlags: z.array(z.string()),
+  redactions: z.array(z.string()),
+  entropy: z.number(),
+  globalEntropy: z.number(),
+  syntacticScore: z.number(),
+  suspiciousChunks: z.array(z.string()),
+  verdict: z.enum(FIREWALL_VERDICTS),
+  analystReasoning: z.string(),
+  latencyMs: z.number(),
+  decodeTelemetry: z.enum(['plain_text', 'single_hop_decode', 'recursive_decode']),
+});
+export type BackendSanitizationResult = z.infer<typeof BackendSanitizationResultSchema>;
+
+const BackendOutputSanitizationResultSchema = z.object({
+  original: z.string(),
+  sanitized: z.string(),
+  redactions: z.array(z.string()),
+  detectionFlags: z.array(z.string()),
+  blockedKeywordHits: z.array(z.string()),
+  highRiskLeak: z.boolean(),
+  tripped: z.boolean(),
+});
+export type BackendOutputSanitizationResult = z.infer<typeof BackendOutputSanitizationResultSchema>;
+
+export interface AnalyzePromptTuning {
+  entropyThreshold?: number;
+  syntacticThreshold?: number;
+  blockedKeywords?: string[];
+  forbiddenTopics?: string[];
+  regexRules?: string[];
+}
+
+// Run the deterministic Shield on a prompt (redaction, entropy, syntactic
+// complexity, decode telemetry, verdict bands) — no LLM, no instruction-similarity
+// lookup. Used for the live sanitization preview and analyst inspection.
+export async function analyzePrompt(prompt: string, tuning?: AnalyzePromptTuning): Promise<BackendSanitizationResult> {
+  const response = await fetch(resolveBackendUrl('/v1/analyze'), {
+    method: 'POST',
+    headers: getProtectedHeaders(),
+    body: JSON.stringify({ prompt, ...(tuning ? { tuning } : {}) }),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Backend analyze failed (HTTP ${response.status}).`);
+  }
+  return BackendSanitizationResultSchema.parse(payload);
+}
+
+// Run the deterministic output Shield on model/tool output (redaction + blocked
+// keyword + high-risk-leak detection). No LLM, no provider egress.
+export async function analyzeOutput(text: string, blockedKeywords?: string[]): Promise<BackendOutputSanitizationResult> {
+  const response = await fetch(resolveBackendUrl('/v1/analyze/output'), {
+    method: 'POST',
+    headers: getProtectedHeaders(),
+    body: JSON.stringify({ text, ...(blockedKeywords ? { blockedKeywords } : {}) }),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Backend output analyze failed (HTTP ${response.status}).`);
+  }
+  return BackendOutputSanitizationResultSchema.parse(payload);
+}
+
 export async function lookupInstructionMonitorRecord(
   identifier: string,
   callerUserId?: string,

@@ -12,7 +12,7 @@ import { createHash } from 'node:crypto';
 import { metrics, trace, type Attributes } from '@opentelemetry/api';
 import { logs, SeverityNumber } from '@opentelemetry/api-logs';
 import { z } from 'zod';
-import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict } from './security/sanitizer.js';
+import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict, type OutputSanitizationResult } from './security/sanitizer.js';
 import { assertEgressAllowed } from './security/urlGuard.js';
 import { createRateLimiter } from './middleware/rateLimit.js';
 import { mountWebApp } from './web/ssr.js';
@@ -2238,6 +2238,45 @@ app.post('/v1/intercept', requireBackendAuth, async (req: AuthenticatedRequest, 
       upstreamStatus: error instanceof UpstreamResponderError ? error.status : undefined,
     });
   }
+});
+
+// Analysis routes: run the deterministic Shield only — no safeguard/responder LLM,
+// no instruction-similarity lookup, no provider egress. This is the server-side
+// home of what the browser used to compute locally (redaction, entropy, syntactic
+// complexity, decode telemetry, verdict bands), so the analyst console can preview
+// and inspect sanitization without shipping the engine to the client.
+const AnalyzePromptRequestSchema = z.object({
+  prompt: z.string().min(1).max(50_000),
+  tuning: z.object({
+    entropyThreshold: z.number().min(3).max(4.6).optional(),
+    syntacticThreshold: z.number().min(40).max(90).optional(),
+    blockedKeywords: z.array(z.string()).optional(),
+    forbiddenTopics: z.array(z.string()).optional(),
+    regexRules: z.array(z.string()).optional(),
+  }).optional(),
+});
+
+app.post('/v1/analyze', requireBackendAuth, (req: AuthenticatedRequest, res: Response<BackendSanitizationResult | { error: string }>) => {
+  const parsed = AnalyzePromptRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid analyze request.' });
+    return;
+  }
+  res.status(200).json(sanitizePrompt(parsed.data.prompt, parsed.data.tuning));
+});
+
+const AnalyzeOutputRequestSchema = z.object({
+  text: z.string().max(50_000),
+  blockedKeywords: z.array(z.string()).optional(),
+});
+
+app.post('/v1/analyze/output', requireBackendAuth, (req: AuthenticatedRequest, res: Response<OutputSanitizationResult | { error: string }>) => {
+  const parsed = AnalyzeOutputRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid output analyze request.' });
+    return;
+  }
+  res.status(200).json(sanitizeOutput(parsed.data.text, { blockedKeywords: parsed.data.blockedKeywords }));
 });
 
 // Translation proxy route:

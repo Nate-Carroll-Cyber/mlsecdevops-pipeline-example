@@ -1,23 +1,42 @@
-# Backend multi-stage build.
-# First install deps, then compile TypeScript, then copy only what the runtime needs.
+# Gateway multi-stage build.
+# The gateway serves both the /v1 API (compiled from backend/) and the
+# server-rendered analyst console (Vite client + SSR bundles built from src/).
+# So this image produces backend/dist + dist/client + dist/server and keeps only
+# the production deps + those artifacts in the runtime stage. (The sam-spade role
+# builds from the same image but never serves the UI; the extra dist/ is unused there.)
 FROM node:22.14.0-alpine AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
 FROM dependencies AS build
-# Build just the backend TypeScript output.
-COPY tsconfig.json ./tsconfig.json
+# Vite bakes VITE_* env into the client bundle at build time;
+# VITE_BACKEND_BEARER_TOKEN must equal the gateway's runtime INTERCEPT_BEARER_TOKEN.
+ARG VITE_BACKEND_BEARER_TOKEN=""
+ARG VITE_API_BASE_URL=""
+ARG VITE_CTF_FRONTEND_URL=""
+ARG VITE_OTEL_EXPORTER_OTLP_ENDPOINT=""
+ENV VITE_BACKEND_BEARER_TOKEN=$VITE_BACKEND_BEARER_TOKEN \
+    VITE_API_BASE_URL=$VITE_API_BASE_URL \
+    VITE_CTF_FRONTEND_URL=$VITE_CTF_FRONTEND_URL \
+    VITE_OTEL_EXPORTER_OTLP_ENDPOINT=$VITE_OTEL_EXPORTER_OTLP_ENDPOINT
+# Compile the backend TS output and build the analyst-console bundles.
+COPY tsconfig.json vite.config.ts index.html firebase-applet-config.json ./
+COPY src ./src
+COPY public ./public
 COPY backend ./backend
-RUN npm run backend:build
+RUN npm run backend:build && npm run build
 
 FROM node:22.14.0-alpine AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
-# Install only production dependencies in the final image.
+# Install only production dependencies in the final image. react/react-dom and the
+# other console runtime deps live in "dependencies", so the externalized imports in
+# dist/server/entry-server.js resolve at runtime.
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && apk add --no-cache su-exec
 COPY --from=build /app/backend/dist ./backend/dist
+COPY --from=build /app/dist ./dist
 COPY seeds ./seeds
 COPY backend/docker-entrypoint.sh /usr/local/bin/counter-spy-backend-entrypoint
 RUN chmod +x /usr/local/bin/counter-spy-backend-entrypoint

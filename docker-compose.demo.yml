@@ -2,13 +2,22 @@
 # This is meant for laptop demos and smoke testing, not a production deployment.
 #
 # Topology: postgres + otel-collector(+jaeger) + counter-spy-sam-spade-service
-#           + counter-spy-backend (gateway, proxies /v1/ctf/sam-spade/* to the
-#           sam-spade service) + counter-spy-frontend.
+#           + counter-spy-backend (the gateway — serves the server-rendered
+#           analyst console AND the /v1 API on :8080; proxies /v1/ctf/sam-spade/*
+#           to the sam-spade service) + counter-spy-ctf-frontend (the standalone
+#           noir CTF surface).
+# The analyst console is at http://localhost:18080/  (no separate frontend container).
 services:
   counter-spy-backend:
     build:
       context: .
       dockerfile: backend/Dockerfile
+      args:
+        # Baked into the analyst-console bundle at build time. VITE_BACKEND_BEARER_TOKEN
+        # must equal this service's runtime INTERCEPT_BEARER_TOKEN (from .env.demo.local).
+        VITE_BACKEND_BEARER_TOKEN: "${VITE_BACKEND_BEARER_TOKEN:-local-demo-backend-token-123456}"
+        VITE_CTF_FRONTEND_URL: "http://localhost:3001"
+        VITE_OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318"
     container_name: counter-spy-backend
     env_file:
       # Local-only demo secrets and provider creds. This file is gitignored.
@@ -104,32 +113,15 @@ services:
         condition: service_started
     restart: unless-stopped
 
-  counter-spy-frontend:
-    build:
-      context: .
-      dockerfile: Dockerfile.frontend-demo
-    container_name: counter-spy-frontend
-    environment:
-      # Frontend uses the backend container by service name through Vite's proxy.
-      BACKEND_PROXY_TARGET: "http://counter-spy-backend:8080"
-      VITE_BACKEND_BEARER_TOKEN: "${VITE_BACKEND_BEARER_TOKEN:-local-demo-backend-token-123456}"
-      # The Sam Spade tab embeds the standalone CTF frontend; the main app polls
-      # the gateway's review-artifact feed for CTF activity.
-      VITE_CTF_FRONTEND_URL: "http://localhost:3001"
-      # Browser-side OpenTelemetry: fetch spans -> the collector (host port). The
-      # collector's OTLP/HTTP CORS config allows this origin. Unset to disable.
-      VITE_OTEL_EXPORTER_OTLP_ENDPOINT: "http://localhost:4318"
-      DISABLE_HMR: "true"
-    ports:
-      - "3000:3000"
-    depends_on:
-      - counter-spy-backend
-      - counter-spy-ctf-frontend
-    restart: unless-stopped
+  # The analyst console is no longer a separate container — the gateway
+  # (counter-spy-backend) server-renders it and serves the built assets on :8080.
+  # Open http://localhost:18080/ ; its /v1/* calls are same-origin.
 
   # Standalone Sam Spade CTF frontend (noir "Case 067" surface). Talks to the
   # Counter-Spy gateway (which proxies /v1/ctf/sam-spade/* to the CTF service and
   # handles /v1/ctf/review-artifacts) and posts each turn's review artifact there.
+  # NOTE: this still runs the Vite dev server in-container (Dockerfile.ctf-frontend);
+  # converting it to a server-rendered/static build is a follow-up.
   counter-spy-ctf-frontend:
     build:
       context: .

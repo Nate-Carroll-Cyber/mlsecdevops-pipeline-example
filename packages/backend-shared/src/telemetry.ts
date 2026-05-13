@@ -1,9 +1,10 @@
 /**
  * OpenTelemetry bootstrap for the Counter-Spy backend.
  *
- * This module is imported FIRST by backend/src/server.ts (and, for the strongest
- * ESM auto-instrumentation guarantees, can also be passed via
- * `NODE_OPTIONS=--import=./backend/dist/telemetry.js`). It starts an OTel NodeSDK
+ * This module is imported FIRST by each Counter-Spy service's server entrypoint
+ * (and, for the strongest ESM auto-instrumentation guarantees, can also be
+ * passed via `NODE_OPTIONS=--import=./packages/backend-shared/dist/telemetry.js`).
+ * It starts an OTel NodeSDK
  * with:
  *   - traces  → OTLP/HTTP (auto-instrumentation for Express, http/https, pg, ...)
  *   - metrics → OTLP/HTTP via a PeriodicExportingMetricReader
@@ -11,7 +12,7 @@
  *
  * Everything is driven by the standard OTEL_* environment variables
  * (OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME, OTEL_TRACES_SAMPLER, ...).
- * If no OTLP endpoint / exporter is configured (typical for `npm run backend:dev`
+ * If no OTLP endpoint / exporter is configured (typical for `npm run gateway:dev`
  * and the test suite) the SDK is not started, so the only observability sink is
  * the existing structured stdout JSON in server.ts — i.e. OTEL_SDK_DISABLED=true,
  * or simply leaving OTEL_EXPORTER_OTLP_ENDPOINT unset, is a clean no-op.
@@ -107,7 +108,7 @@ export function isTelemetryActive(): boolean {
   return Boolean(sdkRef);
 }
 
-// Auto-start on import so both `import './telemetry.js'` (from server.ts) and
-// `node --import ./backend/dist/telemetry.js` work; the `started` guard makes the
-// double-entry harmless.
+// Auto-start on import so both `import '...backend-shared/telemetry.js'` and
+// `node --import ./packages/backend-shared/dist/telemetry.js` work; the
+// `started` guard makes the double-entry harmless.
 startTelemetry();

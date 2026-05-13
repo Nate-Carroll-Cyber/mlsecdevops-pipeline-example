@@ -137,7 +137,7 @@ export interface PromptFeatureVector {
 
 // Validates the wire shape returned by /v1/analyze/full (and used for the
 // browser-local research log). Mirrors buildPromptFeatureVector in
-// backend/src/analysis/promptFeatureVector.ts.
+// services/gateway/src/analysis/promptFeatureVector.ts.
 export const PromptFeatureVectorSchema: z.ZodType<PromptFeatureVector> = z.object({
   syntactic: z.object({
     score: z.number(),

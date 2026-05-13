@@ -2,5 +2,32 @@
   "name": "@counter-spy/gateway",
   "private": true,
   "version": "0.1.0",
-  "type": "module"
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "npm run build --workspace=@counter-spy/backend-shared && tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo",
+    "start": "node dist/server.js",
+    "test": "node --import tsx --test test/*.test.ts",
+    "instruction-monitor:seed:core": "tsx src/services/instruction-monitor/seed-core.ts",
+    "instruction-monitor:export:core": "tsx src/services/instruction-monitor/export-core.ts"
+  },
+  "dependencies": {
+    "@counter-spy/backend-shared": "*",
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/api-logs": "^0.217.0",
+    "@translated/lara": "^1.9.0",
+    "express": "^5.2.1",
+    "pg": "^8.20.0",
+    "pgvector": "^0.2.1",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.14.0",
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2"
+  }
 }

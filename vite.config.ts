@@ -6,7 +6,7 @@ import {defineConfig} from 'vite';
 // Two build outputs feed the server-hosted analyst console:
 //   - `vite build`                          -> dist/client/  (browser bundle + index.html template)
 //   - `vite build --ssr src/entry-server.tsx` -> dist/server/entry-server.js  (rendered by the gateway)
-// The backend gateway (backend/src/web/ssr.ts) serves dist/client statically and
+// The gateway (services/gateway/src/web/ssr.ts) serves dist/client statically and
 // renders the React tree into the template per request.
 export default defineConfig(({isSsrBuild}) => {
   const backendProxyTarget = process.env.BACKEND_PROXY_TARGET || 'http://127.0.0.1:18080';

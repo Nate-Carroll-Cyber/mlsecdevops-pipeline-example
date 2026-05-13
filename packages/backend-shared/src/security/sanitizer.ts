@@ -660,9 +660,9 @@ function hasCompatibilityGlyphObfuscation(prompt: string): boolean {
 }
 
 function hasLeetspeakObfuscation(prompt: string): boolean {
-  const tokens = prompt.match(/\b[\w@]+\b/g) || [];
+  const tokens: string[] = prompt.match(/\b[\w@]+\b/g) ?? [];
   const suspiciousTokens = tokens.filter((token) => {
-    const replacementCount = (token.match(/[0134578@]/g) || []).length;
+    const replacementCount = (token.match(/[0134578@]/g) ?? []).length;
     const hasLetters = /[a-zA-Z]/.test(token);
     const hasLeetishShape = /^[a-zA-Z0-9@]+$/.test(token);
     if (ORDINAL_TOKEN_REGEX.test(token) || DIMENSION_TOKEN_REGEX.test(token)) return false;

@@ -1,37 +1,37 @@
 # Standalone Sam Spade CTF service.
 #
-# This is the same backend image booted with COUNTER_SPY_ROLE=sam-spade, so only
-# /healthz and /v1/ctf/sam-spade/* are served (on SAM_SPADE_SERVICE_PORT). Point
-# a gateway's SAM_SPADE_SERVICE_URL at http://<host>:18120 to delegate the CTF
-# surface to it. The demo stack (docker-compose.demo.yml) already wires this up;
-# this file is for running the CTF service on its own (e.g. alongside an
-# externally managed gateway) and stays behind the "sam-spade" profile.
+# This compose file runs the sam-spade-service on its own (e.g. alongside an
+# externally managed gateway). The demo stack (docker-compose.demo.yml) already
+# wires it up alongside the gateway; this file stays behind the "sam-spade"
+# profile.
+#
+# Topology: the standalone sam-spade-service is directly addressable on :18120
+# and the CTF frontend (or any other client) talks to it directly. The gateway
+# 404s /v1/ctf/sam-spade/*.
 services:
   sam-spade-service:
     build:
       context: .
-      dockerfile: backend/Dockerfile
+      dockerfile: services/sam-spade/Dockerfile
     image: counter-spy-sam-spade-service
     container_name: counter-spy-sam-spade-service
     profiles: ["sam-spade"]
-    command: ["node", "backend/dist/server.js"]
     env_file:
       # Provider creds + INTERCEPT_BEARER_TOKEN (must match the gateway's token).
       - .env.demo.local
     environment:
       APP_ENV: "${APP_ENV:-dev}"
       LOG_LEVEL: "${LOG_LEVEL:-info}"
-      COUNTER_SPY_ROLE: sam-spade
       SAM_SPADE_ENABLED: "true"
       SAM_SPADE_DEFAULT_CASE_ID: "${SAM_SPADE_DEFAULT_CASE_ID:-case-067}"
-      SAM_SPADE_STORE_PATH: "/app/backend/data/sam-spade.db"
+      SAM_SPADE_STORE_PATH: "/app/data/sam-spade.db"
       SAM_SPADE_SERVICE_PORT: "18120"
       OTEL_SERVICE_NAME: "counter-spy-sam-spade-service"
       # OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
     ports:
       - "18120:18120"
     volumes:
-      - sam_spade_data:/app/backend/data
+      - sam_spade_data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:18120/healthz || exit 1"]
       interval: 30s

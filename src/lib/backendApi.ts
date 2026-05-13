@@ -444,7 +444,7 @@ export async function interceptPrompt(input: {
   return BackendInterceptResponseSchema.parse(payload);
 }
 
-// --- Deterministic Shield analysis (server-side; mirrors backend/src/security/sanitizer.ts) ---
+// --- Deterministic Shield analysis (server-side; mirrors packages/backend-shared/src/security/sanitizer.ts) ---
 
 export const FIREWALL_VERDICTS = ['CLEAN', 'SUSPICIOUS', 'ADVERSARIAL'] as const;
 export type FirewallVerdict = (typeof FIREWALL_VERDICTS)[number];

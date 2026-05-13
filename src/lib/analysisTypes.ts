@@ -2,7 +2,7 @@
  * Shared analysis shapes and constants for the analyst console.
  *
  * These are *data shapes / thresholds only* — no detection logic lives here. The
- * deterministic Shield itself runs server-side (backend/src/security/sanitizer.ts);
+ * deterministic Shield itself runs server-side (packages/backend-shared/src/security/sanitizer.ts);
  * the console receives BackendSanitizationResult / OutputSanitizationResult over
  * /v1/analyze and adapts them onto the shapes below (see runPromptShield /
  * runOutputShield in App.tsx).
@@ -17,7 +17,7 @@ export enum DetectionLevel {
   ADVERSARIAL = 3,
 }
 
-// Entropy band floor (mirrors backend/src/security/sanitizer.ts). Entropy <= this
+// Entropy band floor (mirrors packages/backend-shared/src/security/sanitizer.ts). Entropy <= this
 // is "allowed"; above it is "suspicious"; above the configured threshold is
 // "adversarial". Do not change without review (see CLAUDE.md).
 export const SUSPICIOUS_ENTROPY_THRESHOLD = 3.8;

@@ -12,7 +12,7 @@ services:
   counter-spy-backend:
     build:
       context: .
-      dockerfile: backend/Dockerfile
+      dockerfile: services/gateway/Dockerfile
       args:
         # Baked into the analyst-console bundle at build time. VITE_BACKEND_BEARER_TOKEN
         # must equal this service's runtime INTERCEPT_BEARER_TOKEN (from .env.demo.local).
@@ -45,7 +45,7 @@ services:
       # sam-spade-service directly via its own proxy. The gateway only
       # persists CTF review artifacts (durable across restarts).
       SAM_SPADE_ENABLED: "true"
-      CTF_REVIEW_ARTIFACTS_STORE_PATH: "/app/backend/data/ctf-review-artifacts.db"
+      CTF_REVIEW_ARTIFACTS_STORE_PATH: "/app/data/ctf-review-artifacts.db"
       # OpenTelemetry: export traces/metrics/logs over OTLP/HTTP to the collector.
       OTEL_SERVICE_NAME: "counter-spy-backend"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
@@ -59,7 +59,7 @@ services:
       - "18080:8080"
     volumes:
       # Durable CTF review-artifact store.
-      - counter_spy_gateway_data:/app/backend/data
+      - counter_spy_gateway_data:/app/data
     depends_on:
       counter-spy-postgres:
         condition: service_healthy

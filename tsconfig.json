@@ -36,7 +36,8 @@
     "noEmit": true
   },
   "exclude": [
-    "backend/dist",
+    "services/*/dist",
+    "packages/*/dist",
     "dist",
     "ctf-frontend",
     "node_modules"

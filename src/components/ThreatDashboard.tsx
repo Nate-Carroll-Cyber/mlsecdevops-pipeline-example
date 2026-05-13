@@ -10,7 +10,7 @@ import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import { HelpTooltip } from './HelpTooltip';
 // Phase 3 step 3: audit-log reads + anomaly/FPR analytics flow through the
 // backend (Postgres-backed listAuditLogs + /v1/metrics/aggregate). The
-// anomalyDetector + metrics modules moved to backend/src/analysis/.
+// anomalyDetector + metrics modules moved to services/gateway/src/analysis/.
 // Phase 3 step 4: governance config (HITL/Global Pause/threshold sliders) also
 // moved to Postgres via /v1/governance, replacing the previous Firestore
 // onSnapshot listener with a parent-driven prop + putGovernanceConfig writes.

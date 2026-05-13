@@ -1,6 +1,6 @@
 // Server-side render entry. Built by `vite build --ssr src/entry-server.tsx` into
 // dist/server/entry-server.js, which the backend gateway imports to render the
-// analyst console into the HTML template. See backend/src/web/ssr.ts.
+// analyst console into the HTML template. See services/gateway/src/web/ssr.ts.
 import {StrictMode} from 'react';
 import {renderToString} from 'react-dom/server';
 import App from './App.tsx';

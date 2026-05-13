@@ -44,7 +44,7 @@ import {
   getDocFromServer
 } from 'firebase/firestore';
 // Sanitization shapes/constants only — the deterministic Shield itself now runs
-// server-side (backend/src/security/sanitizer.ts via /v1/analyze); the browser no
+// server-side (packages/backend-shared/src/security/sanitizer.ts via /v1/analyze); the browser no
 // longer ships the engine. See runPromptShield / runOutputShield below.
 import { SanitizationResult, OutputSanitizationResult, DetectionLevel, SUSPICIOUS_ENTROPY_THRESHOLD } from './lib/analysisTypes';
 // Import Gemini API integration and types
@@ -1570,7 +1570,7 @@ function buildDownstreamResponderSystemPrompt(args: {
 
 // Run the deterministic Shield on the backend (no safeguard/responder LLM, no
 // instruction-similarity lookup, no provider egress) and adapt its result to the
-// SanitizationResult shape the console works with. backend/src/security/sanitizer.ts
+// SanitizationResult shape the console works with. packages/backend-shared/src/security/sanitizer.ts
 // is the single trust boundary now — the browser never runs the engine. Note: the
 // backend always redacts PII and always applies blocked-keyword/topic/regex checks,
 // so the granular per-check guardrail toggles no longer gate sanitization (they

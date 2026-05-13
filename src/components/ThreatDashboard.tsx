@@ -17,7 +17,7 @@ import { detectThreatSpikes, ThreatLog } from '../lib/anomalyDetector';
 // Import metrics calculation logic and types
 import { calculateFalsePositiveMetrics, AuditLogMetrics } from '../lib/metrics';
 import { ATLAS_TACTICS, ATLAS_TECHNIQUE_DEFINITIONS } from '../lib/atlasTaxonomy';
-import { SUSPICIOUS_ENTROPY_THRESHOLD } from '../lib/sanitizer';
+import { SUSPICIOUS_ENTROPY_THRESHOLD } from '../lib/analysisTypes';
 import { getFeaturePressure, getTopPressureDriver } from '../lib/playgroundMetrics';
 // Import icons from Lucide React
 import { AlertTriangle, Activity, UserCheck, ShieldX, PauseOctagon, PlayCircle } from 'lucide-react';

@@ -1,4 +1,4 @@
-import { hasLeetspeakObfuscation } from './sanitizerNormalization';
+import { hasLeetspeakObfuscation } from './sanitizerNormalization.js';
 
 const WRAPPER_SHELL_REGEX =
   /^\s*(?:[\[(<]{1,3}|--)?\s*\/?\s*[A-Z][A-Z0-9]*(?:[ _:-]+[A-Z0-9]+){0,10}\s*(?:[\])>]{1,3})?\s*$/gm;

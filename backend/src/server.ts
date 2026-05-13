@@ -16,6 +16,17 @@ import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type Fi
 import { assertEgressAllowed } from './security/urlGuard.js';
 import { createRateLimiter } from './middleware/rateLimit.js';
 import { mountWebApp } from './web/ssr.js';
+import { analyzeSyntacticComplexity } from './analysis/syntacticAnalyzer.js';
+import { buildPromptFeatureVector } from './analysis/promptFeatureVector.js';
+import {
+  OBFUSCATION_CATEGORIES,
+  OBFUSCATION_TECHNIQUES,
+  applyObfuscationTechnique,
+  generateObfuscationVariants,
+  type ObfuscatedVariant,
+  type ObfuscationCategory,
+} from './analysis/obfuscation.js';
+import { normalizeWithHeuristicSync, type NormalizationResult } from './analysis/spellNormalize.js';
 import { appendCtfReviewArtifact, listCtfReviewArtifacts } from './ctf/reviewArtifactStore.js';
 import {
   createSamSpadeSession,
@@ -2277,6 +2288,88 @@ app.post('/v1/analyze/output', requireBackendAuth, (req: AuthenticatedRequest, r
     return;
   }
   res.status(200).json(sanitizeOutput(parsed.data.text, { blockedKeywords: parsed.data.blockedKeywords }));
+});
+
+// Full prompt analysis for the Playground: deterministic Shield sanitization +
+// standalone syntactic-complexity scoring + the research-only feature vector, in
+// one round-trip. Same engines as /v1/analyze, no LLM/egress.
+const AnalyzeFullRequestSchema = z.object({
+  prompt: z.string().min(1).max(50_000),
+  tuning: z.object({
+    entropyThreshold: z.number().min(3).max(4.6).optional(),
+    syntacticThreshold: z.number().min(40).max(90).optional(),
+    blockedKeywords: z.array(z.string()).optional(),
+    forbiddenTopics: z.array(z.string()).optional(),
+    regexRules: z.array(z.string()).optional(),
+  }).optional(),
+});
+
+app.post('/v1/analyze/full', requireBackendAuth, (req: AuthenticatedRequest, res: Response<{ sanitization: BackendSanitizationResult; syntactic: ReturnType<typeof analyzeSyntacticComplexity>; featureVector: ReturnType<typeof buildPromptFeatureVector> } | { error: string }>) => {
+  const parsed = AnalyzeFullRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid analyze request.' });
+    return;
+  }
+  const { prompt, tuning } = parsed.data;
+  const entropyThreshold = tuning?.entropyThreshold ?? 4.0;
+  const syntacticThreshold = tuning?.syntacticThreshold ?? 65;
+  const sanitization = sanitizePrompt(prompt, tuning);
+  const syntactic = analyzeSyntacticComplexity(prompt, syntacticThreshold);
+  const featureVector = buildPromptFeatureVector({ prompt, sanitization, entropyThreshold, syntacticThreshold, syntactic });
+  res.status(200).json({ sanitization, syntactic, featureVector });
+});
+
+// Obfuscation lab: GET returns the technique catalog (metadata only — the
+// transform functions don't cross the wire); POST returns generated variants —
+// one technique by id, or a whole category ('all' for everything).
+app.get('/v1/analyze/obfuscate', requireBackendAuth, (_req: AuthenticatedRequest, res: Response) => {
+  res.status(200).json({
+    categories: OBFUSCATION_CATEGORIES,
+    techniques: OBFUSCATION_TECHNIQUES.map(({ id, name, category, atlasId }) => ({ id, name, category, atlasId })),
+  });
+});
+
+const ObfuscateRequestSchema = z.object({
+  prompt: z.string().min(1).max(50_000),
+  techniqueId: z.string().min(1).optional(),
+  category: z.enum(['all', 'encoding', 'cipher', 'unicode', 'injection', 'language']).optional(),
+});
+
+app.post('/v1/analyze/obfuscate', requireBackendAuth, (req: AuthenticatedRequest, res: Response) => {
+  const parsed = ObfuscateRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid obfuscation request.' });
+    return;
+  }
+  const { prompt, techniqueId, category } = parsed.data;
+  let variants: ObfuscatedVariant[];
+  if (techniqueId) {
+    const variant = applyObfuscationTechnique(prompt, techniqueId);
+    variants = variant ? [variant] : [];
+  } else {
+    variants = generateObfuscationVariants(prompt, (category ?? 'all') as ObfuscationCategory | 'all');
+  }
+  res.status(200).json({
+    variants: variants.map((v) => ({
+      technique: { id: v.technique.id, name: v.technique.name, category: v.technique.category, atlasId: v.technique.atlasId },
+      result: v.result,
+    })),
+  });
+});
+
+// Heuristic spelling normalization (the deterministic mode only — the LanguageTool
+// mode is intentionally not exposed; it would make an outbound HTTP call).
+const NormalizeRequestSchema = z.object({
+  text: z.string().max(50_000),
+});
+
+app.post('/v1/analyze/normalize', requireBackendAuth, (req: AuthenticatedRequest, res: Response<NormalizationResult | { error: string }>) => {
+  const parsed = NormalizeRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid normalize request.' });
+    return;
+  }
+  res.status(200).json(normalizeWithHeuristicSync(parsed.data.text));
 });
 
 // Translation proxy route:

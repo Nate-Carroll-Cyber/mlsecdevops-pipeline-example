@@ -7,11 +7,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 // Import icons from Lucide React
 import { ShieldAlert, ShieldCheck, Activity, Info, Download, Save, Send, Languages, SpellCheck } from 'lucide-react';
-// Import the syntactic complexity analysis function
-import { analyzeSyntacticComplexity } from '../lib/syntacticAnalyzer';
-// Import the full sanitization function and DetectionLevel enum
-import { sanitizeInput, DetectionLevel } from '../lib/sanitizer';
-import { buildPromptFeatureVector, formatFeaturePercent } from '../lib/promptFeatureVector';
+// Severity bands only — the deterministic Shield, syntactic scoring, feature vector,
+// obfuscation lab and normalization all run server-side now (see backendApi imports).
+import { DetectionLevel, type SanitizationResult } from '../lib/analysisTypes';
 import { POLICIES, extractMcpA2AHardBlockPhrases } from '../lib/policies';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -22,6 +20,7 @@ import {
   getTopPressureDriver,
   savePlaygroundMetrics,
   summarizePlaygroundMetrics,
+  formatFeaturePercent,
   type PlaygroundMetricEntry,
   type PromptFeatureVector,
 } from '../lib/playgroundMetrics';
@@ -36,18 +35,6 @@ import {
 import { HelpTooltip } from './HelpTooltip';
 import { toast } from 'sonner';
 import {
-  OBFUSCATION_CATEGORIES,
-  applyObfuscationTechnique,
-  generateObfuscationVariants,
-  getObfuscationTechniques,
-  type ObfuscatedVariant,
-  type ObfuscationCategory,
-} from '../lib/obfuscation';
-import {
-  normalizeSpelling,
-  type NormalizationResult,
-} from '../lib/spellNormalize';
-import {
   FOREIGN_LANGUAGE_KEYS,
   TRANSLATION_PROVIDER,
   TRANSLATION_PROVIDER_LABEL,
@@ -57,10 +44,21 @@ import {
   type TranslationResult,
 } from '../lib/translate';
 import {
+  analyzeFull,
+  obfuscatePrompt,
+  getObfuscationCatalog,
+  normalizeText,
   checkBackendHealth,
   getBackendApiBaseUrl,
   translatePromptViaBackend,
+  OBFUSCATION_CATEGORIES,
+  type AnalyzeFullResult,
   type BackendHealthResponse,
+  type NormalizationResult,
+  type ObfuscatedVariant,
+  type ObfuscationCategory,
+  type ObfuscationCategoryOrAll,
+  type ObfuscationTechniqueMeta,
 } from '../lib/backendApi';
 
 // Define the properties expected by the SyntacticAnalyzer component
@@ -93,6 +91,97 @@ interface LanguagePipelineResult {
   translated?: TranslationResult;
 }
 
+// Shape of the server-side full analysis as the Playground holds it. fullSanitization
+// is null until there is a non-empty prompt (matching the previous local behaviour).
+interface PlaygroundAnalysis {
+  syntactic: AnalyzeFullResult['syntactic'];
+  fullSanitization: SanitizationResult | null;
+  featureVector: AnalyzeFullResult['featureVector'];
+}
+
+const ZERO_SYNTACTIC: AnalyzeFullResult['syntactic'] = {
+  score: 0,
+  isProbingAttempt: false,
+  metrics: {
+    constraintCount: 0,
+    weightedConstraintScore: 0,
+    constraintDensity: 0,
+    specialCharRatio: 0,
+    avgWordsPerSentence: 0,
+    wrapperShellCount: 0,
+    verbosityBonus: 0,
+    wrapperShellBonus: 0,
+    obfuscationBonus: 0,
+    keywordScoreContribution: 0,
+    densityScoreContribution: 0,
+    specialCharScoreContribution: 0,
+  },
+};
+
+const ZERO_FEATURE_VECTOR: AnalyzeFullResult['featureVector'] = {
+  syntactic: {
+    score: 0,
+    threshold: 0,
+    raw: {
+      constraintCount: 0,
+      weightedConstraintScore: 0,
+      constraintDensity: 0,
+      specialCharRatio: 0,
+      avgWordsPerSentence: 0,
+      wrapperShellCount: 0,
+      verbosityBonus: 0,
+      wrapperShellBonus: 0,
+      obfuscationBonus: 0,
+      keywordScoreContribution: 0,
+      densityScoreContribution: 0,
+      specialCharScoreContribution: 0,
+    },
+    normalized: {
+      instructionPressure: 0,
+      constraintDensity: 0,
+      syntaxWrapperPressure: 0,
+      obfuscationPressure: 0,
+      verbosityPressure: 0,
+    },
+  },
+  entropy: { globalEntropy: 0, maxWindowEntropy: 0, suspiciousChunkCount: 0, threshold: 0, normalizedPressure: 0 },
+  languageLikelihood: {
+    trigramHitRate: 0,
+    bestCaesarShiftTrigramRate: 0,
+    lowNaturalLanguageLikelihood: false,
+    tokenCount: 0,
+    uniqueTokenRate: 0,
+    averageTokenLength: 0,
+    normalizedSuspicion: 0,
+  },
+  featurePressure: 0,
+  researchSignal: 0,
+  topDriver: 'None',
+  detectionFlags: [],
+  redactions: [],
+};
+
+const ZERO_ANALYSIS: PlaygroundAnalysis = { syntactic: ZERO_SYNTACTIC, fullSanitization: null, featureVector: ZERO_FEATURE_VECTOR };
+
+// Build the deterministic-Shield tuning from the playground's system config.
+function buildPlaygroundTuning(
+  systemConfig: SyntacticAnalyzerProps['systemConfig'],
+  governanceConfig: SyntacticAnalyzerProps['governanceConfig'],
+) {
+  return {
+    entropyThreshold: governanceConfig?.entropyThreshold ?? 4.0,
+    syntacticThreshold: governanceConfig?.syntacticThreshold ?? 65,
+    blockedKeywords: systemConfig
+      ? Array.from(new Set([
+          ...systemConfig.blockedKeywords.split('\n').map((keyword) => keyword.trim().toLowerCase()).filter(Boolean),
+          ...extractMcpA2AHardBlockPhrases(POLICIES),
+        ]))
+      : extractMcpA2AHardBlockPhrases(POLICIES),
+    forbiddenTopics: systemConfig ? systemConfig.forbiddenTopics.split('\n').filter((topic) => topic.trim()) : [],
+    regexRules: systemConfig ? systemConfig.regexRules.split('\n').filter((rule) => rule.trim()) : [],
+  };
+}
+
 // Export the SyntacticAnalyzer functional component
 export function SyntacticAnalyzer({
   systemConfig,
@@ -118,6 +207,10 @@ export function SyntacticAnalyzer({
   const [obfuscationVariants, setObfuscationVariants] = useState<ObfuscatedVariant[]>([]);
   const [obfuscationSourceHash, setObfuscationSourceHash] = useState<string | null>(null);
   const [activeObfuscation, setActiveObfuscation] = useState<ObfuscatedVariant | null>(null);
+  const [obfuscationTechniques, setObfuscationTechniques] = useState<ObfuscationTechniqueMeta[]>([]);
+  const [obfuscationCatalogError, setObfuscationCatalogError] = useState<string | null>(null);
+  const [analysisState, setAnalysisState] = useState<PlaygroundAnalysis>(ZERO_ANALYSIS);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [submitBaseDelayMs, setSubmitBaseDelayMs] = useState('750');
   const [submitJitterMs, setSubmitJitterMs] = useState('500');
   const [normalizationEnabled, setNormalizationEnabled] = useState(true);
@@ -173,43 +266,45 @@ export function SyntacticAnalyzer({
     };
   }, []);
 
-  // useMemo ensures we only recalculate the analysis when the text or config actually changes
-  const analysis = useMemo(() => {
-    // Run the standalone syntactic complexity analysis
-    const syntactic = analyzeSyntacticComplexity(promptText, governanceConfig?.syntacticThreshold ?? 65);
-    
-    // Initialize fullSanitization as null
-    let fullSanitization = null;
-    // Run full sanitization if config is provided and the prompt is not empty
-    if (systemConfig && activeGuardrails && promptText.trim()) {
-      // Parse the configuration strings into arrays
-      const keywords = [
-        ...new Set([
-          ...systemConfig.blockedKeywords.split('\n').map((keyword) => keyword.trim().toLowerCase()).filter(Boolean),
-          ...extractMcpA2AHardBlockPhrases(POLICIES),
-        ]),
-      ];
-      const topics = systemConfig.forbiddenTopics.split('\n').filter(t => t.trim());
-      const regexes = systemConfig.regexRules.split('\n').filter(r => r.trim());
-      
-      // Execute the full sanitization pipeline
-      fullSanitization = sanitizeInput(promptText, keywords, topics, regexes, activeGuardrails, {
-        entropyThreshold: governanceConfig?.entropyThreshold ?? 4.0,
-        syntacticThreshold: governanceConfig?.syntacticThreshold ?? 65,
-      });
+  // Server-side full analysis: deterministic-Shield sanitization + standalone
+  // syntactic complexity + the research-only feature vector. Debounced ~300ms after
+  // the prompt/config settles; stale in-flight calls are dropped. The browser no
+  // longer carries the analysis engines (see backendApi.analyzeFull).
+  const analysis = analysisState;
+  useEffect(() => {
+    if (!promptText.trim()) {
+      setAnalysisState(ZERO_ANALYSIS);
+      setIsAnalyzing(false);
+      return;
     }
-    
-    const featureVector = buildPromptFeatureVector({
-      prompt: promptText,
-      syntactic,
-      sanitization: fullSanitization,
-      entropyThreshold: governanceConfig?.entropyThreshold ?? 4.0,
-      syntacticThreshold: governanceConfig?.syntacticThreshold ?? 65,
-    });
+    const tuning = buildPlaygroundTuning(systemConfig, governanceConfig);
+    let cancelled = false;
+    setIsAnalyzing(true);
+    const timer = window.setTimeout(() => {
+      void analyzeFull(promptText, tuning)
+        .then((result) => {
+          if (cancelled) return;
+          setAnalysisState({ syntactic: result.syntactic, fullSanitization: result.sanitization, featureVector: result.featureVector });
+        })
+        .catch(() => {
+          if (!cancelled) setAnalysisState((prev) => ({ ...prev, fullSanitization: null }));
+        })
+        .finally(() => { if (!cancelled) setIsAnalyzing(false); });
+    }, 300);
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [promptText, systemConfig, governanceConfig?.entropyThreshold, governanceConfig?.syntacticThreshold]);
 
-    // Return the syntactic analysis, full sanitization result, and research-only feature vector.
-    return { syntactic, fullSanitization, featureVector };
-  }, [promptText, systemConfig, activeGuardrails, governanceConfig?.entropyThreshold, governanceConfig?.syntacticThreshold]);
+  // Obfuscation-lab technique catalog (metadata only — the transforms run server-side).
+  useEffect(() => {
+    let cancelled = false;
+    void getObfuscationCatalog()
+      .then((catalog) => { if (!cancelled) { setObfuscationTechniques(catalog.techniques); setObfuscationCatalogError(null); } })
+      .catch((error) => { if (!cancelled) setObfuscationCatalogError(error instanceof Error ? error.message : 'Failed to load obfuscation catalog.'); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const getTechniquesForCategory = (category: ObfuscationCategoryOrAll) =>
+    category === 'all' ? obfuscationTechniques : obfuscationTechniques.filter((technique) => technique.category === category);
 
   // Helper function to colorize the syntactic score based on severity thresholds
   const getScoreColor = (score: number) => {
@@ -273,7 +368,7 @@ export function SyntacticAnalyzer({
   const selectedTechnique = atlasTechniqueId
     ? ATLAS_TECHNIQUE_DEFINITIONS.find((definition) => definition.id === atlasTechniqueId)
     : undefined;
-  const availableObfuscationTechniques = getObfuscationTechniques(obfuscationCategory);
+  const availableObfuscationTechniques = getTechniquesForCategory(obfuscationCategory);
   const canRunSanitization = Boolean(systemConfig && activeGuardrails);
   const estimatedPromptTokens = estimatePromptTokens && promptText.trim()
     ? estimatePromptTokens(promptText)
@@ -401,9 +496,7 @@ export function SyntacticAnalyzer({
       let translated: TranslationResult | undefined;
 
       if (normalizationEnabled) {
-        normalized = await normalizeSpelling(currentText, {
-          backend: 'heuristic',
-        });
+        normalized = await normalizeText(currentText);
         currentText = normalized.text;
       }
 
@@ -457,17 +550,25 @@ export function SyntacticAnalyzer({
     setObfuscationSourceHash(sourcePromptHash);
   };
 
-  // Generate a single selected obfuscation transform.
-  const generateSelectedObfuscation = () => {
+  // Generate a single selected obfuscation transform (server-side).
+  const generateSelectedObfuscation = async () => {
     if (!promptText.trim() || !obfuscationTechniqueId) return;
-    const variant = applyObfuscationTechnique(promptText, obfuscationTechniqueId);
-    setObfuscationVariants(variant ? [variant] : []);
+    try {
+      const [variant] = await obfuscatePrompt(promptText, { techniqueId: obfuscationTechniqueId });
+      setObfuscationVariants(variant ? [variant] : []);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to generate obfuscation variant.');
+    }
   };
 
-  // Generate a whole family of obfuscation variants at once.
-  const generateCategoryVariants = () => {
+  // Generate a whole family of obfuscation variants at once (server-side).
+  const generateCategoryVariants = async () => {
     if (!promptText.trim()) return;
-    setObfuscationVariants(generateObfuscationVariants(promptText, obfuscationCategory));
+    try {
+      setObfuscationVariants(await obfuscatePrompt(promptText, { category: obfuscationCategory }));
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to generate obfuscation variants.');
+    }
   };
 
   const sleep = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms));
@@ -481,26 +582,10 @@ export function SyntacticAnalyzer({
   ): Promise<PlaygroundMetricEntry | null> => {
     if (!rawPrompt.trim() || !systemConfig || !activeGuardrails) return null;
 
-    const keywords = [
-      ...new Set([
-        ...systemConfig.blockedKeywords.split('\n').map((keyword) => keyword.trim().toLowerCase()).filter(Boolean),
-        ...extractMcpA2AHardBlockPhrases(POLICIES),
-      ]),
-    ];
-    const topics = systemConfig.forbiddenTopics.split('\n').filter((topic) => topic.trim());
-    const regexes = systemConfig.regexRules.split('\n').filter((rule) => rule.trim());
-    const syntactic = analyzeSyntacticComplexity(rawPrompt, governanceConfig?.syntacticThreshold ?? 65);
-    const fullSanitization = sanitizeInput(rawPrompt, keywords, topics, regexes, activeGuardrails, {
-      entropyThreshold: governanceConfig?.entropyThreshold ?? 4.0,
-      syntacticThreshold: governanceConfig?.syntacticThreshold ?? 65,
-    });
-    const featureVector = buildPromptFeatureVector({
-      prompt: rawPrompt,
-      syntactic,
-      sanitization: fullSanitization,
-      entropyThreshold: governanceConfig?.entropyThreshold ?? 4.0,
-      syntacticThreshold: governanceConfig?.syntacticThreshold ?? 65,
-    });
+    const { syntactic, sanitization: fullSanitization, featureVector } = await analyzeFull(
+      rawPrompt,
+      buildPlaygroundTuning(systemConfig, governanceConfig),
+    );
     const promptHash = await hashText(rawPrompt);
     const suspiciousChunkHashes = await Promise.all(
       fullSanitization.suspiciousChunks.map((chunk) => hashText(chunk)),
@@ -582,11 +667,11 @@ export function SyntacticAnalyzer({
     savePlaygroundMetrics(nextEntries);
   };
 
-  // Run every generated variant back through local analysis and snapshot the results.
+  // Run every generated variant back through the server-side analysis and snapshot the results.
   const analyzeAllVariants = async () => {
     if (!promptText.trim() || !canRunSanitization) return;
 
-    const variants = generateObfuscationVariants(promptText, obfuscationCategory);
+    const variants = await obfuscatePrompt(promptText, { category: obfuscationCategory });
     if (variants.length === 0) return;
 
     setObfuscationVariants(variants);
@@ -791,7 +876,7 @@ export function SyntacticAnalyzer({
   const submitAllVariantsToPipeline = async () => {
     if (!promptText.trim() || !onSubmitPrompt || isSubmitting) return;
 
-    const variants = generateObfuscationVariants(promptText, obfuscationCategory);
+    const variants = await obfuscatePrompt(promptText, { category: obfuscationCategory });
     if (variants.length === 0) return;
 
     setSubmitError(null);
@@ -1386,7 +1471,7 @@ export function SyntacticAnalyzer({
                 const nextCategory = e.target.value as ObfuscationCategory | 'all';
                 setObfuscationCategory(nextCategory);
                 if (obfuscationTechniqueId) {
-                  const stillValid = getObfuscationTechniques(nextCategory).some((technique) => technique.id === obfuscationTechniqueId);
+                  const stillValid = getTechniquesForCategory(nextCategory).some((technique) => technique.id === obfuscationTechniqueId);
                   if (!stillValid) setObfuscationTechniqueId('');
                 }
               }}

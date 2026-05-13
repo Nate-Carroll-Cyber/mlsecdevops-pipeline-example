@@ -9,7 +9,7 @@
     "backend:build": "tsc -p backend/tsconfig.json",
     "backend:start": "node backend/dist/server.js",
     "backend:check": "tsc -p backend/tsconfig.json --noEmit",
-    "backend:test": "node --import tsx --test backend/test/*.test.ts src/lib/*.test.ts",
+    "backend:test": "node --import tsx --test backend/test/*.test.ts",
     "instruction-monitor:seed:core": "tsx backend/src/services/instruction-monitor/seed-core.ts",
     "instruction-monitor:export:core": "tsx backend/src/services/instruction-monitor/export-core.ts",
     "build:client": "vite build",

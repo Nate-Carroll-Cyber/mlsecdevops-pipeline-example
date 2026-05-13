@@ -10,18 +10,19 @@ Counter-Spy.ai is an **Adversary-Aware AI Security Gateway**. It sits between un
 
 ---
 
-## Architecture: The Shield-and-Sword Pattern
+## Architecture: server-hosted Shield-and-Sword
 
-The codebase is bifurcated into two distinct security layers:
+This is a **server-hosted app**: the React analyst console is server-rendered and served by the backend gateway (`backend/src/server.ts` → `backend/src/web/ssr.ts`), and **all sanitization/analysis runs on the backend** — the browser ships no detection engine. The `/src` console calls `backend/src/security/sanitizer.ts` (and the other backend analysis modules) over `/v1/analyze*` via `src/lib/backendApi.ts`.
 
-| Layer | File | Role |
+| Layer | File(s) | Role |
 | :--- | :--- | :--- |
-| 🛡️ **Shield** | `src/lib/sanitizer.ts` | All local sanitization. This is the primary trust boundary. |
-| ⚔️ **Sword** | `src/lib/gemini.ts` | Production LLM inference. Only receives sanitized payloads. |
-| 📡 **Radar** | `src/lib/anomalyDetector.ts` | Z-Score anomaly detection engine. |
-| 🔒 **Vault** | `firestore.rules` | Database-layer RBAC. Enforces integrity even if client is compromised. |
+| 🛡️ **Shield** | `backend/src/security/sanitizer.ts` | The deterministic sanitization engine — PII/secret redaction, entropy, syntactic complexity, decode telemetry, verdict bands. **The trust boundary.** Reached from the UI via `POST /v1/analyze` / `/v1/analyze/full` / `/v1/analyze/output`. |
+| 🔬 **Lab** | `backend/src/analysis/*.ts` | Syntactic-complexity scoring, prompt feature vectors, language-likelihood, the obfuscation lab (~24 transforms), heuristic spell-normalization. Reached via `/v1/analyze/full`, `/v1/analyze/obfuscate`, `/v1/analyze/normalize`. |
+| ⚔️ **Sword** | `backend/src/server.ts` (responder/safeguard provider calls) | Production LLM inference (safeguard judge + downstream responder). Only receives sanitized payloads; `src/lib/gemini.ts` is a disabled browser stub. |
+| 📡 **Radar** | `src/lib/anomalyDetector.ts`, `src/lib/metrics.ts` | Z-Score anomaly detection + confusion-matrix metrics over audit logs (still client-side; moves server-side with the audit-log store in a later phase). |
+| 🔒 **Vault** | `firestore.rules` | Database-layer RBAC. Enforces integrity even if the client is compromised. |
 
-**The cardinal rule:** Nothing reaches `src/lib/gemini.ts` without first passing through `src/lib/sanitizer.ts`. Do not introduce any code path that bypasses this flow.
+**The cardinal rule:** no prompt reaches a production LLM (safeguard or responder) without first passing through `backend/src/security/sanitizer.ts`. The browser must not regain a local sanitization/analysis engine — keep all of it behind `/v1/analyze*`.
 
 ---
 
@@ -30,10 +31,11 @@ The codebase is bifurcated into two distinct security layers:
 > [!CAUTION]
 > The following files are **security-critical**. Any modification requires explicit justification and must not weaken existing controls.
 
-- `src/lib/sanitizer.ts` — Do not lower entropy thresholds, remove detection patterns, or add pass-throughs.
-- `src/lib/syntacticAnalyzer.ts` — Thresholds: Suspicious > 50, Adversarial > 90. Do not raise these without documented rationale.
+- `backend/src/security/sanitizer.ts` — the Shield. Do not lower entropy thresholds, remove detection patterns, or add pass-throughs.
+- `backend/src/analysis/syntacticAnalyzer.ts` — Thresholds: Suspicious > 50, Adversarial > 90. Do not raise these without documented rationale.
+- `backend/src/server.ts` — the `/v1/intercept` and `/v1/analyze*` route handlers and the safeguard/responder verdict contracts govern firewall/responder behavior. Do not relax them. Do not add a code path that serves prompts to a provider LLM without `sanitizePrompt` first.
+- `src/lib/policies.ts` — bundled MITRE/MCP-A2A safety policies (the hard-block phrases the console feeds into the Shield's blocked-keyword set). Do not weaken.
 - `firestore.rules` — RBAC rules. Do not broaden read/write permissions.
-- `src/lib/policies.ts` and `backend/src/server.ts` — System Configuration prompts and backend verdict contracts govern firewall/responder behavior. Do not modify these instructions to relax security constraints.
 
 **Entropy thresholds (do not modify without review):**
 
@@ -62,12 +64,16 @@ Do not add new dependencies without updating `Technical/SBOM.md`.
 
 ### TypeScript
 - Strict mode is enabled. Do not use `any` types in security-critical files.
-- All sanitization functions must return a typed result — never raw strings from untrusted input.
+- All sanitization/analysis functions must return a typed result — never raw strings from untrusted input.
+- The console (`/src`) reaches the backend only through `src/lib/backendApi.ts` (Zod-validated responses). Do not `fetch` the API directly from a component, and do not import `backend/src/**` from `/src` — the analysis engines must stay server-side.
+
+### SSR
+- The app is server-rendered (`src/entry-server.tsx` → `renderToString`) and hydrated (`src/entry-client.tsx`). Anything that touches `window`/`document`/`localStorage`/Firebase at module load or in a `useState` initializer must be SSR-safe (guarded with `typeof window !== 'undefined'`, or deferred to a `useEffect`). The two builds are `vite build` → `dist/client/` and `vite build --ssr src/entry-server.tsx` → `dist/server/`.
 
 ### Firestore
-- All reads and writes go through the typed helpers in `src/lib/firebase.ts`.
+- Firestore (`src/lib/firebase.ts`) is client-only and lazily initialized (inert under SSR). It currently still backs audit logs / governance / policies; that data path moves server-side in a later phase.
 - Never write directly to Firestore from a component — always go through `src/lib/`.
-- The `sanitizedPrompt` field must never contain raw PII. Verify redaction before any write.
+- The `sanitizedPrompt` field must never contain raw PII. The Shield always redacts before returning, so write what `/v1/analyze*` produced; do not reconstruct the raw prompt.
 
 ### React
 - `react-markdown` is configured with `rehype-raw` **disabled**. Do not enable it — this prevents XSS from LLM-generated content.

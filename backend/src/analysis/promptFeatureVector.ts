@@ -1,21 +1,20 @@
-import { analyzeLanguageLikelihood } from './languageLikelihood';
-import type { SanitizationResult } from './sanitizer';
-import { analyzeSyntacticComplexity, type SyntacticComplexityAnalysis } from './syntacticAnalyzer';
-import type { PromptFeatureVector } from './playgroundMetrics';
+import { analyzeLanguageLikelihood } from './languageLikelihood.js';
+import type { BackendSanitizationResult } from '../security/sanitizer.js';
+import { analyzeSyntacticComplexity, type SyntacticComplexityAnalysis } from './syntacticAnalyzer.js';
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 
-export function formatFeaturePercent(value: number) {
-  return `${Math.round(clamp01(value) * 100)}%`;
-}
-
+// The research-only prompt feature vector. The wire shape is mirrored on the client
+// by PromptFeatureVectorSchema in src/lib/playgroundMetrics.ts (which validates the
+// payload from /v1/analyze/feature-vector); keep the two in sync. The return type is
+// left to inference so there is one source of truth for the shape.
 export function buildPromptFeatureVector(params: {
   prompt: string;
-  sanitization: SanitizationResult | null;
+  sanitization: Pick<BackendSanitizationResult, 'entropy' | 'globalEntropy' | 'suspiciousChunks' | 'redactions'> | null;
   entropyThreshold: number;
   syntacticThreshold: number;
   syntactic?: SyntacticComplexityAnalysis;
-}): PromptFeatureVector {
+}) {
   const { prompt, sanitization, entropyThreshold, syntacticThreshold } = params;
   const syntactic = params.syntactic ?? analyzeSyntacticComplexity(prompt, syntacticThreshold);
   const languageLikelihood = analyzeLanguageLikelihood(prompt);

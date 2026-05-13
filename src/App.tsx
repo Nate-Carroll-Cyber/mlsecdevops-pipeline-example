@@ -49,12 +49,15 @@ import {
 // Sanitization shapes/constants only — the deterministic Shield itself now runs
 // server-side (backend/src/security/sanitizer.ts via /v1/analyze); the browser no
 // longer ships the engine. See runPromptShield / runOutputShield below.
-import { SanitizationResult, OutputSanitizationResult, DetectionLevel, SUSPICIOUS_ENTROPY_THRESHOLD } from './lib/sanitizer';
+import { SanitizationResult, OutputSanitizationResult, DetectionLevel, SUSPICIOUS_ENTROPY_THRESHOLD } from './lib/analysisTypes';
 // Import Gemini API integration and types
 import { generateSecurityAdvice, ChatMessage } from './lib/gemini';
 import {
   analyzePrompt as analyzePromptViaBackend,
   analyzeOutput as analyzeOutputViaBackend,
+  analyzeFull as analyzeFullViaBackend,
+  adaptBackendSanitization,
+  type AnalyzePromptTuning,
   checkBackendHealth,
   getCtfReviewArtifacts,
   interceptPrompt,
@@ -72,7 +75,6 @@ import {
   type PlaygroundMetricEntry,
   type PromptFeatureVector,
 } from './lib/playgroundMetrics';
-import { buildPromptFeatureVector } from './lib/promptFeatureVector';
 import { devLog, devWarn } from './lib/devLog';
 // Import default security policies
 import { MCP_AGENT_SAFETY_POLICY_TITLE, POLICIES, extractMcpA2AHardBlockPhrases, type Policy } from './lib/policies';
@@ -1571,31 +1573,13 @@ async function runPromptShield(
   regexRules: string[],
   tuning: { entropyThreshold: number; syntacticThreshold: number },
 ): Promise<SanitizationResult> {
-  const r = await analyzePromptViaBackend(prompt, {
+  return adaptBackendSanitization(await analyzePromptViaBackend(prompt, {
     entropyThreshold: tuning.entropyThreshold,
     syntacticThreshold: tuning.syntacticThreshold,
     blockedKeywords,
     forbiddenTopics,
     regexRules,
-  });
-  const detectionLevel =
-    r.verdict === 'ADVERSARIAL' ? DetectionLevel.ADVERSARIAL
-    : r.verdict === 'SUSPICIOUS' ? DetectionLevel.SUSPICIOUS
-    : r.redactions.length > 0 ? DetectionLevel.INFORMATIONAL
-    : DetectionLevel.CLEAN;
-  return {
-    original: r.original,
-    sanitized: r.sanitized,
-    redactions: r.redactions,
-    entropy: r.entropy,
-    globalEntropy: r.globalEntropy,
-    suspiciousChunks: r.suspiciousChunks,
-    isPotentiallyAdversarial: r.verdict === 'ADVERSARIAL',
-    detectionLevel,
-    latencyMs: r.latencyMs,
-    syntacticScore: r.syntacticScore,
-    decodeTelemetry: r.decodeTelemetry,
-  };
+  }));
 }
 
 // Output-side governance pass, server-side. Maps the backend's OutputSanitizationResult
@@ -1611,18 +1595,12 @@ async function runOutputShield(text: string, blockedKeywords: string[]): Promise
   };
 }
 
-function buildAuditFeatureFields(
+// The research-only feature vector is computed server-side (/v1/analyze/full).
+async function buildAuditFeatureFields(
   prompt: string,
-  sanitization: SanitizationResult,
-  governanceConfig: Pick<GovernanceConfig, 'entropyThreshold' | 'syntacticThreshold'>,
-): Pick<AuditLog, 'featureVector' | 'featurePressure' | 'researchSignal' | 'topPressureDriver' | 'topResearchDriver'> {
-  const featureVector = buildPromptFeatureVector({
-    prompt,
-    sanitization,
-    entropyThreshold: governanceConfig.entropyThreshold,
-    syntacticThreshold: governanceConfig.syntacticThreshold,
-  });
-
+  tuning: AnalyzePromptTuning,
+): Promise<Pick<AuditLog, 'featureVector' | 'featurePressure' | 'researchSignal' | 'topPressureDriver' | 'topResearchDriver'>> {
+  const { featureVector } = await analyzeFullViaBackend(prompt, tuning);
   return {
     featureVector,
     featurePressure: featureVector.featurePressure,
@@ -3511,7 +3489,7 @@ export default function App() {
             const logSanitization = sanitization;
             const detectionFlags = Array.from(new Set([...logSanitization.redactions, 'MAX_CONTEXT_WINDOW_EXCEEDED']));
             const blockedDetectionLevel = Math.max(logSanitization.detectionLevel, DetectionLevel.SUSPICIOUS);
-            const featureFields = buildAuditFeatureFields(textToProcess, logSanitization, governanceConfig);
+            const featureFields = await buildAuditFeatureFields(textToProcess, { entropyThreshold: governanceConfig.entropyThreshold, syntacticThreshold: governanceConfig.syntacticThreshold, blockedKeywords: keywords, forbiddenTopics: topics, regexRules: regexes });
             try {
 	          if (useLocalAuditSurface) {
                 setAuditLogs(prev => [{
@@ -3589,7 +3567,7 @@ export default function App() {
 	      if (sanitization.latencyMs > SANITIZATION_REDOS_LATENCY_THRESHOLD_MS) {
 	      if (activeGuardrails.sessionAudit) {
 	        try {
-            const featureFields = buildAuditFeatureFields(textToProcess, sanitization, governanceConfig);
+            const featureFields = await buildAuditFeatureFields(textToProcess, { entropyThreshold: governanceConfig.entropyThreshold, syntacticThreshold: governanceConfig.syntacticThreshold, blockedKeywords: keywords, forbiddenTopics: topics, regexRules: regexes });
 	          if (useLocalAuditSurface) {
             setAuditLogs(prev => [{
               id: crypto.randomUUID(),
@@ -3666,7 +3644,7 @@ export default function App() {
         // The server-side Shield always redacts PII (the live guardrail toggle no longer
         // gates redaction), so the audit-safe sanitization is just the one we already have.
         const logSanitization = sanitization;
-        const featureFields = buildAuditFeatureFields(textToProcess, logSanitization, governanceConfig);
+        const featureFields = await buildAuditFeatureFields(textToProcess, { entropyThreshold: governanceConfig.entropyThreshold, syntacticThreshold: governanceConfig.syntacticThreshold, blockedKeywords: keywords, forbiddenTopics: topics, regexRules: regexes });
 
         try {
 	          if (useLocalAuditSurface) {

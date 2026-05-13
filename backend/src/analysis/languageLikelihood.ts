@@ -1,4 +1,4 @@
-import { normalizeWithoutLeet } from './sanitizerNormalization';
+import { normalizeWithoutLeet } from './sanitizerNormalization.js';
 
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 

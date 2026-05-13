@@ -4,6 +4,8 @@
  * session contracts so the UI does not hard-code backend payload shapes.
  */
 import { z } from 'zod';
+import { PromptFeatureVectorSchema, type PromptFeatureVector } from './playgroundMetrics';
+import { DetectionLevel, type SanitizationResult } from './analysisTypes';
 
 const BACKEND_INTERCEPT_TIMEOUT_MS = 45_000;
 
@@ -463,6 +465,30 @@ const BackendSanitizationResultSchema = z.object({
 });
 export type BackendSanitizationResult = z.infer<typeof BackendSanitizationResultSchema>;
 
+// Adapt the backend's sanitization result onto the SanitizationResult shape the
+// console works with: verdict -> DetectionLevel band (CLEAN + redactions ->
+// INFORMATIONAL); isPotentiallyAdversarial mirrors an ADVERSARIAL verdict.
+export function adaptBackendSanitization(r: BackendSanitizationResult): SanitizationResult {
+  const detectionLevel =
+    r.verdict === 'ADVERSARIAL' ? DetectionLevel.ADVERSARIAL
+    : r.verdict === 'SUSPICIOUS' ? DetectionLevel.SUSPICIOUS
+    : r.redactions.length > 0 ? DetectionLevel.INFORMATIONAL
+    : DetectionLevel.CLEAN;
+  return {
+    original: r.original,
+    sanitized: r.sanitized,
+    redactions: r.redactions,
+    entropy: r.entropy,
+    globalEntropy: r.globalEntropy,
+    suspiciousChunks: r.suspiciousChunks,
+    isPotentiallyAdversarial: r.verdict === 'ADVERSARIAL',
+    detectionLevel,
+    latencyMs: r.latencyMs,
+    syntacticScore: r.syntacticScore,
+    decodeTelemetry: r.decodeTelemetry,
+  };
+}
+
 const BackendOutputSanitizationResultSchema = z.object({
   original: z.string(),
   sanitized: z.string(),
@@ -513,6 +539,142 @@ export async function analyzeOutput(text: string, blockedKeywords?: string[]): P
     throw new Error(errorPayload.success ? errorPayload.data.error : `Backend output analyze failed (HTTP ${response.status}).`);
   }
   return BackendOutputSanitizationResultSchema.parse(payload);
+}
+
+// --- Playground analysis: syntactic complexity, feature vector, obfuscation lab, normalization ---
+
+const SyntacticComplexityMetricsSchema = z.object({
+  constraintCount: z.number(),
+  weightedConstraintScore: z.number(),
+  constraintDensity: z.number(),
+  specialCharRatio: z.number(),
+  avgWordsPerSentence: z.number(),
+  wrapperShellCount: z.number(),
+  verbosityBonus: z.number(),
+  wrapperShellBonus: z.number(),
+  obfuscationBonus: z.number(),
+  keywordScoreContribution: z.number(),
+  densityScoreContribution: z.number(),
+  specialCharScoreContribution: z.number(),
+});
+const SyntacticComplexityAnalysisSchema = z.object({
+  score: z.number(),
+  isProbingAttempt: z.boolean(),
+  metrics: SyntacticComplexityMetricsSchema,
+});
+export type SyntacticComplexityAnalysis = z.infer<typeof SyntacticComplexityAnalysisSchema>;
+
+const AnalyzeFullResponseSchema = z.object({
+  sanitization: BackendSanitizationResultSchema,
+  syntactic: SyntacticComplexityAnalysisSchema,
+  featureVector: PromptFeatureVectorSchema,
+});
+export interface AnalyzeFullResult {
+  sanitization: SanitizationResult;
+  syntactic: SyntacticComplexityAnalysis;
+  featureVector: PromptFeatureVector;
+}
+
+// Sanitization + standalone syntactic complexity + the research-only feature vector
+// in one round-trip — what the Playground used to compute locally. The sanitization
+// is adapted onto the console's SanitizationResult shape (see adaptBackendSanitization).
+export async function analyzeFull(prompt: string, tuning?: AnalyzePromptTuning): Promise<AnalyzeFullResult> {
+  const response = await fetch(resolveBackendUrl('/v1/analyze/full'), {
+    method: 'POST',
+    headers: getProtectedHeaders(),
+    body: JSON.stringify({ prompt, ...(tuning ? { tuning } : {}) }),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Backend analyze failed (HTTP ${response.status}).`);
+  }
+  const parsed = AnalyzeFullResponseSchema.parse(payload);
+  return {
+    sanitization: adaptBackendSanitization(parsed.sanitization),
+    syntactic: parsed.syntactic,
+    featureVector: parsed.featureVector,
+  };
+}
+
+export const OBFUSCATION_CATEGORIES = ['all', 'encoding', 'cipher', 'unicode', 'injection', 'language'] as const;
+export type ObfuscationCategoryOrAll = (typeof OBFUSCATION_CATEGORIES)[number];
+export type ObfuscationCategory = Exclude<ObfuscationCategoryOrAll, 'all'>;
+
+const ObfuscationTechniqueMetaSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  category: z.enum(['encoding', 'cipher', 'unicode', 'injection', 'language']),
+  atlasId: z.string(),
+});
+export type ObfuscationTechniqueMeta = z.infer<typeof ObfuscationTechniqueMetaSchema>;
+
+const ObfuscatedVariantSchema = z.object({
+  technique: ObfuscationTechniqueMetaSchema,
+  result: z.string(),
+});
+export type ObfuscatedVariant = z.infer<typeof ObfuscatedVariantSchema>;
+
+const ObfuscationCatalogSchema = z.object({
+  categories: z.array(z.enum(OBFUSCATION_CATEGORIES)),
+  techniques: z.array(ObfuscationTechniqueMetaSchema),
+});
+export type ObfuscationCatalog = z.infer<typeof ObfuscationCatalogSchema>;
+
+// Obfuscation-lab technique catalog (metadata only — the transforms run server-side).
+export async function getObfuscationCatalog(): Promise<ObfuscationCatalog> {
+  const response = await fetch(resolveBackendUrl('/v1/analyze/obfuscate'), { headers: getProtectedHeaders() });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Obfuscation catalog fetch failed (HTTP ${response.status}).`);
+  }
+  return ObfuscationCatalogSchema.parse(payload);
+}
+
+// Generate obfuscated variants of a prompt — one technique by id, or a whole
+// category ('all' for everything).
+export async function obfuscatePrompt(prompt: string, opts: { techniqueId?: string; category?: ObfuscationCategoryOrAll }): Promise<ObfuscatedVariant[]> {
+  const response = await fetch(resolveBackendUrl('/v1/analyze/obfuscate'), {
+    method: 'POST',
+    headers: getProtectedHeaders(),
+    body: JSON.stringify({
+      prompt,
+      ...(opts.techniqueId ? { techniqueId: opts.techniqueId } : {}),
+      ...(opts.category ? { category: opts.category } : {}),
+    }),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Obfuscation failed (HTTP ${response.status}).`);
+  }
+  return z.object({ variants: z.array(ObfuscatedVariantSchema) }).parse(payload).variants;
+}
+
+const NormalizationCorrectionSchema = z.object({ original: z.string(), replacement: z.string(), offset: z.number() });
+const NormalizationResultSchema = z.object({
+  text: z.string(),
+  changed: z.boolean(),
+  original: z.string(),
+  corrections: z.array(NormalizationCorrectionSchema),
+  backend: z.enum(['heuristic', 'languagetool']),
+});
+export type NormalizationResult = z.infer<typeof NormalizationResultSchema>;
+
+// Heuristic spelling normalization (deterministic; runs server-side).
+export async function normalizeText(text: string): Promise<NormalizationResult> {
+  const response = await fetch(resolveBackendUrl('/v1/analyze/normalize'), {
+    method: 'POST',
+    headers: getProtectedHeaders(),
+    body: JSON.stringify({ text }),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Normalization failed (HTTP ${response.status}).`);
+  }
+  return NormalizationResultSchema.parse(payload);
 }
 
 export async function lookupInstructionMonitorRecord(

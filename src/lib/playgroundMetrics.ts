@@ -15,6 +15,12 @@ const PLAYGROUND_METRICS_STORAGE_KEY = 'counter_spy_playground_metrics_v1';
 const MAX_PLAYGROUND_METRIC_ENTRIES = 2000;
 export const PLAYGROUND_METRICS_UPDATED_EVENT = 'counter-spy:playground-metrics-updated';
 
+// Display helper for normalized [0,1] feature-pressure values (UI-only formatter;
+// the feature vector itself is computed server-side).
+export function formatFeaturePercent(value: number): string {
+  return `${Math.round(Math.max(0, Math.min(1, value)) * 100)}%`;
+}
+
 export interface PlaygroundMetricEntry extends AtlasTaxonomyFields {
   id: string;
   timestamp: string;
@@ -129,7 +135,10 @@ export interface PromptFeatureVector {
   redactions: string[];
 }
 
-const PromptFeatureVectorSchema: z.ZodType<PromptFeatureVector> = z.object({
+// Validates the wire shape returned by /v1/analyze/full (and used for the
+// browser-local research log). Mirrors buildPromptFeatureVector in
+// backend/src/analysis/promptFeatureVector.ts.
+export const PromptFeatureVectorSchema: z.ZodType<PromptFeatureVector> = z.object({
   syntactic: z.object({
     score: z.number(),
     threshold: z.number(),

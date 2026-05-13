@@ -72,10 +72,110 @@ Exercised the new audit path against the demo-compose stack (gateway + pgvector 
 - Lint + 98/98 backend tests pass (was 91 — +5 pure-function + +2 route). Endpoint smoke-tested against the running demo gateway: returns `{anomaly:{…zeros}, fpr:{…zeros}, sampleSize:0}` against an empty Postgres.
 - Phase 3 step 4 still up next (governance/policies/profiles stores; auth model decision).
 
-### Phase 3 step 4 — retire Firestore; governance/policies stores; auth re-think
-- Add `app_config` (key-value JSONB) table + `GET|PUT /v1/governance` (the `governanceConfig` doc + the `localStorage` system config — `App.tsx` ~1680s loaders) and `kb_policies` table + `GET|POST|DELETE /v1/policies` (the `knowledge_base` collection — `App.tsx` `handleSavePolicy`/`handleDeletePolicy`/`handleFileUpload`, `customPolicies`). Optionally a `user_profiles` table (the `users` collection — read at login).
-- Then `src/lib/firebase.ts` shrinks to sign-in + uid; remove `firestore.rules` (re-express its per-user/per-field protections as route-handler checks + `audit_logs`/`app_config` column constraints); update `CLAUDE.md`'s "Vault" line. Switch `docker-compose.demo.yml`'s Postgres from `tmpfs` to a durable named volume now that it holds audit data.
-- **Auth model is still undecided** (per user, 2026-05-12): keep Firebase as identity provider + backend verifies ID tokens (Firebase Admin SDK or a JWT-verify lib), vs. backend-owned login/sessions. The backend currently trusts the bearer-token-gated `x-counter-spy-user-id` header — fine for the demo, but the per-user RBAC story needs one of the above before this is production-real.
+### Phase 3 step 4 — retire Firestore (governance / system-config / users / KB policies) — PLAN FOR NEXT SESSION
+
+> **User-verified scope (2026-05-13):** every editable surface stays — System Configuration dialog, blocked keywords / forbidden topics / regex rules, Policies tab (custom safeguard policies), HITL / Global Pause toggles, entropy + syntactic sliders, promote-to-KB workflow, user profile + role, golden set. We're moving where the data is stored (Firestore → Postgres), not removing functionality. **Auth-model decision is explicitly DEFERRED** (still on the user's plate after the data move lands).
+
+**What still lives on Firestore today (post-Phase-3-step-3):**
+
+| Firestore location | Shape (approximate) | Surface that edits it |
+| :--- | :--- | :--- |
+| `config/governance` doc | `{isHitlActive: boolean, isGlobalPause: boolean, entropyThreshold: number, syntacticThreshold: number}` | Metrics tab admin controls + sliders (`ThreatDashboard.tsx` lines ~510–602) |
+| `config/system` doc | `SystemConfig` (see `App.tsx` near line ~289 — `safeguardEffectivePromptOverride`, `responderPrompt`, `samSpadePersonaPrompt`, `samSpadeScenarioPrompt`, plus blocked-keyword / forbidden-topic / regex-rule arrays, max context window, toggles, etc.) | System Configuration dialog (`App.tsx` line 3031 `setDoc(doc(db,'config','system'), normalizedConfig)`) |
+| `users/{uid}` doc | `{uid, email, displayName, photoURL, role}` (role ∈ `'admin' \| 'developer'` per `parseUserProfile`) | Created at first login (`App.tsx` ~2198–2205); role updates via Profile UI |
+| `knowledge_base/{policyId}` docs | Custom safeguard policies (the `POLICIES` shape in `src/lib/policies.ts` plus `isDefault: boolean, timestamp`) — name, category, prompt body, topics, keywords, regex rules | Policies tab — `handleSavePolicy` / `handleDeletePolicy` / `handleFileUpload` (`App.tsx` lines ~3060–3412) |
+| `knowledge_base/golden-set` doc | "Promote to KB" canonical examples (one consolidated doc, not per-row) | Promote action on an audit row (`App.tsx` line ~2716 `doc(db, 'knowledge_base', 'golden-set')`) |
+| `test/connection` doc | Trivial Firestore health-check ping at login (`App.tsx` line 534) | Auto — discard, not user-facing |
+
+**Postgres schema (sketch).** Add to a new `backend/src/config/configStore.ts` (`app_config`), `backend/src/config/profileStore.ts` (`user_profiles`), `backend/src/config/policyStore.ts` (`kb_policies` + optional `kb_golden_set` row in policies or its own table — decide once `golden-set` shape is read in session):
+```sql
+CREATE TABLE IF NOT EXISTS app_config (
+  key         text PRIMARY KEY,         -- 'governance', 'system'
+  value       jsonb NOT NULL,
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  updated_by  text                      -- caller uid of last writer (RBAC audit trail)
+);
+
+CREATE TABLE IF NOT EXISTS user_profiles (
+  uid          text PRIMARY KEY,
+  email        text,
+  display_name text,
+  photo_url    text,
+  role         text NOT NULL DEFAULT 'developer'   -- 'admin' | 'developer' | future roles
+              CHECK (role IN ('admin','developer','analyst','viewer')),
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS kb_policies (
+  id           uuid PRIMARY KEY,
+  name         text NOT NULL,
+  category     text,
+  body         jsonb NOT NULL,                     -- prompt / topics / keywords / regex_rules / category-specific fields
+  is_default   boolean NOT NULL DEFAULT false,     -- seeded from src/lib/policies.ts on first read of an empty table
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now(),
+  promoted     boolean NOT NULL DEFAULT false       -- from the "promote to KB" workflow
+);
+
+-- Optional, depending on what knowledge_base/golden-set actually stores:
+CREATE TABLE IF NOT EXISTS kb_golden_set (
+  id           text PRIMARY KEY DEFAULT 'default',  -- single-row table OR per-example rows
+  value        jsonb NOT NULL,
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+```
+Connection-string resolution mirrors the existing audit-store: `APP_CONFIG_DATABASE_URL → DATABASE_URL → INSTRUCTION_MONITOR_DATABASE_URL`. Best-effort `initConfigStore()` at boot (same pattern as `initAuditStore`).
+
+**Backend endpoints to add:**
+- `GET|PUT /v1/governance` — single-doc shape; PUT is operator-only (route-handler check on `user_profiles.role === 'admin'`).
+- `GET|PUT /v1/system-config` — single-doc shape; PUT operator-only.
+- `GET|PUT /v1/users/me` — caller reads/writes their own profile only. Role mutations gated to admin (a separate `PUT /v1/users/:uid/role` is cleaner).
+- `GET|POST|PATCH|DELETE /v1/policies` — list / create / update / delete custom policies. POST + PATCH + DELETE operator-only.
+- `GET|PUT /v1/golden-set` (or fold into `/v1/policies` as a special id) — TBD on shape inspection.
+
+**Suggested commit order (one per Firestore location, smallest → biggest):**
+
+1. **Governance config** (`config/governance`). Tiny shape, two callers (`ThreatDashboard.tsx` ~510–602 read + 4 setDoc patches; `App.tsx` ~2260 setProfile-time read + ~2169 setDoc). Add `app_config` table, `GET|PUT /v1/governance`, `getGovernanceConfig()`/`setGovernanceConfig()` Zod clients, rewire both callers. This is the proving-ground commit — establishes the `app_config` pattern.
+
+2. **System config** (`config/system`). Same `app_config` table, separate key. App.tsx ~2300 onSnapshot listener + ~3031 setDoc. Adds `GET|PUT /v1/system-config` + Zod clients. Rewire the System Configuration dialog onto the new endpoints. Drop the localStorage shadow if any (check `loadLocalSystemConfig`).
+
+3. **User profiles** (`users/{uid}`). New `user_profiles` table + `GET|PUT /v1/users/me` (and admin-gated `PUT /v1/users/:uid/role` if the existing UI surfaces a role-change button). App.tsx ~2234 — replace `onSnapshot(doc(db,'users',uid), ...)` with a one-shot `GET /v1/users/me` + a localStorage cache (no real-time multi-tab profile-sync needed). This commit also exposes the role-check primitive the other endpoints' admin-only branches depend on.
+
+4. **KB policies** (`knowledge_base/*` collection + the `knowledge_base/golden-set` doc). New `kb_policies` table. `GET|POST|PATCH|DELETE /v1/policies` (list / create / update / delete) + Zod clients. App.tsx `handleSavePolicy` / `handleDeletePolicy` / `handleFileUpload` / `handlePromoteToKB` rewires. Replace the `onSnapshot(collection(db,'knowledge_base'))` realtime listener with a one-shot `GET /v1/policies` on tab open + manual refresh (the Policies tab doesn't need sub-second multi-tab sync). Seed the default policy set from `src/lib/policies.ts` server-side on first empty-table read. The `golden-set` doc: inspect its actual shape during this commit and either add a `kb_golden_set` row in `kb_policies` (single id `'golden-set'`) or its own one-row table.
+
+5. **Final cleanup**. After steps 1–4 land, no `setDoc`/`getDoc`/`onSnapshot`/`addDoc`/`updateDoc`/`deleteDoc` calls exist in `src/` against `db`. Then:
+   - Remove the `test/connection` health-check ping from App.tsx (line 534).
+   - Drop the `firebase/firestore` import from App.tsx + ThreatDashboard.tsx; `src/lib/firebase.ts` shrinks to **just the Auth piece** (sign-in + uid), pending the auth-model decision.
+   - **Delete `firestore.rules`** — its per-user/per-field RBAC re-expressed as route-handler `role === 'admin'` checks + table column constraints (already in the schema above).
+   - Update `CLAUDE.md`'s "Vault" line (currently calls Firestore the database-layer RBAC vault — that role moves to Postgres + route handlers).
+   - Switch `docker-compose.demo.yml`'s Postgres from `tmpfs` to a durable named volume now that it holds **all** the long-lived data (config, policies, profiles, audit logs).
+
+**Frontend rewire patterns (consistent across all 4 steps).** For each Firestore location:
+- Add Zod-validated client(s) in `src/lib/backendApi.ts` next to the existing `appendAuditLog`/`listAuditLogs`/etc. pattern.
+- Replace `onSnapshot` realtime listeners with one-shot `GET` + a focused polling effect ONLY where multi-tab sync matters (governance config is the only one that probably wants 5s polling, since multiple analysts could be flipping HITL).
+- Replace `setDoc`/`addDoc`/`updateDoc`/`deleteDoc` with the corresponding `PUT`/`POST`/`PATCH`/`DELETE` client.
+- Keep `localReviewMode` working: localStorage fallback for config/system when Firebase auth is bypassed (current behavior — already handled by `loadLocalSystemConfig`).
+- For role-gated writes (admin-only), the client just calls the endpoint and surfaces the 403 if the backend rejects — don't duplicate the role check on the client (defense-in-depth: backend is authoritative).
+
+**Backend tests to add (per step):**
+- `backend/test/configStore.test.ts` — pure-function coverage for the app-config store.
+- `backend/test/policyStore.test.ts` — CRUD over kb_policies, default seeding.
+- `backend/test/profileStore.test.ts` — get/put + role-update guard.
+- Route-level tests in `securityRoutes.test.ts` for each endpoint: 401 no bearer, 403 non-admin writes where applicable, 400 bad body, 503 store-unconfigured (same shape as the existing metrics-aggregate tests).
+
+**Out of scope for this step:**
+- Auth-model decision (Firebase keep-and-verify-ID-token vs. backend-owned login vs. status-quo bearer-token). Discuss when the data move is done.
+- The CTF iframe's safeguard-prompt postMessage bridge can stay; **after** step 4 lands the system config in Postgres, that bridge becomes redundant (the CTF backend can read the operator's effective prompt directly from `app_config`), but removing it is a follow-up not a prerequisite.
+
+**Validation per commit:**
+- `npm run lint` + `npm run backend:test` (will grow from 98 by new tests).
+- `npm run build` (Vite client + ssr).
+- `docker compose up -d --build counter-spy-backend` against the demo stack.
+- Curl smoke against each new endpoint (matching the audit-logs smoke pattern in step 2's writeup).
+- UI spot-check of the corresponding tab in the browser.
+
+**Branch state on entering this work:** `feat/server-hosted-app` at `59adca9` (Phase 3 step 3). Working tree clean modulo the user's untracked `Technical/PLATFORM_ROADMAP.md`. Demo stack containers are running; `docker compose -f docker-compose.demo.yml ps` confirms gateway healthy.
 
 ### Phase 4 (rest)
 Refresh `README.md`, `Technical/ARCHITECTURE.md`, `Technical/LOCAL_DEVELOPMENT.md`, `Technical/SBOM.md`, `File_Structure.md`, and `infra/cloudformation/{scripts/deploy-frontend.sh,dev/03-frontend.yml}` for the no-separate-frontend-container shape; convert `Dockerfile.ctf-frontend` to a production/static build (or fold the CTF surface into the gateway too).

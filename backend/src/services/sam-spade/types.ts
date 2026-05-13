@@ -4,7 +4,7 @@
  * backend service, frontend API client, and downstream review surfaces.
  */
 import { z } from 'zod';
-import type { BackendSanitizationResult } from '../../security/sanitizer.js';
+import type { BackendSanitizationResult } from '@counter-spy/backend-shared/security/sanitizer.js';
 
 export type SamSpadeSessionStatus = 'ACTIVE' | 'SOLVED' | 'INTERCEPTED';
 export type SamSpadeMessageRole = 'player' | 'npc' | 'system';

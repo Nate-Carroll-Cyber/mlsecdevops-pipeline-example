@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizePrompt } from '../src/security/sanitizer.ts';
+import { sanitizePrompt } from '@counter-spy/backend-shared/security/sanitizer.js';
 
 test('allows a normal prompt without redactions', () => {
   const result = sanitizePrompt('Summarize the purpose of an incident response runbook.');

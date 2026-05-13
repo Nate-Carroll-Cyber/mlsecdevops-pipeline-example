@@ -1,5 +1,5 @@
 import { analyzeLanguageLikelihood } from './languageLikelihood.js';
-import type { BackendSanitizationResult } from '../security/sanitizer.js';
+import type { BackendSanitizationResult } from '@counter-spy/backend-shared/security/sanitizer.js';
 import { analyzeSyntacticComplexity, type SyntacticComplexityAnalysis } from './syntacticAnalyzer.js';
 
 const clamp01 = (value: number) => Math.max(0, Math.min(1, value));

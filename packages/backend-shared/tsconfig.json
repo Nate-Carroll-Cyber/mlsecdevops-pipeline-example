@@ -1,17 +1,18 @@
 {
-  "extends": "../tsconfig.json",
+  "extends": "../../tsconfig.json",
   "compilerOptions": {
     "allowImportingTsExtensions": false,
+    "composite": true,
     "lib": ["ES2022"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
     "outDir": "./dist",
     "rootDir": "./src",
-    "types": ["node"]
+    "types": ["node"],
+    "paths": {}
   },
-  "include": ["src/**/*.ts"],
-  "references": [
-    { "path": "../packages/backend-shared" }
-  ]
+  "include": ["src/**/*.ts"]
 }

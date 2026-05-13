@@ -9,8 +9,11 @@
   ],
   "scripts": {
     "dev": "vite --port=3000 --host=0.0.0.0",
+    "shared:build": "npm run build --workspace=@counter-spy/backend-shared",
+    "shared:check": "npm run check --workspace=@counter-spy/backend-shared",
+    "shared:clean": "npm run clean --workspace=@counter-spy/backend-shared",
     "backend:dev": "tsx watch backend/src/server.ts",
-    "backend:build": "tsc -p backend/tsconfig.json",
+    "backend:build": "npm run shared:build && tsc -p backend/tsconfig.json",
     "backend:start": "node backend/dist/server.js",
     "backend:check": "tsc -p backend/tsconfig.json --noEmit",
     "backend:test": "node --import tsx --test backend/test/*.test.ts",
@@ -23,7 +26,7 @@
     "start": "npm run build:all && node backend/dist/server.js",
     "preview": "vite preview",
     "clean": "rm -rf dist",
-    "lint": "tsc --noEmit && npm run backend:check",
+    "lint": "tsc --noEmit && npm run shared:check && npm run backend:check",
     "test": "npm run backend:test"
   },
   "dependencies": {

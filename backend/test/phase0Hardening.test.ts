@@ -7,9 +7,9 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizeOutput } from '../src/security/sanitizer.ts';
-import { assertEgressAllowed } from '../src/security/urlGuard.ts';
-import { createRateLimiter } from '../src/middleware/rateLimit.ts';
+import { sanitizeOutput } from '@counter-spy/backend-shared/security/sanitizer.js';
+import { assertEgressAllowed } from '@counter-spy/backend-shared/security/urlGuard.js';
+import { createRateLimiter } from '@counter-spy/backend-shared/middleware/rateLimit.js';
 import { SamSpadeSessionRecordSchema } from '../src/services/sam-spade/types.ts';
 
 // --- sanitizeOutput ---------------------------------------------------------

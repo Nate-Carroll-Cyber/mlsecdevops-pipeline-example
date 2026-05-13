@@ -24,6 +24,12 @@
     "paths": {
       "@/*": [
         "./src/*"
+      ],
+      "@counter-spy/backend-shared": [
+        "./packages/backend-shared/src/index.ts"
+      ],
+      "@counter-spy/backend-shared/*": [
+        "./packages/backend-shared/src/*"
       ]
     },
     "allowImportingTsExtensions": true,

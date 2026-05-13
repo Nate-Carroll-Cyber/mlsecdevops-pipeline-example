@@ -172,7 +172,7 @@ test('sam-spade-service: message route falls back to DEFAULT_SAFEGUARD_EFFECTIVE
   // The CTF iframe doesn't share state with the Analyst Chat console and sends
   // no metadata.safeguardEffectivePrompt; the route must still get a safeguard
   // verdict by falling back to the backend's hardcoded default rubric.
-  const { DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT } = await import('../src/security/safeguardDefaults.ts');
+  const { DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT } = await import('@counter-spy/backend-shared/security/safeguardDefaults.js');
 
   const session = await requestApp('/v1/ctf/sam-spade/session', {
     method: 'POST',

@@ -3,8 +3,8 @@
  * This module owns session creation, guarded message handling, simple NPC reply
  * logic, solve evaluation, and review artifact construction.
  */
-import { sanitizePrompt, type BackendSanitizationResult } from '../../security/sanitizer.js';
-import type { FirewallVerdict } from '../../security/sanitizer.js';
+import { sanitizePrompt, type BackendSanitizationResult } from '@counter-spy/backend-shared/security/sanitizer.js';
+import type { FirewallVerdict } from '@counter-spy/backend-shared/security/sanitizer.js';
 import { samSpadeConfig } from './config.js';
 import { getStoredSession, saveStoredSession } from './store.js';
 import type { SamSpadeReviewArtifact, SamSpadeSessionMessage, SamSpadeSessionRecord } from './types.js';

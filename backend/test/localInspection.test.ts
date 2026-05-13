@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { sanitizePrompt } from '../src/security/sanitizer.ts';
+import { sanitizePrompt } from '@counter-spy/backend-shared/security/sanitizer.js';
 import { createSamSpadeSession, submitSamSpadeMessage } from '../src/services/sam-spade/index.ts';
 
 process.env.COUNTER_SPY_DISABLE_SERVER_LISTEN = 'true';

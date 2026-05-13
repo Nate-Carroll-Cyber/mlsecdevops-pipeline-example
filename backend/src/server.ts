@@ -4,20 +4,20 @@
  * and the governed Sam Spade CTF routes.
  */
 // IMPORTANT: telemetry must be the first import so OpenTelemetry auto-instrumentation
-// can patch Express/http/pg before they are loaded. See backend/src/telemetry.ts.
-import { TELEMETRY_SERVICE_NAME } from './telemetry.js';
+// can patch Express/http/pg before they are loaded. See packages/backend-shared/src/telemetry.ts.
+import { TELEMETRY_SERVICE_NAME } from '@counter-spy/backend-shared/telemetry.js';
 import express, { type Request, type Response } from 'express';
 import { Credentials, Translator } from '@translated/lara';
 import { createHash } from 'node:crypto';
 import { metrics, trace, type Attributes } from '@opentelemetry/api';
 import { logs, SeverityNumber } from '@opentelemetry/api-logs';
 import { z } from 'zod';
-import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict, type OutputSanitizationResult } from './security/sanitizer.js';
-import { DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT } from './security/safeguardDefaults.js';
+import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict, type OutputSanitizationResult } from '@counter-spy/backend-shared/security/sanitizer.js';
+import { DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT } from '@counter-spy/backend-shared/security/safeguardDefaults.js';
 import { detectThreatSpikes, type ThreatLog } from './analysis/anomalyDetector.js';
 import { calculateFalsePositiveMetrics, type AuditLogMetrics } from './analysis/metrics.js';
-import { assertEgressAllowed } from './security/urlGuard.js';
-import { createRateLimiter } from './middleware/rateLimit.js';
+import { assertEgressAllowed } from '@counter-spy/backend-shared/security/urlGuard.js';
+import { createRateLimiter } from '@counter-spy/backend-shared/middleware/rateLimit.js';
 import { mountWebApp } from './web/ssr.js';
 import { analyzeSyntacticComplexity } from './analysis/syntacticAnalyzer.js';
 import { buildPromptFeatureVector } from './analysis/promptFeatureVector.js';

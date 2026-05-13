@@ -28,20 +28,17 @@ import {
   onAuthStateChanged, 
   User as FirebaseUser 
 } from 'firebase/auth';
-// Import Firestore functions for database operations
-import { 
-  doc, 
-  setDoc, 
-  getDoc, 
-  collection, 
-  addDoc, 
-  serverTimestamp, 
-  query, 
-  orderBy, 
-  limit, 
+// Import Firestore functions for database operations. The audit-log collection
+// now lives in Postgres behind /v1/audit-logs (see backendApi imports below);
+// Firestore still backs governance config, the knowledge base, and user profiles.
+import {
+  doc,
+  setDoc,
+  getDoc,
+  collection,
+  addDoc,
+  serverTimestamp,
   onSnapshot,
-  getDocs,
-  writeBatch,
   deleteDoc,
   updateDoc,
   getDocFromServer
@@ -58,6 +55,10 @@ import {
   analyzeFull as analyzeFullViaBackend,
   adaptBackendSanitization,
   type AnalyzePromptTuning,
+  appendAuditLog,
+  listAuditLogs,
+  patchAuditLog,
+  clearAuditLogs,
   checkBackendHealth,
   getCtfReviewArtifacts,
   interceptPrompt,
@@ -268,6 +269,10 @@ const SAM_SPADE_BLOCKED_CONTENT_LABEL = 'Bad content.';
 // driving the CTF API itself. Unset = render the in-app CTF UI as before.
 const CTF_FRONTEND_URL = (import.meta.env.VITE_CTF_FRONTEND_URL ?? '').trim();
 const CTF_REVIEW_POLL_INTERVAL_MS = 6000;
+// The audit trail lives in Postgres behind /v1/audit-logs now (no Firestore
+// realtime listener), so the analyst console polls the shared trail on this cadence.
+const AUDIT_LOG_POLL_INTERVAL_MS = 5000;
+const AUDIT_LOG_POLL_LIMIT = 50;
 const SANITIZATION_REDOS_LATENCY_THRESHOLD_MS = 1000;
 
 interface WakeLockSentinelLike {
@@ -2495,7 +2500,7 @@ export default function App() {
         setAuditLogs(prev => prev.map(entry => entry.id === logId ? { ...entry, ...patch } : entry));
         setEphemeralAuditLogs(prev => prev.map(entry => entry.id === logId ? { ...entry, ...patch } : entry));
         if (!localReviewMode) {
-          await updateDoc(doc(db, 'audit_logs', logId), patch);
+          await patchAuditLog(logId, patch, profile?.uid);
         }
       }
       return true;
@@ -2529,12 +2534,12 @@ export default function App() {
       return;
     }
     try {
-      // Update the log document in Firestore with the review status and severity
-      await updateDoc(doc(db, 'audit_logs', logId), { 
+      // Update the audit record (Postgres-backed) with the review status and severity
+      await patchAuditLog(logId, {
         reviewed: true,
         resultantSeverity,
         status: 'REVIEWED'
-      });
+      }, profile.uid);
       setEphemeralAuditLogs(prev => prev.map(log => log.id === logId ? {
         ...log,
         reviewed: true,
@@ -2680,10 +2685,8 @@ export default function App() {
         });
       }
 
-      // Mark the log as promoted in Firestore
-      await updateDoc(doc(db, 'audit_logs', promotingLog.id), {
-        promoted: true
-      });
+      // Mark the audit record as promoted (Postgres-backed)
+      await patchAuditLog(promotingLog.id, { promoted: true }, profile?.uid);
 
       toast.success('Successfully promoted to Golden Set');
       // Reset the promotion state
@@ -2836,11 +2839,10 @@ export default function App() {
     }
 
     try {
-      await addDoc(collection(db, 'audit_logs'), {
-        userId: auditEntry.userId,
+      // The audit store stamps id/userId/timestamp; everything else is the JSONB record.
+      await appendAuditLog({
         userRole: auditEntry.userRole,
         sessionId: auditEntry.sessionId,
-        timestamp: serverTimestamp(),
         sanitizedPrompt: auditEntry.sanitizedPrompt,
         detectionFlags: auditEntry.detectionFlags,
         obfuscationSummary: auditEntry.obfuscationSummary,
@@ -2859,7 +2861,7 @@ export default function App() {
         responderModel: auditEntry.responderModel ?? null,
         responderStatus: auditEntry.responderStatus ?? null,
         responderLatencyMs: auditEntry.responderLatencyMs ?? null,
-      });
+      }, profile.uid);
     } catch (error) {
       handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
     }
@@ -2911,32 +2913,12 @@ export default function App() {
       return removedCount;
     }
 
-    const q = query(collection(db, 'audit_logs'));
-    const snapshot = await getDocs(q);
-
-    if (snapshot.empty) {
-      return 0;
-    }
-
-    const removableDocs = snapshot.docs.filter((docSnap) => docSnap.data().status !== 'PENDING_REVIEW');
-    if (removableDocs.length === 0) {
-      return 0;
-    }
-
-    const chunks = [];
-    for (let i = 0; i < removableDocs.length; i += 500) {
-      chunks.push(removableDocs.slice(i, i + 500));
-    }
-
-    for (const chunk of chunks) {
-      const batch = writeBatch(db);
-      chunk.forEach((doc) => {
-        batch.delete(doc.ref);
-      });
-      await batch.commit();
-    }
-
-    return removableDocs.length;
+    // The Postgres audit store clears the whole shared trail (no per-row delete /
+    // pending-review carve-out yet — that protection re-lands with the Phase 3 RBAC pass).
+    const deleted = await clearAuditLogs({}, profile?.uid);
+    setAuditLogs([]);
+    setEphemeralAuditLogs([]);
+    return deleted;
   };
 
   // Function to clear all audit logs (Admin only)
@@ -3074,8 +3056,9 @@ export default function App() {
     const csvContent = [
       headers.join(','),
       ...auditLogs.map(log => {
-        // Format the timestamp
-        const date = log.timestamp?.toDate ? log.timestamp.toDate().toISOString() : new Date().toISOString();
+        // Format the timestamp (handles Date objects, ISO strings, and legacy Firestore Timestamps).
+        const timestampMs = getLogTimestampValue(log.timestamp);
+        const date = timestampMs > 0 ? new Date(timestampMs).toISOString() : new Date().toISOString();
         // Escape quotes in the prompt
         const prompt = `"${log.sanitizedPrompt.replace(/"/g, '""')}"`;
         // Determine the string representation of the detection level
@@ -3247,24 +3230,30 @@ export default function App() {
     return sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3 ml-1 text-primary" /> : <ArrowDown className="w-3 h-3 ml-1 text-primary" />;
   };
 
-  // Effect hook to listen for real-time updates to audit logs
+  // Poll the shared audit trail from Postgres (/v1/audit-logs). This replaces the
+  // old Firestore realtime listener: writes go through appendAuditLog/patchAuditLog,
+  // and ephemeralAuditLogs bridges any patch that hasn't round-tripped to the next poll.
   useEffect(() => {
     if (!profile) return;
     if (localReviewMode) return;
 
-    // Query the last 50 audit logs, ordered by timestamp descending
-    const q = query(collection(db, 'audit_logs'), orderBy('timestamp', 'desc'), limit(50));
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const logs = snapshot.docs
-        .map(doc => parseAuditLog({ id: doc.id, ...doc.data() }))
-        .filter((log): log is AuditLog => log !== null);
-      setAuditLogs(logs);
-    }, (error) => {
-      // Handle errors fetching audit logs
-      handleFirestoreError(error, OperationType.LIST, 'audit_logs');
-    });
-
-    return unsubscribe;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const rows = await listAuditLogs({ limit: AUDIT_LOG_POLL_LIMIT }, profile.uid);
+        if (cancelled) return;
+        const logs = rows
+          .map((row) => parseAuditLog(row.record))
+          .filter((log): log is AuditLog => log !== null);
+        setAuditLogs(logs);
+      } catch (error) {
+        // Backend unreachable or audit store not configured — leave the current list in place.
+        devWarn('Audit-log poll failed.', error);
+      }
+    };
+    void refresh();
+    const interval = window.setInterval(() => { void refresh(); }, AUDIT_LOG_POLL_INTERVAL_MS);
+    return () => { cancelled = true; window.clearInterval(interval); };
   }, [profile, localReviewMode]);
 
   // Effect hook to listen for real-time updates to the knowledge base policies
@@ -3517,11 +3506,9 @@ export default function App() {
                   contextWindowUtilization: parseFloat(((estimatedPromptTokens / parsedContextWindowLimit) * 100).toFixed(1)),
                 }, ...prev]);
               } else {
-                await addDoc(collection(db, 'audit_logs'), {
-                  userId: profile.uid,
+                await appendAuditLog({
                   userRole: profile.role,
                   sessionId,
-                  timestamp: serverTimestamp(),
                   sanitizedPrompt: logSanitization.sanitized,
                   detectionFlags,
                   obfuscationSummary: buildObfuscationSummary(logSanitization.redactions, logSanitization.decodeTelemetry),
@@ -3539,7 +3526,7 @@ export default function App() {
                   response: contextWindowMessage,
                   contextWindowLimit: parsedContextWindowLimit,
                   contextWindowUtilization: parseFloat(((estimatedPromptTokens / parsedContextWindowLimit) * 100).toFixed(1)),
-                });
+                }, profile.uid);
               }
             } catch (error) {
               handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
@@ -3592,11 +3579,9 @@ export default function App() {
             }, ...prev]);
           } else {
           // Log the blocked request
-          await addDoc(collection(db, 'audit_logs'), {
-            userId: profile.uid,
+          await appendAuditLog({
             userRole: profile.role,
             sessionId: sessionId,
-            timestamp: serverTimestamp(),
             sanitizedPrompt: sanitization.sanitized,
             detectionFlags: [...sanitization.redactions, 'ReDoS_ATTEMPT_DETECTED'],
             obfuscationSummary: buildObfuscationSummary(sanitization.redactions, sanitization.decodeTelemetry),
@@ -3612,7 +3597,7 @@ export default function App() {
             source: options?.source || 'analyst_chat',
             batchId: options?.batchId || null,
             expectedVerdict: options?.expectedVerdict || null
-          });
+          }, profile.uid);
           }
 	        } catch (error) {
 	          // Handle errors creating the audit log
@@ -3673,12 +3658,10 @@ export default function App() {
             const createdAuditLog = auditLogBase;
             setAuditLogs(prev => [createdAuditLog!, ...prev.filter((log) => log.id !== createdAuditLog!.id)]);
           } else {
-            // Create the audit log entry
-            const docRef = await addDoc(collection(db, 'audit_logs'), {
-              userId: profile.uid,
+            // Create the audit log entry (Postgres-backed; the store stamps id/userId/timestamp)
+            const createdRow = await appendAuditLog({
               userRole: profile.role,
               sessionId: sessionId,
-              timestamp: serverTimestamp(),
               sanitizedPrompt: logSanitization.sanitized,
               detectionFlags: logSanitization.redactions,
               obfuscationSummary: buildObfuscationSummary(logSanitization.redactions, logSanitization.decodeTelemetry),
@@ -3693,8 +3676,8 @@ export default function App() {
               source: options?.source || 'analyst_chat',
               batchId: options?.batchId || null,
               expectedVerdict: options?.expectedVerdict || null
-            });
-            auditLogId = docRef.id;
+            }, profile.uid);
+            auditLogId = createdRow.id;
             auditLogBase = {
               id: auditLogId,
               userId: profile.uid,
@@ -3808,7 +3791,7 @@ export default function App() {
         patchCurrentAuditLog(patch);
         if (!useLocalAuditSurface) {
           try {
-            await updateDoc(doc(db, 'audit_logs', auditLogId), {
+            await patchAuditLog(auditLogId, {
               ...(patch.judgeDecision ? { judgeDecision: patch.judgeDecision } : {}),
               ...(patch.backendGatewayStatus ? { backendGatewayStatus: patch.backendGatewayStatus } : {}),
               ...(patch.backendSafeguardVerdict ? { backendSafeguardVerdict: patch.backendSafeguardVerdict } : {}),
@@ -3819,7 +3802,7 @@ export default function App() {
               ...(patch.backendGatewayLatencyMs !== undefined ? { backendGatewayLatencyMs: patch.backendGatewayLatencyMs } : {}),
               ...(patch.instructionEmbeddingDurationMs !== undefined ? { instructionEmbeddingDurationMs: patch.instructionEmbeddingDurationMs } : {}),
               ...(patch.detectionFlags ? { detectionFlags: patch.detectionFlags } : {}),
-            });
+            }, profile.uid);
           } catch (error) {
             console.error('Failed to update audit log with backend monitor observation', error);
           }
@@ -3835,8 +3818,8 @@ export default function App() {
           patchCurrentAuditLog(reviewPatch);
 	          if (!useLocalAuditSurface) {
             try {
-              // Mark the log as pending review
-              await updateDoc(doc(db, 'audit_logs', auditLogId), reviewPatch);
+              // Mark the audit record as pending review (Postgres-backed)
+              await patchAuditLog(auditLogId, reviewPatch, profile.uid);
             } catch (e) { console.error(e); }
           }
         }
@@ -3856,8 +3839,8 @@ export default function App() {
           patchCurrentAuditLog(reviewPatch);
 	          if (!useLocalAuditSurface) {
             try {
-              // Mark the log as pending review
-              await updateDoc(doc(db, 'audit_logs', auditLogId), reviewPatch);
+              // Mark the audit record as pending review (Postgres-backed)
+              await patchAuditLog(auditLogId, reviewPatch, profile.uid);
             } catch (e) { console.error(e); }
           }
         }
@@ -3976,7 +3959,7 @@ export default function App() {
               patchCurrentAuditLog(telemetryPatch);
 	              if (!useLocalAuditSurface) {
                 try {
-                  await updateDoc(doc(db, 'audit_logs', auditLogId), {
+                  await patchAuditLog(auditLogId, {
                     ...(telemetryPatch.judgeDecision ? { judgeDecision: telemetryPatch.judgeDecision } : {}),
                     ...(telemetryPatch.backendGatewayStatus ? { backendGatewayStatus: telemetryPatch.backendGatewayStatus } : {}),
                     ...(telemetryPatch.backendSafeguardVerdict ? { backendSafeguardVerdict: telemetryPatch.backendSafeguardVerdict } : {}),
@@ -3997,7 +3980,7 @@ export default function App() {
                     ...(telemetryPatch.totalTokens !== undefined ? { totalTokens: telemetryPatch.totalTokens } : {}),
                     ...(telemetryPatch.contextWindowLimit !== undefined ? { contextWindowLimit: telemetryPatch.contextWindowLimit } : {}),
                     ...(telemetryPatch.contextWindowUtilization !== undefined ? { contextWindowUtilization: telemetryPatch.contextWindowUtilization } : {}),
-                  });
+                  }, profile.uid);
                 } catch (error) {
                   console.error("Failed to update audit log responder telemetry", error);
                 }
@@ -4032,7 +4015,7 @@ export default function App() {
               patchCurrentAuditLog(responderAuditPatch);
               if (!useLocalAuditSurface) {
                 try {
-                  await updateDoc(doc(db, 'audit_logs', auditLogId), {
+                  await patchAuditLog(auditLogId, {
                     judgeDecision: 'ADVERSARIAL',
                     backendGatewayStatus: 'SHIELD_ERROR',
                     backendSafeguardVerdict: 'ADVERSARIAL',
@@ -4041,7 +4024,7 @@ export default function App() {
                     localPrecheckLatencyMs: sanitization.latencyMs,
                     detectionFlags: timeoutFlags,
                     status: 'PENDING_REVIEW',
-                  });
+                  }, profile.uid);
                 } catch (error) {
                   console.error('Failed to update audit log for safeguard timeout', error);
                 }
@@ -4167,7 +4150,7 @@ export default function App() {
           patchCurrentAuditLog(escalationPatch);
 	          if (!useLocalAuditSurface) {
             try {
-              await updateDoc(doc(db, 'audit_logs', auditLogId), escalationPatch);
+              await patchAuditLog(auditLogId, escalationPatch, profile.uid);
             } catch (error) {
               console.error("Failed to update audit log escalation status", error);
             }
@@ -4208,7 +4191,7 @@ export default function App() {
         patchCurrentAuditLog(finalAuditPatch);
 	        if (!useLocalAuditSurface) {
           try {
-            await updateDoc(doc(db, 'audit_logs', auditLogId), finalAuditPatch);
+            await patchAuditLog(auditLogId, finalAuditPatch, profile.uid);
           } catch (error) {
             console.error("Failed to update audit log response", error);
           }

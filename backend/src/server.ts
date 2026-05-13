@@ -1512,6 +1512,13 @@ const SamSpadeMetadataSchema = z.object({
   providerLlmRoutingEnabled: z.boolean().optional(),
   responderLlmRoutingEnabled: z.boolean().optional(),
   safeguardEffectivePrompt: z.string().max(200_000).optional(),
+  // Browser-supplied LM Studio (or other safeguard upstream) API key. The Sam
+  // Spade iframe can't reach the Analyst Chat console's Runtime Settings state
+  // directly, so the parent window postMessages the current key into the
+  // iframe and the CTF frontend echoes it back here. Mirrors the safeguardApiKey
+  // exception already allowed on /v1/intercept; the rest of the responder/
+  // provider config remains backend-owned.
+  safeguardApiKey: z.string().min(1).max(4096).optional(),
 }).strict();
 
 const SamSpadeMessageRequestSchema = z.object({
@@ -2585,7 +2592,11 @@ app.post('/v1/ctf/sam-spade/message', requireBackendAuth, async (req: Authentica
     // Fall back to the backend's DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT so the CTF
     // can still get a safeguard verdict. The analyst-chat /v1/intercept path
     // remains strict (resolveSafeguardJudgeInstructions throws on a missing/
-    // empty prompt); operators always send theirs explicitly there. Phase 3
+    // empty prompt); operators always send theirs explicitly there. The
+    // analyst-chat parent window forwards the operator-supplied safeguardApiKey
+    // to the CTF iframe via postMessage; the CTF echoes it back here as
+    // metadata.safeguardApiKey so generateSafeguardVerdict can authenticate
+    // against LM Studio (or whichever upstream the safeguard targets). Phase 3
     // step 4 unifies governance config in Postgres so both surfaces share one.
     const safeguardResult = await generateSafeguardVerdict(
       sanitization.sanitized,
@@ -2594,6 +2605,7 @@ app.post('/v1/ctf/sam-spade/message', requireBackendAuth, async (req: Authentica
         systemPrompt: parsed.data.metadata?.safeguardEffectivePrompt && parsed.data.metadata.safeguardEffectivePrompt.length > 0
           ? parsed.data.metadata.safeguardEffectivePrompt
           : DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT,
+        ...(parsed.data.metadata?.safeguardApiKey ? { apiKey: parsed.data.metadata.safeguardApiKey } : {}),
       },
     );
     if (safeguardResult.verdict !== 'CLEAN') {

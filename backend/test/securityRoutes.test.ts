@@ -16,12 +16,14 @@ delete process.env.LARA_ACCESS_KEY_SECRET;
 delete process.env.LARA_API_BASE_URL;
 
 const safeguardRequests: unknown[] = [];
+const safeguardRequestHeaders: Array<Record<string, string | string[] | undefined>> = [];
 const safeguardMockServer = createServer((req, res) => {
   const chunks: Buffer[] = [];
   req.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
   req.on('end', () => {
     const body = Buffer.concat(chunks).toString('utf8');
     safeguardRequests.push(body ? JSON.parse(body) : undefined);
+    safeguardRequestHeaders.push({ ...req.headers });
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({
       choices: [
@@ -261,6 +263,38 @@ test('Sam Spade sessions are scoped to the authenticated caller', async () => {
   assert.equal(sameUserFetch.status, 200);
   assert.equal(crossUserFetch.status, 404);
   assert.equal(crossUserMessage.status, 403);
+});
+
+test('Sam Spade message route forwards a metadata.safeguardApiKey as the upstream bearer', async () => {
+  // The analyst-chat parent window postMessages its Runtime Settings
+  // safeguardApiKey into the CTF iframe; the CTF echoes it back as
+  // metadata.safeguardApiKey. The backend must use it as the LM Studio
+  // (or whichever safeguard upstream) bearer instead of falling back to
+  // env.SAFEGUARDS_API_KEY (which isn't set in this test).
+  const session = await requestApp('/v1/ctf/sam-spade/session', {
+    method: 'POST',
+    headers: authHeaders('ctf-key-user'),
+    body: { caseId: 'case-067' },
+  });
+  assert.equal(session.status, 201);
+  const sessionId = (session.payload as { session: { sessionId: string } }).session.sessionId;
+
+  const startRequestCount = safeguardRequests.length;
+  const ctfSafeguardToken = 'ctf-supplied-safeguard-token-abc123';
+  const message = await requestApp('/v1/ctf/sam-spade/message', {
+    method: 'POST',
+    headers: authHeaders('ctf-key-user'),
+    body: {
+      sessionId,
+      prompt: 'Did the witness recognize the locksmith?',
+      metadata: { safeguardApiKey: ctfSafeguardToken },
+    },
+  });
+
+  assert.equal(message.status, 200);
+  assert.equal(safeguardRequests.length, startRequestCount + 1);
+  const forwardedHeaders = safeguardRequestHeaders.at(-1);
+  assert.equal(forwardedHeaders?.authorization, `Bearer ${ctfSafeguardToken}`);
 });
 
 test('Sam Spade message route falls back to DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT when metadata is absent', async () => {

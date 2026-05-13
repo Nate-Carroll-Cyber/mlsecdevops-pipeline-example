@@ -12,7 +12,7 @@
  * the record, and Metrics summarizes the record.
  */
 // Import React and necessary hooks for state, side effects, refs, and memoization
-import React, { lazy, Suspense, useState, useEffect, useRef, useMemo } from 'react';
+import React, { lazy, Suspense, useState, useEffect, useRef, useMemo, useCallback } from 'react';
 // Import Firebase configuration and utility functions
 import { 
   auth, 
@@ -2001,6 +2001,11 @@ export default function App() {
   // Ref for the chat scroll area to auto-scroll to the bottom
   const scrollRef = useRef<HTMLDivElement>(null);
   const analystTranscriptEndRef = useRef<HTMLDivElement>(null);
+  // Sam Spade CTF iframe handle — used to forward Runtime Settings (currently
+  // just the safeguardApiKey) into the iframe via postMessage. The iframe is
+  // a separate origin/bundle, so it can't read the parent's localStorage; this
+  // bridge keeps the two surfaces in sync without duplicating secrets.
+  const samSpadeIframeRef = useRef<HTMLIFrameElement>(null);
   const effectiveSafeguardPolicies = customPolicies.length > 0 ? customPolicies : POLICIES;
   const effectiveSafeguardPromptPreview = useMemo(() => buildCanonicalSafeguardPromptForHash({
     systemConfig,
@@ -2063,6 +2068,29 @@ export default function App() {
   const safeguardBaseUrlOverride = safeguardRuntimeConfig.baseUrl.trim();
   const safeguardModelIdOverride = safeguardRuntimeConfig.modelId.trim();
   const safeguardApiKeyOverride = safeguardApiKey.trim();
+
+  // Forward Runtime Settings into the Sam Spade iframe. The CTF iframe is a
+  // separate bundle/origin (vite preview at :3001), so it can't read the
+  // parent's React state directly; the parent posts the safeguardApiKey to it
+  // and the CTF echoes it back as metadata.safeguardApiKey on /v1/ctf/sam-spade
+  // calls. Origin is set to CTF_FRONTEND_URL so the message isn't broadcast.
+  const postSamSpadeRuntimeSettings = useCallback((iframe: HTMLIFrameElement | null) => {
+    if (!iframe || !iframe.contentWindow || !CTF_FRONTEND_URL) return;
+    iframe.contentWindow.postMessage(
+      {
+        type: 'counter-spy:runtime-settings',
+        payload: { safeguardApiKey: safeguardApiKeyOverride || null },
+      },
+      CTF_FRONTEND_URL,
+    );
+  }, [safeguardApiKeyOverride]);
+
+  // Re-post whenever the safeguardApiKey changes so the iframe stays in sync
+  // without needing to be reopened (the iframe is also re-posted to on each
+  // `onLoad` via the iframe element below).
+  useEffect(() => {
+    postSamSpadeRuntimeSettings(samSpadeIframeRef.current);
+  }, [postSamSpadeRuntimeSettings]);
   const backendSafeguardBaseUrl = backendHealth?.safeguards?.baseUrl?.trim() || '';
   const backendSafeguardModelId = backendHealth?.safeguards?.modelId?.trim() || '';
   const displayedSafeguardBaseUrl = safeguardBaseUrlOverride || backendSafeguardBaseUrl || 'BACKEND / ENV MANAGED';
@@ -4487,10 +4515,12 @@ export default function App() {
             <div className="h-full overflow-hidden bg-black">
               {CTF_FRONTEND_URL ? (
                 <iframe
+                  ref={samSpadeIframeRef}
                   src={CTF_FRONTEND_URL}
                   title="Sam Spade CTF"
                   className="h-full w-full border-0"
                   allow="clipboard-write"
+                  onLoad={() => postSamSpadeRuntimeSettings(samSpadeIframeRef.current)}
                 />
               ) : (
                 <div className="flex h-full items-center justify-center p-8 text-center text-sm text-slate-400">

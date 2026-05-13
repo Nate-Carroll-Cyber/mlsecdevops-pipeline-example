@@ -53,6 +53,41 @@ const PLAYER_STORAGE_KEY = 'counterspy_ctf_player_id';
 const SESSION_STORAGE_KEY = 'counterspy_ctf_session_id';
 const DEFAULT_CASE_ID = 'case-067';
 
+// Parent origins allowed to push Runtime Settings into this iframe. Mirrors
+// CTF_ALLOWED_FRAME_ANCESTORS in ctf-frontend/vite.config.ts — anyone who can
+// embed us in an iframe is the same set we accept postMessages from. In-memory
+// only (never persisted) so a key never survives a page reload.
+const RUNTIME_SETTINGS_PARENT_ORIGINS = new Set([
+  'http://localhost:18080',
+  'http://127.0.0.1:18080',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+]);
+let runtimeSafeguardApiKey: string | undefined = undefined;
+
+/**
+ * Wire up the cross-frame Runtime Settings bridge. The parent Analyst Chat
+ * console posts `{type: 'counter-spy:runtime-settings', payload: {safeguardApiKey}}`
+ * messages to this iframe; we validate the origin against an allow-list and
+ * stash the key in memory so subsequent `/v1/ctf/sam-spade/message` calls can
+ * forward it as `metadata.safeguardApiKey`. Idempotent — safe to call multiple
+ * times.
+ */
+let runtimeSettingsBridgeInstalled = false;
+export function installRuntimeSettingsBridge(): void {
+  if (runtimeSettingsBridgeInstalled) return;
+  runtimeSettingsBridgeInstalled = true;
+  if (typeof window === 'undefined') return;
+  window.addEventListener('message', (event) => {
+    if (!RUNTIME_SETTINGS_PARENT_ORIGINS.has(event.origin)) return;
+    const data = event.data as { type?: string; payload?: { safeguardApiKey?: string | null } } | null;
+    if (!data || data.type !== 'counter-spy:runtime-settings') return;
+    const next = data.payload?.safeguardApiKey;
+    if (typeof next === 'string' && next.trim().length > 0) runtimeSafeguardApiKey = next.trim();
+    else if (next === null || next === '') runtimeSafeguardApiKey = undefined;
+  });
+}
+
 function apiBase(): string {
   return import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, '') || '';
 }
@@ -121,9 +156,17 @@ export async function getSession(sessionId: string, callerUserId: string): Promi
 }
 
 export async function sendMessage(sessionId: string, prompt: string, callerUserId: string): Promise<{ session: SamSpadeSession; review: SamSpadeReviewArtifact }> {
+  // Forward the safeguardApiKey the parent console pushed into us (if any).
+  // The backend's /v1/ctf/sam-spade/message handler uses it as the LM Studio
+  // bearer for the safeguard call — without it LM Studio returns 401.
+  const body = {
+    sessionId,
+    prompt,
+    ...(runtimeSafeguardApiKey ? { metadata: { safeguardApiKey: runtimeSafeguardApiKey } } : {}),
+  };
   return call<{ session: SamSpadeSession; review: SamSpadeReviewArtifact }>(
     '/v1/ctf/sam-spade/message',
-    { method: 'POST', body: JSON.stringify({ sessionId, prompt }) },
+    { method: 'POST', body: JSON.stringify(body) },
     callerUserId,
   );
 }

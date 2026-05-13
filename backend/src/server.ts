@@ -2660,6 +2660,78 @@ app.put('/v1/governance', requireBackendAuth, async (req: AuthenticatedRequest, 
   }
 });
 
+// System configuration (safeguard / firewall / responder / Sam Spade prompts +
+// blocked keywords / forbidden topics / regex rules / guardrails policy).
+// Phase 3 step 4: this doc used to live at Firestore `config/system`; it now
+// rides on the same Postgres app_config table as governance, keyed `system`.
+// The frontend owns normalization (parseSystemConfig migrates legacy field
+// names and bundled defaults); the backend just validates the normalized
+// 9-field shape and stores the JSON.
+//
+// Auth posture matches /v1/governance: shared-bearer + caller-id header today.
+// Admin-only role enforcement is deferred to step 3 of this plan
+// (user_profiles), where the role-check primitive will land and back-apply
+// here.
+const SystemConfigSchema = z.object({
+  safeguardEffectivePromptOverride: z.string(),
+  firewallPrompt: z.string(),
+  responderPrompt: z.string(),
+  samSpadePersonaPrompt: z.string(),
+  samSpadeScenarioPrompt: z.string(),
+  guardrailsPolicy: z.string(),
+  blockedKeywords: z.string(),
+  forbiddenTopics: z.string(),
+  regexRules: z.string(),
+});
+type SystemConfigDto = z.infer<typeof SystemConfigSchema>;
+
+const SYSTEM_CONFIG_KEY = 'system';
+
+app.get('/v1/system-config', requireBackendAuth, async (_req: AuthenticatedRequest, res: Response<SystemConfigDto | null | { error: string }>) => {
+  if (!requireConfigStore(res)) return;
+  try {
+    const row = await getConfig<unknown>(SYSTEM_CONFIG_KEY);
+    if (!row) {
+      // No row yet: return null so the frontend uses DEFAULT_SYSTEM_CONFIG
+      // (which holds the bundled prompt blobs). First PUT materializes the row.
+      res.status(200).json(null);
+      return;
+    }
+    const parsed = SystemConfigSchema.safeParse(row.value);
+    if (!parsed.success) {
+      // Stored value drifted from the schema (older app version, manual edit).
+      // Return null so the frontend falls back to defaults rather than 500ing
+      // the admin dialog.
+      log('warn', 'system_config_parse_failed', { requestId: res.locals.requestId, error: parsed.error.message });
+      res.status(200).json(null);
+      return;
+    }
+    res.status(200).json(parsed.data);
+  } catch (error) {
+    log('warn', 'system_config_get_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'get error' });
+    res.status(500).json({ error: 'Failed to read system config.' });
+  }
+});
+
+app.put('/v1/system-config', requireBackendAuth, async (req: AuthenticatedRequest, res: Response<SystemConfigDto | { error: string }>) => {
+  // Validate body first so malformed inputs always 400 (matches /v1/governance).
+  const parsed = SystemConfigSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid system config.' });
+    return;
+  }
+  if (!requireConfigStore(res)) return;
+  const callerId = getAuthenticatedCallerId(req, res);
+  if (!callerId) return;
+  try {
+    const row = await putConfig<SystemConfigDto>(SYSTEM_CONFIG_KEY, parsed.data, callerId);
+    res.status(200).json(row.value);
+  } catch (error) {
+    log('warn', 'system_config_put_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'put error' });
+    res.status(500).json({ error: 'Failed to update system config.' });
+  }
+});
+
 // Translation proxy route:
 // keeps provider keys on the server side and gives the Playground a single stable
 // API shape no matter which translation vendor is in use.

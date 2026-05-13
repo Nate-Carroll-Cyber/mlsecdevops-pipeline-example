@@ -852,6 +852,52 @@ export async function putGovernanceConfig(config: GovernanceConfigDto, callerUse
   return GovernanceConfigResponseSchema.parse(payload);
 }
 
+// --- System configuration (Phase 3 step 4) ---
+// Safeguard / firewall / responder / Sam Spade prompts + blocked keywords /
+// forbidden topics / regex rules / guardrails policy. Used to live at Firestore
+// `config/system`; now backed by Postgres app_config via /v1/system-config.
+// Server returns null when no row exists yet so the client falls back to
+// DEFAULT_SYSTEM_CONFIG (which carries the bundled prompt blobs).
+
+const SystemConfigResponseSchema = z.object({
+  safeguardEffectivePromptOverride: z.string(),
+  firewallPrompt: z.string(),
+  responderPrompt: z.string(),
+  samSpadePersonaPrompt: z.string(),
+  samSpadeScenarioPrompt: z.string(),
+  guardrailsPolicy: z.string(),
+  blockedKeywords: z.string(),
+  forbiddenTopics: z.string(),
+  regexRules: z.string(),
+});
+export type SystemConfigDto = z.infer<typeof SystemConfigResponseSchema>;
+
+const SystemConfigGetResponseSchema = z.union([SystemConfigResponseSchema, z.null()]);
+
+export async function getSystemConfig(callerUserId?: string): Promise<SystemConfigDto | null> {
+  const response = await fetch(resolveBackendUrl('/v1/system-config'), { headers: getProtectedHeaders(callerUserId) });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `System config fetch failed (HTTP ${response.status}).`);
+  }
+  return SystemConfigGetResponseSchema.parse(payload);
+}
+
+export async function putSystemConfig(config: SystemConfigDto, callerUserId?: string): Promise<SystemConfigDto> {
+  const response = await fetch(resolveBackendUrl('/v1/system-config'), {
+    method: 'PUT',
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify(config),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `System config update failed (HTTP ${response.status}).`);
+  }
+  return SystemConfigResponseSchema.parse(payload);
+}
+
 export async function lookupInstructionMonitorRecord(
   identifier: string,
   callerUserId?: string,

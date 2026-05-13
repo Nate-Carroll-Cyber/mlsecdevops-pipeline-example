@@ -61,6 +61,8 @@ import {
   clearAuditLogs,
   getGovernanceConfig,
   putGovernanceConfig,
+  getSystemConfig,
+  putSystemConfig,
   checkBackendHealth,
   getCtfReviewArtifacts,
   interceptPrompt,
@@ -2316,30 +2318,36 @@ export default function App() {
       return;
     }
 
-    const configRef = doc(db, 'config', 'system');
-    getDoc(configRef).then((snap) => {
-      if (snap.exists()) {
-        const parsedConfig = parseSystemConfig(snap.data());
-        if (parsedConfig) {
-          const currentBlockedKeywords = typeof snap.data().blockedKeywords === 'string' ? snap.data().blockedKeywords : '';
-          const currentSafeguardPrompt = typeof snap.data().safeguardEffectivePromptOverride === 'string' ? snap.data().safeguardEffectivePromptOverride : '';
-          if (
-            parsedConfig.blockedKeywords !== currentBlockedKeywords ||
-            parsedConfig.safeguardEffectivePromptOverride !== currentSafeguardPrompt
-          ) {
-            void setDoc(configRef, parsedConfig, { merge: true });
+    // Phase 3 step 4: system config moved off Firestore onto /v1/system-config
+    // (Postgres app_config). Backend returns the raw stored object or null when
+    // no row exists; we run parseSystemConfig() locally so migration of legacy
+    // field names / bundled-default normalization stays in one place. If parse
+    // result drifts from the stored shape (i.e. a migration applied) we PUT
+    // the normalized config back so the next read is clean.
+    void (async () => {
+      try {
+        const raw = await getSystemConfig();
+        if (raw) {
+          const parsedConfig = parseSystemConfig(raw);
+          if (parsedConfig) {
+            if (
+              parsedConfig.blockedKeywords !== raw.blockedKeywords ||
+              parsedConfig.safeguardEffectivePromptOverride !== raw.safeguardEffectivePromptOverride
+            ) {
+              void putSystemConfig(parsedConfig).catch((error) => devWarn('System config migration write failed.', error));
+            }
+            setSystemConfig(parsedConfig);
+            setConfigForm(parsedConfig);
+          } else {
+            toast.error('System configuration failed validation.');
           }
-          setSystemConfig(parsedConfig);
-          setConfigForm(parsedConfig);
-        } else {
-          toast.error('System configuration failed validation.');
+        } else if (profile.email === 'nate.carroll@natecarrollfilms.com') {
+          void putSystemConfig(DEFAULT_SYSTEM_CONFIG).catch((error) => devWarn('System config seed failed.', error));
         }
-      } else if (profile.email === 'nate.carroll@natecarrollfilms.com') {
-        void setDoc(configRef, DEFAULT_SYSTEM_CONFIG);
+      } catch (error) {
+        console.error('Failed to load config', error);
       }
-    }).catch((error) => {
-      console.error('Failed to load config', error);
-    });
+    })();
   }, [localReviewMode, profile]);
 
   // Function to handle user login via Google Popup
@@ -3046,16 +3054,16 @@ export default function App() {
         return;
       }
 
-      // Write the draft configuration to Firestore
-      await setDoc(doc(db, 'config', 'system'), normalizedConfig);
-      // Update local state
-      setSystemConfig(normalizedConfig);
-      setConfigForm(normalizedConfig);
+      // Phase 3 step 4: write through /v1/system-config (Postgres) instead of
+      // Firestore. Backend round-trips the validated SystemConfig back to us;
+      // we trust it as the new state of record.
+      const stored = await putSystemConfig(normalizedConfig);
+      setSystemConfig(stored);
+      setConfigForm(stored);
       setIsEditingConfig(false);
       toast.success('System configuration updated successfully');
     } catch (error) {
-      // Handle errors writing the config
-      handleFirestoreError(error, OperationType.WRITE, 'config/system');
+      console.error('Failed to save system configuration', error);
       toast.error('Failed to save system configuration');
     }
   };

@@ -351,6 +351,64 @@ test('/v1/governance PUT validates the body shape', async () => {
   assert.equal(missingField.status, 400);
 });
 
+test('/v1/system-config rejects unauthenticated GET + PUT', async () => {
+  // Phase 3 step 4: system config moved from Firestore to the shared
+  // Postgres app_config table.
+  const getNoAuth = await requestApp('/v1/system-config', { method: 'GET' });
+  assert.equal(getNoAuth.status, 401);
+
+  const putNoAuth = await requestApp('/v1/system-config', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: {
+      safeguardEffectivePromptOverride: '', firewallPrompt: '', responderPrompt: '',
+      samSpadePersonaPrompt: '', samSpadeScenarioPrompt: '', guardrailsPolicy: '',
+      blockedKeywords: '', forbiddenTopics: '', regexRules: '',
+    },
+  });
+  assert.equal(putNoAuth.status, 401);
+});
+
+test('/v1/system-config returns 503 when the config store is unconfigured', async () => {
+  const get = await requestApp('/v1/system-config', { method: 'GET', headers: authHeaders() });
+  assert.equal(get.status, 503);
+  assert.match((get.payload as { error?: string }).error ?? '', /App config store is not configured/);
+
+  const put = await requestApp('/v1/system-config', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: {
+      safeguardEffectivePromptOverride: '', firewallPrompt: '', responderPrompt: '',
+      samSpadePersonaPrompt: '', samSpadeScenarioPrompt: '', guardrailsPolicy: '',
+      blockedKeywords: '', forbiddenTopics: '', regexRules: '',
+    },
+  });
+  assert.equal(put.status, 503);
+});
+
+test('/v1/system-config PUT validates the body shape', async () => {
+  // Body validation runs before the store check (matches /v1/governance pattern).
+  const missingField = await requestApp('/v1/system-config', {
+    method: 'PUT',
+    headers: authHeaders(),
+    // Missing safeguardEffectivePromptOverride + several others.
+    body: { firewallPrompt: 'x', guardrailsPolicy: 'y' },
+  });
+  assert.equal(missingField.status, 400);
+  assert.match((missingField.payload as { error?: string }).error ?? '', /Invalid system config/);
+
+  const wrongType = await requestApp('/v1/system-config', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: {
+      safeguardEffectivePromptOverride: 'a', firewallPrompt: 'b', responderPrompt: 'c',
+      samSpadePersonaPrompt: 'd', samSpadeScenarioPrompt: 'e', guardrailsPolicy: 'f',
+      blockedKeywords: 'g', forbiddenTopics: 'h', regexRules: 42, // number where string expected
+    },
+  });
+  assert.equal(wrongType.status, 400);
+});
+
 test('Sam Spade message route forwards a metadata.safeguardApiKey as the upstream bearer', async () => {
   // The analyst-chat parent window postMessages its Runtime Settings
   // safeguardApiKey into the CTF iframe; the CTF echoes it back as

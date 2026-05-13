@@ -677,6 +677,89 @@ export async function normalizeText(text: string): Promise<NormalizationResult> 
   return NormalizationResultSchema.parse(payload);
 }
 
+// --- Audit-log store (Postgres-backed; the analyst audit trail) ---
+
+const AuditLogRowSchema = z.object({
+  // Server-stamped id; also mirrored into `record.id`.
+  id: z.string(),
+  // The caller who created the record (RBAC key).
+  userId: z.string(),
+  // ISO timestamp the record was stored; also mirrored into `record.timestamp`.
+  timestamp: z.string(),
+  // The full audit-log object (with id/userId/timestamp merged in); validate it
+  // against the console's strict AuditLogSchema before it enters React state.
+  record: z.record(z.string(), z.unknown()),
+});
+export type AuditLogRow = z.infer<typeof AuditLogRowSchema>;
+
+// Append one audit-log record. The backend keys it by the authenticated caller
+// and stamps id/timestamp server-side (any client-supplied copies are dropped).
+export async function appendAuditLog(record: Record<string, unknown>, callerUserId?: string): Promise<AuditLogRow> {
+  const response = await fetch(resolveBackendUrl('/v1/audit-logs'), {
+    method: 'POST',
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify(record),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Audit log append failed (HTTP ${response.status}).`);
+  }
+  return AuditLogRowSchema.parse(payload);
+}
+
+export interface ListAuditLogsOptions {
+  userId?: string;
+  sinceTimestamp?: string;
+  limit?: number;
+}
+
+export async function listAuditLogs(options: ListAuditLogsOptions = {}, callerUserId?: string): Promise<AuditLogRow[]> {
+  const params = new URLSearchParams();
+  if (options.userId) params.set('userId', options.userId);
+  if (options.sinceTimestamp) params.set('sinceTimestamp', options.sinceTimestamp);
+  if (options.limit !== undefined) params.set('limit', String(options.limit));
+  const query = params.toString();
+  const response = await fetch(resolveBackendUrl(`/v1/audit-logs${query ? `?${query}` : ''}`), { headers: getProtectedHeaders(callerUserId) });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Audit log list failed (HTTP ${response.status}).`);
+  }
+  return z.object({ logs: z.array(AuditLogRowSchema) }).parse(payload).logs;
+}
+
+// Merge a patch into one record's stored JSONB (e.g. analyst reclassification).
+export async function patchAuditLog(id: string, patch: Record<string, unknown>, callerUserId?: string): Promise<AuditLogRow> {
+  const response = await fetch(resolveBackendUrl(`/v1/audit-logs/${encodeURIComponent(id)}`), {
+    method: 'PATCH',
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify(patch),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Audit log update failed (HTTP ${response.status}).`);
+  }
+  return AuditLogRowSchema.parse(payload);
+}
+
+export async function clearAuditLogs(options: { userId?: string } = {}, callerUserId?: string): Promise<number> {
+  const params = new URLSearchParams();
+  if (options.userId) params.set('userId', options.userId);
+  const query = params.toString();
+  const response = await fetch(resolveBackendUrl(`/v1/audit-logs${query ? `?${query}` : ''}`), {
+    method: 'DELETE',
+    headers: getProtectedHeaders(callerUserId),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Audit log clear failed (HTTP ${response.status}).`);
+  }
+  return z.object({ deleted: z.number() }).parse(payload).deleted;
+}
+
 export async function lookupInstructionMonitorRecord(
   identifier: string,
   callerUserId?: string,

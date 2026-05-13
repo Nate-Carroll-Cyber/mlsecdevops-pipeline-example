@@ -27,6 +27,7 @@ import {
   type ObfuscationCategory,
 } from './analysis/obfuscation.js';
 import { normalizeWithHeuristicSync, type NormalizationResult } from './analysis/spellNormalize.js';
+import { appendAuditLog, clearAuditLogs, initAuditStore, isAuditStoreConfigured, listAuditLogs, patchAuditLog, type AuditLogRow } from './audit/auditStore.js';
 import { appendCtfReviewArtifact, listCtfReviewArtifacts } from './ctf/reviewArtifactStore.js';
 import {
   createSamSpadeSession,
@@ -2372,6 +2373,110 @@ app.post('/v1/analyze/normalize', requireBackendAuth, (req: AuthenticatedRequest
   res.status(200).json(normalizeWithHeuristicSync(parsed.data.text));
 });
 
+// Audit-log store (Postgres-backed; Phase 3 of the server-hosted rewrite). The
+// analyst console is rewired to read/write these in a follow-up; for now this is
+// additive. Per-user write keying is the authenticated caller; reads return the
+// shared trail (optionally filtered). Returns 503 when no DATABASE_URL is configured.
+function requireAuditStore(res: Response): boolean {
+  if (isAuditStoreConfigured()) return true;
+  res.status(503).json({ error: 'Audit log store is not configured (set AUDIT_DATABASE_URL or DATABASE_URL).' });
+  return false;
+}
+
+const AppendAuditLogRequestSchema = z.object({
+  sanitizedPrompt: z.string(),
+  detectionFlags: z.array(z.string()),
+}).passthrough();
+
+app.post('/v1/audit-logs', requireBackendAuth, async (req: AuthenticatedRequest, res: Response<AuditLogRow | { error: string }>) => {
+  if (!requireAuditStore(res)) return;
+  const callerId = getAuthenticatedCallerId(req, res);
+  if (!callerId) return;
+  const parsed = AppendAuditLogRequestSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid audit log payload.' });
+    return;
+  }
+  try {
+    const row = await appendAuditLog(callerId, parsed.data as Record<string, unknown>);
+    res.status(201).json(row);
+  } catch (error) {
+    log('warn', 'audit_log_append_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'append error' });
+    res.status(500).json({ error: 'Failed to store audit log.' });
+  }
+});
+
+const ListAuditLogsQuerySchema = z.object({
+  userId: z.string().min(1).optional(),
+  sinceTimestamp: z.string().min(1).optional(),
+  limit: z.coerce.number().int().min(1).max(1000).optional(),
+});
+
+app.get('/v1/audit-logs', requireBackendAuth, async (req: AuthenticatedRequest, res: Response<{ logs: AuditLogRow[] } | { error: string }>) => {
+  if (!requireAuditStore(res)) return;
+  const parsed = ListAuditLogsQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid audit log query.' });
+    return;
+  }
+  try {
+    const logs = await listAuditLogs({
+      ...(parsed.data.userId ? { userId: parsed.data.userId } : {}),
+      ...(parsed.data.sinceTimestamp ? { sinceTimestamp: parsed.data.sinceTimestamp } : {}),
+      ...(parsed.data.limit !== undefined ? { limit: parsed.data.limit } : {}),
+    });
+    res.status(200).json({ logs });
+  } catch (error) {
+    log('warn', 'audit_log_list_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'list error' });
+    res.status(500).json({ error: 'Failed to read audit logs.' });
+  }
+});
+
+app.patch('/v1/audit-logs/:id', requireBackendAuth, async (req: AuthenticatedRequest, res: Response<AuditLogRow | { error: string }>) => {
+  if (!requireAuditStore(res)) return;
+  if (!getAuthenticatedCallerId(req, res)) return;
+  const id = typeof req.params.id === 'string' ? req.params.id : '';
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    res.status(400).json({ error: 'Invalid audit log id.' });
+    return;
+  }
+  const parsed = z.record(z.string(), z.unknown()).safeParse(req.body);
+  if (!parsed.success || Object.keys(parsed.data).length === 0) {
+    res.status(400).json({ error: 'Invalid audit log patch.' });
+    return;
+  }
+  try {
+    const row = await patchAuditLog(id, parsed.data);
+    if (!row) {
+      res.status(404).json({ error: 'Audit log not found.' });
+      return;
+    }
+    res.status(200).json(row);
+  } catch (error) {
+    log('warn', 'audit_log_patch_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'patch error' });
+    res.status(500).json({ error: 'Failed to update audit log.' });
+  }
+});
+
+const ClearAuditLogsQuerySchema = z.object({ userId: z.string().min(1).optional() });
+
+app.delete('/v1/audit-logs', requireBackendAuth, async (req: AuthenticatedRequest, res: Response<{ deleted: number } | { error: string }>) => {
+  if (!requireAuditStore(res)) return;
+  if (!getAuthenticatedCallerId(req, res)) return;
+  const parsed = ClearAuditLogsQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid clear query.' });
+    return;
+  }
+  try {
+    const deleted = await clearAuditLogs(parsed.data.userId ? { userId: parsed.data.userId } : {});
+    res.status(200).json({ deleted });
+  } catch (error) {
+    log('warn', 'audit_log_clear_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'clear error' });
+    res.status(500).json({ error: 'Failed to clear audit logs.' });
+  }
+});
+
 // Translation proxy route:
 // keeps provider keys on the server side and gives the Playground a single stable
 // API shape no matter which translation vendor is in use.
@@ -2634,6 +2739,9 @@ app.get('/v1/ctf/review-artifacts', requireBackendAuth, (req: AuthenticatedReque
 // gate already rejects non-CTF paths.
 if (!isSamSpadeService) {
   mountWebApp(app, { isDev: appEnv === 'dev' });
+  // Best-effort: create the audit_logs table at boot if Postgres is configured.
+  // The /v1/audit-logs routes 503 when it isn't, so this never blocks startup.
+  void initAuditStore().catch((error) => log('warn', 'audit_store_init_failed', { error: error instanceof Error ? error.message : 'init error' }));
 }
 
 app.use((_req: Request, res: Response) => {

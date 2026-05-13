@@ -13,6 +13,7 @@ import { metrics, trace, type Attributes } from '@opentelemetry/api';
 import { logs, SeverityNumber } from '@opentelemetry/api-logs';
 import { z } from 'zod';
 import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict, type OutputSanitizationResult } from './security/sanitizer.js';
+import { DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT } from './security/safeguardDefaults.js';
 import { assertEgressAllowed } from './security/urlGuard.js';
 import { createRateLimiter } from './middleware/rateLimit.js';
 import { mountWebApp } from './web/ssr.js';
@@ -2579,12 +2580,21 @@ app.post('/v1/ctf/sam-spade/message', requireBackendAuth, async (req: Authentica
       return;
     }
 
+    // The Sam Spade CTF frontend is a separate bundle that doesn't share the
+    // Analyst Chat console's effective-prompt state, so it sends no metadata.
+    // Fall back to the backend's DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT so the CTF
+    // can still get a safeguard verdict. The analyst-chat /v1/intercept path
+    // remains strict (resolveSafeguardJudgeInstructions throws on a missing/
+    // empty prompt); operators always send theirs explicitly there. Phase 3
+    // step 4 unifies governance config in Postgres so both surfaces share one.
     const safeguardResult = await generateSafeguardVerdict(
       sanitization.sanitized,
       sanitization,
-      parsed.data.metadata?.safeguardEffectivePrompt !== undefined
-        ? { systemPrompt: parsed.data.metadata.safeguardEffectivePrompt }
-        : undefined,
+      {
+        systemPrompt: parsed.data.metadata?.safeguardEffectivePrompt && parsed.data.metadata.safeguardEffectivePrompt.length > 0
+          ? parsed.data.metadata.safeguardEffectivePrompt
+          : DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT,
+      },
     );
     if (safeguardResult.verdict !== 'CLEAN') {
       const result = submitSamSpadeMessage({

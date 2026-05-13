@@ -262,3 +262,39 @@ test('Sam Spade sessions are scoped to the authenticated caller', async () => {
   assert.equal(crossUserFetch.status, 404);
   assert.equal(crossUserMessage.status, 403);
 });
+
+test('Sam Spade message route falls back to DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT when metadata is absent', async () => {
+  // The CTF iframe doesn't share state with the Analyst Chat console and sends
+  // no metadata.safeguardEffectivePrompt; the route must still get a safeguard
+  // verdict by falling back to the backend's hardcoded default rubric. The
+  // analyst /v1/intercept path stays strict (covered by the
+  // "fail closed when safeguard effective prompt is absent" test above).
+  const { DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT } = await import('../src/security/safeguardDefaults.ts');
+
+  const session = await requestApp('/v1/ctf/sam-spade/session', {
+    method: 'POST',
+    headers: authHeaders('ctf-user'),
+    body: { caseId: 'case-067' },
+  });
+  assert.equal(session.status, 201);
+  const sessionId = (session.payload as { session: { sessionId: string } }).session.sessionId;
+
+  const startRequestCount = safeguardRequests.length;
+  const message = await requestApp('/v1/ctf/sam-spade/message', {
+    method: 'POST',
+    headers: authHeaders('ctf-user'),
+    body: {
+      sessionId,
+      prompt: 'What did the witness see in the alley?',
+      // Note: no `metadata` field at all — this is the real CTF browser shape.
+    },
+  });
+
+  assert.equal(message.status, 200);
+  assert.equal(safeguardRequests.length, startRequestCount + 1);
+  const forwarded = safeguardRequests.at(-1) as {
+    messages?: Array<{ role?: string; content?: string }>;
+  };
+  assert.equal(forwarded.messages?.[0]?.role, 'system');
+  assert.equal(forwarded.messages?.[0]?.content, DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT);
+});

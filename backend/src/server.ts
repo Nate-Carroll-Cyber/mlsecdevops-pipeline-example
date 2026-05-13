@@ -14,6 +14,8 @@ import { logs, SeverityNumber } from '@opentelemetry/api-logs';
 import { z } from 'zod';
 import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict, type OutputSanitizationResult } from './security/sanitizer.js';
 import { DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT } from './security/safeguardDefaults.js';
+import { detectThreatSpikes, type ThreatLog } from './analysis/anomalyDetector.js';
+import { calculateFalsePositiveMetrics, type AuditLogMetrics } from './analysis/metrics.js';
 import { assertEgressAllowed } from './security/urlGuard.js';
 import { createRateLimiter } from './middleware/rateLimit.js';
 import { mountWebApp } from './web/ssr.js';
@@ -2482,6 +2484,100 @@ app.delete('/v1/audit-logs', requireBackendAuth, async (req: AuthenticatedReques
   } catch (error) {
     log('warn', 'audit_log_clear_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'clear error' });
     res.status(500).json({ error: 'Failed to clear audit logs.' });
+  }
+});
+
+// /v1/metrics/aggregate — Phase 3 step 3.
+//
+// Runs `detectThreatSpikes` + `calculateFalsePositiveMetrics` over the audit-log
+// rows in Postgres so the analyst console's Metrics view doesn't need its own
+// Firestore audit-log query plus client-side analytics. The two analytics
+// functions live in backend/src/analysis/{anomalyDetector,metrics}.ts (moved
+// from src/lib/ in this step). The endpoint reads through `listAuditLogs`
+// (capped at 5000 rows to keep response latency bounded), applies an
+// "effective detection level" mapping per the operator-supplied
+// `entropyThreshold` so the analytics agree with what the dashboard renders,
+// then runs the two pure analytics over the resulting arrays.
+//
+// Display-side bucketing (24-hour threat trend chart, severity stacked chart,
+// operational metrics, latency P95, etc.) stays client-side in ThreatDashboard
+// for now — only the two named modules moved.
+const SUSPICIOUS_ENTROPY_THRESHOLD_FOR_METRICS = 3.8;
+
+function getEffectiveDetectionLevelForMetrics(
+  baseDetectionLevel: number,
+  entropy: number,
+  configuredEntropyThreshold: number | undefined,
+): number {
+  if (typeof configuredEntropyThreshold === 'number' && Number.isFinite(entropy)) {
+    if (entropy > configuredEntropyThreshold) return Math.max(baseDetectionLevel, 3);
+    if (entropy > SUSPICIOUS_ENTROPY_THRESHOLD_FOR_METRICS) return Math.max(baseDetectionLevel, 2);
+  }
+  return baseDetectionLevel;
+}
+
+const MetricsAggregateRequestSchema = z.object({
+  sinceTimestamp: z.string().min(1).optional(),
+  source: z.string().min(1).optional(),
+  entropyThreshold: z.number().min(3).max(4.6).optional(),
+  limit: z.number().int().min(1).max(5000).optional(),
+}).strict();
+
+interface MetricsAggregateResponse {
+  anomaly: ReturnType<typeof detectThreatSpikes>;
+  fpr: ReturnType<typeof calculateFalsePositiveMetrics>;
+  sampleSize: number;
+}
+
+app.post('/v1/metrics/aggregate', requireBackendAuth, async (req: AuthenticatedRequest, res: Response<MetricsAggregateResponse | { error: string }>) => {
+  // Validate the request body first so malformed inputs always 400 even if the
+  // audit store happens to be unconfigured (which would 503 below).
+  const parsed = MetricsAggregateRequestSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid metrics aggregate request.' });
+    return;
+  }
+  if (!requireAuditStore(res)) return;
+  if (!getAuthenticatedCallerId(req, res)) return;
+  const { sinceTimestamp, source, entropyThreshold, limit } = parsed.data;
+  // Default window: last 24 hours, which is what the Metrics dashboard renders.
+  const effectiveSinceTimestamp = sinceTimestamp ?? new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  try {
+    const rows = await listAuditLogs({
+      sinceTimestamp: effectiveSinceTimestamp,
+      limit: limit ?? 1000,
+    });
+    const threatLogs: ThreatLog[] = [];
+    const metricsLogs: AuditLogMetrics[] = [];
+    for (const row of rows) {
+      const record = row.record as Record<string, unknown>;
+      if (source && source !== 'all' && record.source !== source) continue;
+      const baseDetectionLevel = typeof record.detectionLevel === 'number' ? record.detectionLevel : 0;
+      const entropy = typeof record.entropy === 'number' ? record.entropy : 0;
+      const effectiveDetectionLevel = getEffectiveDetectionLevelForMetrics(baseDetectionLevel, entropy, entropyThreshold);
+      // Anomaly detection only cares about threat-level rows (>=2).
+      if (effectiveDetectionLevel >= 2) {
+        threatLogs.push({
+          userId: row.userId,
+          detectionLevel: effectiveDetectionLevel,
+          timestamp: new Date(row.timestamp),
+        });
+      }
+      // FPR/FNR uses the full window (reviewed + unreviewed; the metrics
+      // module filters reviewed-only inside).
+      metricsLogs.push({
+        id: row.id,
+        detectionLevel: effectiveDetectionLevel,
+        resultantSeverity: typeof record.resultantSeverity === 'string' ? record.resultantSeverity as AuditLogMetrics['resultantSeverity'] : undefined,
+        reviewed: record.reviewed === true,
+      });
+    }
+    const anomaly = detectThreatSpikes(threatLogs);
+    const fpr = calculateFalsePositiveMetrics(metricsLogs);
+    res.status(200).json({ anomaly, fpr, sampleSize: rows.length });
+  } catch (error) {
+    log('warn', 'metrics_aggregate_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'aggregate error' });
+    res.status(500).json({ error: 'Failed to aggregate metrics.' });
   }
 });
 

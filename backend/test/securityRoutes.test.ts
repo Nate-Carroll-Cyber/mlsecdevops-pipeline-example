@@ -265,6 +265,42 @@ test('Sam Spade sessions are scoped to the authenticated caller', async () => {
   assert.equal(crossUserMessage.status, 403);
 });
 
+test('/v1/metrics/aggregate rejects unauthenticated requests', async () => {
+  // Phase 3 step 3: the metrics-aggregate endpoint runs the moved analytics
+  // modules (anomalyDetector + metrics) over the Postgres audit-log store.
+  // It must be auth-gated like every other /v1/* protected route. The audit
+  // store isn't configured in this test (no AUDIT_DATABASE_URL/DATABASE_URL/
+  // INSTRUCTION_MONITOR_DATABASE_URL set in the test bootstrap), so an
+  // authenticated request returns 503 — also covered here.
+  const noAuth = await requestApp('/v1/metrics/aggregate', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: {},
+  });
+  assert.equal(noAuth.status, 401);
+
+  const unconfigured = await requestApp('/v1/metrics/aggregate', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: {},
+  });
+  assert.equal(unconfigured.status, 503);
+  assert.match((unconfigured.payload as { error?: string }).error ?? '', /Audit log store is not configured/);
+});
+
+test('/v1/metrics/aggregate validates the request body', async () => {
+  const badBody = await requestApp('/v1/metrics/aggregate', {
+    method: 'POST',
+    headers: authHeaders(),
+    // Out-of-range entropyThreshold (schema clamps to [3, 4.6]).
+    body: { entropyThreshold: 12 },
+  });
+  // 400 short-circuits before the audit-store check, so we see the schema
+  // rejection even without DB config.
+  assert.equal(badBody.status, 400);
+  assert.match((badBody.payload as { error?: string }).error ?? '', /Invalid metrics aggregate request/);
+});
+
 test('Sam Spade message route forwards a metadata.safeguardApiKey as the upstream bearer', async () => {
   // The analyst-chat parent window postMessages its Runtime Settings
   // safeguardApiKey into the CTF iframe; the CTF echoes it back as

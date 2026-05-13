@@ -7,15 +7,18 @@
 import React, { useEffect, useState } from 'react';
 // Import UI components from shadcn/ui
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
-// Import Firestore functions for database interaction
-import { collection, query, where, getDocs, Timestamp, doc, onSnapshot, setDoc } from 'firebase/firestore';
+// Import Firestore functions for governance config (the audit-log path moved to
+// Postgres in Phase 3 step 2; this file still uses Firestore for the
+// HITL/global-pause governance toggles until Phase 3 step 4 lands the
+// governance store backend-side).
+import { doc, onSnapshot, setDoc } from 'firebase/firestore';
 // Import the initialized Firebase database instance
 import { db } from '../lib/firebase';
 import { HelpTooltip } from './HelpTooltip';
-// Import anomaly detection logic and types
-import { detectThreatSpikes, ThreatLog } from '../lib/anomalyDetector';
-// Import metrics calculation logic and types
-import { calculateFalsePositiveMetrics, AuditLogMetrics } from '../lib/metrics';
+// Phase 3 step 3: audit-log reads + anomaly/FPR analytics now flow through the
+// backend (Postgres-backed listAuditLogs + /v1/metrics/aggregate). The
+// anomalyDetector + metrics modules moved to backend/src/analysis/.
+import { aggregateMetrics, listAuditLogs } from '../lib/backendApi';
 import { ATLAS_TACTICS, ATLAS_TECHNIQUE_DEFINITIONS } from '../lib/atlasTaxonomy';
 import { SUSPICIOUS_ENTROPY_THRESHOLD } from '../lib/analysisTypes';
 import { getFeaturePressure, getTopPressureDriver } from '../lib/playgroundMetrics';
@@ -608,26 +611,16 @@ export function ThreatDashboard({
           ? logs
           : logs.filter((log) => log.source === sourceFilter);
 
-        const threatLogs: ThreatLog[] = filteredLogs
+        // Anomaly detection + FPR moved to POST /v1/metrics/aggregate in Phase 3
+        // step 3 (see the call below this function). Only display-bucketing and
+        // operational-metrics computation stay client-side.
+        const threatLogs = filteredLogs
           .filter((log) => getEffectiveDetectionLevel(log, entropyThreshold) >= 2)
-          .map(log => ({
+          .map((log) => ({
             userId: log.userId,
             detectionLevel: getEffectiveDetectionLevel(log, entropyThreshold),
             timestamp: log.timestamp instanceof Date ? log.timestamp : new Date(log.timestamp),
           }));
-
-        const analysis = detectThreatSpikes(threatLogs);
-        setMetrics(analysis);
-
-        // FPR/FNR use the same effective severity model as the rest of Metrics,
-        // including live entropy-threshold interpretation, before analyst
-        // review outcomes are treated as ground truth.
-        const logsForReviewMetrics = filteredLogs.map((log) => ({
-          ...log,
-          detectionLevel: getEffectiveDetectionLevel(log, entropyThreshold),
-        }));
-        const fprAnalysis = calculateFalsePositiveMetrics(logsForReviewMetrics);
-        setFprMetrics(fprAnalysis);
 
         const hourlyData = Array(24).fill(0).map((_, i) => ({ hour: i, threats: 0 }));
         threatLogs.forEach(log => {
@@ -777,253 +770,53 @@ export function ThreatDashboard({
         });
       };
 
+      // localReviewMode runs entirely off in-memory audit logs (the polling
+      // effect short-circuits in that mode). Anomaly + FPR aggregation runs
+      // server-side over Postgres data and has no overlap with localReviewMode's
+      // data, so surface empty defaults for those two widgets rather than
+      // duplicating the analytics modules client-side.
       if (localReviewMode) {
         buildMetricsFromLogs(localAuditLogs);
+        setMetrics({ isAnomaly: false, spikeRatio: 0, currentHourlyRate: 0, baselineHourlyRate: 0, topAttackerId: null });
+        setFprMetrics({ strictFPR: 'N/A', falseNegativeRate: 'N/A', falsePositivesCount: 0, falseNegativesCount: 0, truePositivesCount: 0, totalReviewed: 0 });
         return;
       }
 
       try {
-        // Calculate the timestamp for 24 hours ago
+        // Phase 3 step 3: replace the prior direct Firestore getDocs(query) on
+        // `audit_logs` with the Postgres-backed listAuditLogs client. row.record
+        // already carries id/userId/timestamp mirrored in so we don't need a
+        // hand-rolled field-by-field projection here.
         const yesterday = new Date();
         yesterday.setHours(yesterday.getHours() - 24);
-
-        const logsRef = collection(db, 'audit_logs');
-        
-        // Query: Get ALL logs from the last 24h to calculate FPR correctly
-        const q = query(
-          logsRef,
-          where('timestamp', '>=', Timestamp.fromDate(yesterday))
-        );
-
-        // Fetch the logs from Firestore
-        const snapshot = await getDocs(q);
-        // Map the raw documents to a usable format
-        let allLogs: any[] = snapshot.docs.map(doc => ({
-          id: doc.id,
-          userId: doc.data().userId,
-          detectionLevel: doc.data().detectionLevel,
-          resultantSeverity: doc.data().resultantSeverity,
-          reviewed: doc.data().reviewed || false,
-          timestamp: doc.data().timestamp?.toDate() || new Date(),
-          status: doc.data().status || null,
-          entropy: doc.data().entropy || 0,
-          latencyMs: doc.data().latencyMs || 0,
-          atlasTactic: doc.data().atlasTactic || undefined,
-          atlasTechniqueId: doc.data().atlasTechniqueId || undefined,
-          atlasTechniqueName: doc.data().atlasTechniqueName || undefined,
-          detectionFlags: doc.data().detectionFlags || [],
-          suspiciousChunks: doc.data().suspiciousChunks || [],
-          featureVector: doc.data().featureVector || undefined,
-          featurePressure: doc.data().featurePressure ?? undefined,
-          researchSignal: doc.data().researchSignal ?? undefined,
-          topPressureDriver: doc.data().topPressureDriver || undefined,
-          topResearchDriver: doc.data().topResearchDriver || undefined,
-          sanitizedPrompt: doc.data().sanitizedPrompt || '',
-          source: doc.data().source || 'analyst_chat',
-          expectedVerdict: doc.data().expectedVerdict || undefined,
-          obfuscationSummary: doc.data().obfuscationSummary || undefined,
-          response: doc.data().response || undefined,
-          judgeDecision: doc.data().judgeDecision || undefined,
-          responderStatus: doc.data().responderStatus || undefined,
-          responderModel: doc.data().responderModel || undefined,
-          responderProvider: doc.data().responderProvider || undefined,
-          backendGatewayStatus: doc.data().backendGatewayStatus || undefined,
-          backendSafeguardVerdict: doc.data().backendSafeguardVerdict || undefined,
-          backendSafeguardReasoning: doc.data().backendSafeguardReasoning || undefined,
-          backendReachedSafeguard: doc.data().backendReachedSafeguard === true,
-          localPrecheckLatencyMs: doc.data().localPrecheckLatencyMs || undefined,
-          backendSafeguardLatencyMs: doc.data().backendSafeguardLatencyMs || undefined,
-          backendGatewayLatencyMs: doc.data().backendGatewayLatencyMs || undefined,
-          instructionEmbeddingDurationMs: doc.data().instructionEmbeddingDurationMs || undefined,
+        const rows = await listAuditLogs({
+          sinceTimestamp: yesterday.toISOString(),
+          limit: 1000,
+        });
+        let allLogs: any[] = rows.map((row) => ({
+          ...(row.record as Record<string, unknown>),
+          timestamp: new Date(row.timestamp),
         }));
         allLogs = mergeLocalAuditLogOverlays(allLogs, localAuditLogs, yesterday);
 
-        const filteredLogs = sourceFilter === 'all'
-          ? allLogs
-          : allLogs.filter((log) => log.source === sourceFilter);
+        // Display-side bucketing + operational metrics still computed
+        // client-side from the audit-log rows; only the two analytics modules
+        // (detectThreatSpikes + calculateFalsePositiveMetrics) moved to the
+        // backend in this step.
+        buildMetricsFromLogs(allLogs);
 
-        // Filter for threat logs (detectionLevel >= 2) for anomaly detection and chart
-        const threatLogs: ThreatLog[] = filteredLogs
-          .filter((log) => getEffectiveDetectionLevel(log, entropyThreshold) >= 2)
-          .map(log => ({
-            userId: log.userId,
-            detectionLevel: getEffectiveDetectionLevel(log, entropyThreshold),
-            timestamp: log.timestamp
-          }));
-
-        // Run the anomaly detection algorithm
-        const analysis = detectThreatSpikes(threatLogs);
-        setMetrics(analysis);
-
-        // Calculate reviewed-outcome FPR/FNR from all logs after applying the
-        // current effective severity model used by the dashboard.
-        const logsForReviewMetrics = filteredLogs.map((log) => ({
-          ...log,
-          detectionLevel: getEffectiveDetectionLevel(log, entropyThreshold),
-        }));
-        const fprAnalysis = calculateFalsePositiveMetrics(logsForReviewMetrics);
-        setFprMetrics(fprAnalysis);
-
-        // Group threat logs by hour for the chart
-        // Initialize an array with 24 slots (one for each hour)
-        const hourlyData = Array(24).fill(0).map((_, i) => ({ hour: i, threats: 0 }));
-        // Increment the threat count for the corresponding hour
-        threatLogs.forEach(log => {
-          const hour = log.timestamp.getHours();
-          const bucket = hourlyData[hour];
-          if (bucket) {
-            bucket.threats += 1;
-          }
+        const aggregate = await aggregateMetrics({
+          sinceTimestamp: yesterday.toISOString(),
+          ...(sourceFilter !== 'all' ? { source: sourceFilter } : {}),
+          entropyThreshold,
         });
-        
-        // Reorder the array so it starts from 24 hours ago and ends at the current hour
-        const currentHour = new Date().getHours();
-        const reorderedData = [];
-        for (let i = 1; i <= 24; i++) {
-          const h = (currentHour + i) % 24;
-          reorderedData.push(hourlyData[h]);
-        }
-        
-        // Update the chart data state
-        setChartData(reorderedData);
-
-        const severityHourlyData: Array<{ hour: number } & SeverityCounts> = Array(24).fill(0).map((_, i) => ({
-          ...createEmptySeverityCounts(),
-          hour: i,
-        }));
-        filteredLogs.forEach((log) => {
-          const hour = log.timestamp.getHours();
-          const bucket = severityHourlyData[hour];
-          if (!bucket) return;
-          bucket[getMetricsSeverityBucket(log, entropyThreshold)] += 1;
-        });
-        const reorderedSeverityData = [];
-        for (let i = 1; i <= 24; i++) {
-          const h = (currentHour + i) % 24;
-          reorderedSeverityData.push(severityHourlyData[h]);
-        }
-        setSeverityChartData(reorderedSeverityData);
-
-        const pendingLogs = filteredLogs.filter((log) => isPendingReviewMetric(log, entropyThreshold));
-        const reviewedLogs = filteredLogs.filter((log) => log.reviewed === true);
-        const averagePendingHours = pendingLogs.length > 0
-          ? pendingLogs.reduce((sum, log) => sum + getPendingAgeHours(log), 0) / pendingLogs.length
-          : 0;
-
-        const totalLogs = filteredLogs.length || 1;
-        const latencyValues = filteredLogs
-          .map((log) => Number(log.latencyMs || 0))
-          .filter((latency) => Number.isFinite(latency) && latency > 0)
-          .sort((a, b) => a - b);
-        const averageLatencyMs = latencyValues.length > 0
-          ? latencyValues.reduce((sum, latency) => sum + latency, 0) / latencyValues.length
-          : 0;
-        const p95Index = latencyValues.length > 0
-          ? Math.max(0, Math.ceil(latencyValues.length * 0.95) - 1)
-          : 0;
-        const p95LatencyMs = latencyValues.length > 0 ? latencyValues[p95Index] : 0;
-        const maxLatencyMs = latencyValues.length > 0 ? latencyValues[latencyValues.length - 1] : 0;
-        const embeddingDurationValues = filteredLogs
-          .map((log) => Number(log.instructionEmbeddingDurationMs || 0))
-          .filter((duration) => Number.isFinite(duration) && duration > 0)
-          .sort((a, b) => a - b);
-        const averageEmbeddingDurationMs = embeddingDurationValues.length > 0
-          ? embeddingDurationValues.reduce((sum, duration) => sum + duration, 0) / embeddingDurationValues.length
-          : 0;
-        const embeddingP95Index = embeddingDurationValues.length > 0
-          ? Math.max(0, Math.ceil(embeddingDurationValues.length * 0.95) - 1)
-          : 0;
-        const p95EmbeddingDurationMs = embeddingDurationValues.length > 0 ? embeddingDurationValues[embeddingP95Index] : 0;
-        const maxEmbeddingDurationMs = embeddingDurationValues.length > 0 ? embeddingDurationValues[embeddingDurationValues.length - 1] : 0;
-        const redosTrips = filteredLogs.filter((log) => Array.isArray(log.detectionFlags) && log.detectionFlags.includes('ReDoS_ATTEMPT_DETECTED')).length;
-        const highLatencyCount = filteredLogs.filter((log) => Number(log.latencyMs || 0) > 100).length;
-        const detectionSignalMetrics = calculateDetectionSignalMetrics(filteredLogs);
-        const obfuscationSignalMetrics = calculateObfuscationSignalMetrics(filteredLogs);
-        const researchSignalMetrics = calculateFeaturePressureMetrics(filteredLogs);
-        const atlasColumns = ATLAS_TACTICS.map((tactic) => {
-          const techniques = ATLAS_TECHNIQUE_DEFINITIONS
-            .filter((definition) => definition.tactic === tactic)
-            .map((definition) => ({
-              ...definition,
-              count: filteredLogs.filter((log) => log.atlasTechniqueId === definition.id).length,
-            }));
-          return { tactic, techniques };
-        });
-        const maxAtlasCount = atlasColumns.reduce((maxCount, column) => {
-          const columnMax = column.techniques.reduce((innerMax, technique) => Math.max(innerMax, technique.count), 0);
-          return Math.max(maxCount, columnMax);
-        }, 0);
-
-        const averagePromptLength = filteredLogs.length > 0
-          ? filteredLogs.reduce((sum, log) => sum + log.sanitizedPrompt.length, 0) / filteredLogs.length
-          : 0;
-        const averageLineCount = filteredLogs.length > 0
-          ? filteredLogs.reduce((sum, log) => sum + (log.sanitizedPrompt ? log.sanitizedPrompt.split(/\r?\n/).length : 0), 0) / filteredLogs.length
-          : 0;
-        const averageEntropy = filteredLogs.length > 0
-          ? filteredLogs.reduce((sum, log) => sum + (log.entropy || 0), 0) / filteredLogs.length
-          : 0;
-        const averageSuspiciousChunks = filteredLogs.length > 0
-          ? filteredLogs.reduce((sum, log) => sum + ((log.suspiciousChunks || []).length), 0) / filteredLogs.length
-          : 0;
-        const entropyThresholdHitCount = filteredLogs.filter((log) => hasCurrentEntropyThresholdHit(log, entropyThreshold)).length;
-        const strongestEntropyHit = filteredLogs.reduce((maxEntropy, log) => {
-          const entropy = Number(log.entropy || 0);
-          return Number.isFinite(entropy) ? Math.max(maxEntropy, entropy) : maxEntropy;
-        }, 0);
-        const alertCounts = filteredLogs.reduce<SeverityCounts>((counts, log) => {
-          counts[getMetricsSeverityBucket(log, entropyThreshold)] += 1;
-          return counts;
-        }, createEmptySeverityCounts());
-        const layerMetrics = calculateLayerMetrics(filteredLogs, entropyThreshold);
-
-        setOperationalMetrics({
-          hitl: {
-            pendingCount: pendingLogs.length,
-            reviewedCount: reviewedLogs.length,
-            averagePendingHours: parseFloat(averagePendingHours.toFixed(1)),
-          },
-          latency: {
-            averageLatencyMs: parseFloat(averageLatencyMs.toFixed(1)),
-            p95LatencyMs: parseFloat((p95LatencyMs ?? 0).toFixed(1)),
-            maxLatencyMs: parseFloat((maxLatencyMs ?? 0).toFixed(1)),
-            embeddingSampleCount: embeddingDurationValues.length,
-            averageEmbeddingDurationMs: parseFloat(averageEmbeddingDurationMs.toFixed(1)),
-            p95EmbeddingDurationMs: parseFloat((p95EmbeddingDurationMs ?? 0).toFixed(1)),
-            maxEmbeddingDurationMs: parseFloat((maxEmbeddingDurationMs ?? 0).toFixed(1)),
-          },
-          resilience: {
-            redosTrips,
-            highLatencyCount,
-            highLatencyRate: parseFloat(((highLatencyCount / totalLogs) * 100).toFixed(1)),
-          },
-          promptShape: {
-            averagePromptLength: Math.round(averagePromptLength),
-            averageLineCount: parseFloat(averageLineCount.toFixed(1)),
-            averageEntropy: parseFloat(averageEntropy.toFixed(2)),
-            averageSuspiciousChunks: parseFloat(averageSuspiciousChunks.toFixed(1)),
-          },
-          entropyPolicy: {
-            currentThreshold: parseFloat(entropyThreshold.toFixed(1)),
-            hitCount: entropyThresholdHitCount,
-            hitRate: parseFloat(((entropyThresholdHitCount / totalLogs) * 100).toFixed(1)),
-            strongestHit: parseFloat(strongestEntropyHit.toFixed(2)),
-          },
-          alertSeverity: alertCounts,
-          layerDefense: layerMetrics,
-          detectionSignals: detectionSignalMetrics,
-          obfuscationSignals: obfuscationSignalMetrics,
-          researchSignals: researchSignalMetrics,
-          atlasHeatmap: {
-            maxCount: maxAtlasCount,
-            columns: atlasColumns,
-          },
-        });
+        setMetrics(aggregate.anomaly);
+        setFprMetrics(aggregate.fpr);
       } catch (error) {
         console.error("Failed to load threat metrics:", error);
       }
     }
-    
+
     // Execute the metrics loading function
     loadMetrics();
   }, [localReviewMode, sourceFilter, localAuditLogs, entropyThreshold]);

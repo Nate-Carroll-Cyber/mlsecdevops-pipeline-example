@@ -760,6 +760,61 @@ export async function clearAuditLogs(options: { userId?: string } = {}, callerUs
   return z.object({ deleted: z.number() }).parse(payload).deleted;
 }
 
+// --- Metrics aggregation (Phase 3 step 3) ---
+// Runs detectThreatSpikes + calculateFalsePositiveMetrics over the audit-log
+// rows in Postgres so ThreatDashboard.tsx doesn't need its own analytics
+// modules or its own Firestore audit-log fetch.
+
+const MetricsAnomalyResultSchema = z.object({
+  isAnomaly: z.boolean(),
+  spikeRatio: z.number(),
+  currentHourlyRate: z.number(),
+  baselineHourlyRate: z.number(),
+  topAttackerId: z.string().nullable(),
+});
+export type MetricsAnomalyResult = z.infer<typeof MetricsAnomalyResultSchema>;
+
+const MetricsFprResultSchema = z.object({
+  strictFPR: z.string(),
+  falseNegativeRate: z.string(),
+  falsePositivesCount: z.number(),
+  falseNegativesCount: z.number(),
+  truePositivesCount: z.number(),
+  totalReviewed: z.number(),
+});
+export type MetricsFprResult = z.infer<typeof MetricsFprResultSchema>;
+
+const MetricsAggregateResponseSchema = z.object({
+  anomaly: MetricsAnomalyResultSchema,
+  fpr: MetricsFprResultSchema,
+  sampleSize: z.number(),
+});
+
+export interface AggregateMetricsOptions {
+  /** ISO timestamp lower bound. Default backend: 24h ago. */
+  sinceTimestamp?: string;
+  /** Optional audit-log source filter (e.g. 'analyst_chat' or 'ctf_chat'). */
+  source?: string;
+  /** Operator-supplied entropy threshold; applied to per-row effective detection-level mapping. */
+  entropyThreshold?: number;
+  /** Row cap for the underlying listAuditLogs query (clamped to [1, 5000]; default 1000). */
+  limit?: number;
+}
+
+export async function aggregateMetrics(options: AggregateMetricsOptions = {}, callerUserId?: string): Promise<z.infer<typeof MetricsAggregateResponseSchema>> {
+  const response = await fetch(resolveBackendUrl('/v1/metrics/aggregate'), {
+    method: 'POST',
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify(options),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Metrics aggregate failed (HTTP ${response.status}).`);
+  }
+  return MetricsAggregateResponseSchema.parse(payload);
+}
+
 export async function lookupInstructionMonitorRecord(
   identifier: string,
   callerUserId?: string,

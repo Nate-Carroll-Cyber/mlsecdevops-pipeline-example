@@ -50,12 +50,25 @@ export async function startWebTelemetry(serviceName: string): Promise<void> {
   const propagateUrls: Array<string | RegExp> = [/\/v1\//];
   if (apiBase) propagateUrls.push(apiBase);
 
+  // FetchInstrumentation wraps `window.fetch` globally — even when no
+  // traceparent is propagated, the wrapper inspects the Request/Response which
+  // can break long-polling cross-origin endpoints (Firestore Listen channel,
+  // Firebase Auth Identity-Toolkit). Mirror the main console's exclusion list
+  // here so the CTF iframe doesn't break the same way if it ever talks to them.
+  const ignoreUrls: Array<string | RegExp> = [
+    traceUrl,
+    /firestore\.googleapis\.com/,
+    /firebaseapp\.com/,
+    /identitytoolkit\.googleapis\.com/,
+    /securetoken\.googleapis\.com/,
+  ];
+
   registerInstrumentations({
     instrumentations: [
       new FetchInstrumentation({
         propagateTraceHeaderCorsUrls: propagateUrls,
         clearTimingResources: true,
-        ignoreUrls: [traceUrl],
+        ignoreUrls,
       }),
     ],
   });

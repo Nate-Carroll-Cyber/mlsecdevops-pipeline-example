@@ -50,12 +50,27 @@ export async function startWebTelemetry(serviceName: string): Promise<void> {
   const propagateUrls: Array<string | RegExp> = [/\/v1\//];
   if (apiBase) propagateUrls.push(apiBase);
 
+  // FetchInstrumentation wraps `window.fetch` globally — even when no
+  // traceparent is propagated, the wrapper inspects the Request/Response which
+  // can break long-polling cross-origin endpoints. Firestore's Listen channel
+  // fails CORS preflight with a "Fetch API cannot load … due to access control
+  // checks" error when the wrapped fetch flows through it, killing real-time
+  // listeners (and with them the app's auth/governance state). Also exclude
+  // Firebase Auth and Identity-Toolkit endpoints for the same reason.
+  const ignoreUrls: Array<string | RegExp> = [
+    traceUrl,
+    /firestore\.googleapis\.com/,
+    /firebaseapp\.com/,
+    /identitytoolkit\.googleapis\.com/,
+    /securetoken\.googleapis\.com/,
+  ];
+
   registerInstrumentations({
     instrumentations: [
       new FetchInstrumentation({
         propagateTraceHeaderCorsUrls: propagateUrls,
         clearTimingResources: true,
-        ignoreUrls: [traceUrl],
+        ignoreUrls,
       }),
     ],
   });

@@ -26,13 +26,19 @@ Direct browser-side inference is disabled so provider keys are not exposed in th
 
 Use this when you want the frontend to call the local `/v1/intercept` gateway, backend-mediated translation routes, and optional downstream responder APIs.
 
-Terminal 1:
+Terminal 1 (gateway — analyst console SSR + `/v1/*`):
 
 ```bash
-APP_PORT=18080 npm run backend:dev
+APP_PORT=18080 npm run gateway:dev
 ```
 
-Terminal 2:
+Terminal 2 (Sam Spade CTF service — only needed if you want the noir CTF surface):
+
+```bash
+SAM_SPADE_SERVICE_PORT=18120 npx tsx watch services/sam-spade/src/server.ts
+```
+
+Terminal 3 (Vite dev for the analyst console, if you want HMR instead of the gateway's SSR build):
 
 ```bash
 VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev
@@ -205,7 +211,7 @@ This starts:
 
 The frontend uses Vite's proxy layer inside the container to reach the backend cleanly, so browser requests stay same-origin for `/v1/*` and `/healthz`.
 
-The instruction-monitor database is intentionally ephemeral in the demo stack. `counter-spy-postgres` stores `/var/lib/postgresql/data` on tmpfs, so `docker compose --env-file .env.demo.local -f docker-compose.demo.yml up --build --force-recreate -d` recreates a clean database. The backend initializes the pgvector schema lazily on first use. Sam Spade session data is different: it remains in the named Docker SQLite volume so CTF sessions can survive normal backend/frontend rebuilds.
+The instruction-monitor database is intentionally ephemeral in the demo stack. `counter-spy-postgres` stores `/var/lib/postgresql/data` on tmpfs, so `docker compose --env-file .env.demo.local -f docker-compose.demo.yml up --build --force-recreate -d` recreates a clean database. The gateway initializes the pgvector schema lazily on first use. Sam Spade session data is different: the standalone `counter-spy-sam-spade-service` keeps it in a named Docker SQLite volume so CTF sessions can survive normal gateway/frontend rebuilds.
 
 The Docker demo reads local-only database secrets from `.env.demo.local`. Set both `POSTGRES_PASSWORD` and `INSTRUCTION_MONITOR_DATABASE_URL` there, using the same password value, and pass the file to Compose with `--env-file .env.demo.local` so the Postgres container receives only the database password it needs. The compose stack does not hard-code the pgvector password, binds Postgres only to localhost, initializes the tmpfs database with SCRAM authentication and data checksums, and applies defensive runtime settings for connection logging, DDL logging, slow-query logging, statement timeout, and max connections.
 
@@ -321,7 +327,7 @@ Guardrail toggle note: Active Guardrails includes a `Similarity Monitor` switch.
 
 Sanitizer note: the current runtime treats recognized decode/structural obfuscation signals as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. Covered local test families include byte-delimited Hex, binary, ASCII decimal, A1Z26, URL/HTML/unicode escapes, leetspeak, ROT13, reverse text, NATO phonetic, Morse, vertical reflow, and recursive decode chains. Pig Latin is the exception: it is detected as `PIG_LATIN` and routed to `Suspicious` review without decoding unless another stronger signal fires. The sanitizer also flags forced-prefix injection, anti-sanitization/no-disclaimer clauses, persona assignment plus unrestricted-capability language, and all-caps hyphenated persona handles (`ALLCAPS_PERSONA` is telemetry-only). Entropy follows the shared live policy: `<= 3.8` stays allowed on entropy grounds, `> 3.8` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
 
-Sam Spade session data is stored in a named Docker volume via a SQLite database mounted at `backend/data/sam-spade.db`. The pgvector instruction-monitor database is not stored in a named volume in the demo stack.
+Sam Spade session data is stored in a named Docker volume backing the standalone `counter-spy-sam-spade-service` container; the file path inside the container is `/app/data/sam-spade.db` (`SAM_SPADE_STORE_PATH`), and the host-side default for a non-Docker run is `services/sam-spade/data/sam-spade.db`. The pgvector instruction-monitor database is not stored in a named volume in the demo stack.
 
 Note: in the current demo build, Sam Spade clean turns use the same governed path as Analyst Chat after local sanitizer and safeguard approval. The protected Sam Spade API binds each session to the authenticated caller id and rejects cross-user fetch/message/solve attempts. When responder routing is enabled, the backend assembles the Sam Spade persona and scenario prompts before calling the responder; browser callers cannot override those prompts. When responder routing is disabled, the safeguard verdict and latency are retained and the turn uses local responder passthrough. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.
 
@@ -388,24 +394,39 @@ Expected result is HTTP `200` with Spanish output in the response body. This pat
 Run these before handing work off or preparing a deployment:
 
 ```bash
-npm run lint
-npm run test
-npm run build
-npm run backend:build
+npm run lint                # tsc --noEmit (frontend) + backend-shared/gateway/sam-spade type checks
+npm run test                # gateway test suite + sam-spade test suite
+npm run build               # Vite client + SSR bundles for the analyst console
+npm run build:all           # adds gateway:build and sam-spade:build on top of npm run build
+```
+
+Per-workspace scripts are also exposed at the root:
+
+```bash
+npm run shared:build        # @counter-spy/backend-shared
+npm run gateway:build       # @counter-spy/gateway (also rebuilds backend-shared)
+npm run gateway:check       # tsc --noEmit for the gateway
+npm run gateway:test        # gateway test suite
+npm run sam-spade:build     # @counter-spy/sam-spade (also rebuilds backend-shared)
+npm run sam-spade:check     # tsc --noEmit for sam-spade
+npm run sam-spade:test      # sam-spade test suite
 ```
 
 `npm run build` may warn that the frontend bundle is larger than Vite's default warning threshold. That warning is not a build failure.
 
-## Docker Backend Build
+## Docker Builds
+
+The gateway and the Sam Spade CTF service are now separate images built from separate Dockerfiles:
 
 ```bash
-docker build -f backend/Dockerfile -t counter-spy-backend:dev .
+docker build -f services/gateway/Dockerfile -t counter-spy-gateway:dev .
+docker build -f services/sam-spade/Dockerfile -t counter-spy-sam-spade:dev .
 ```
 
-Run it locally:
+Run the gateway locally:
 
 ```bash
-docker run --rm -p 18080:8080 counter-spy-backend:dev
+docker run --rm -p 18080:8080 counter-spy-gateway:dev
 ```
 
 Then use the backend smoke tests above.

@@ -12,17 +12,22 @@ Counter-Spy.ai is an **Adversary-Aware AI Security Gateway**. It sits between un
 
 ## Architecture: server-hosted Shield-and-Sword
 
-This is a **server-hosted app**: the React analyst console is server-rendered and served by the backend gateway (`backend/src/server.ts` → `backend/src/web/ssr.ts`), and **all sanitization/analysis runs on the backend** — the browser ships no detection engine. The `/src` console calls `backend/src/security/sanitizer.ts` (and the other backend analysis modules) over `/v1/analyze*` via `src/lib/backendApi.ts`.
+This is a **server-hosted app** split across an npm-workspaces monorepo. The React analyst console is server-rendered and served by the gateway service (`services/gateway/src/server.ts` → `services/gateway/src/web/ssr.ts`), and **all sanitization/analysis runs server-side** — the browser ships no detection engine. Shared security primitives live in `packages/backend-shared/src/` and are imported by both `services/gateway/` and `services/sam-spade/`. The `/src` console calls those backend modules over `/v1/analyze*` via `src/lib/backendApi.ts`.
+
+Workspaces:
+- `packages/backend-shared/` (`@counter-spy/backend-shared`) — sanitizer, urlGuard, rateLimit, telemetry, safeguard defaults, provider clients. Imported by both services.
+- `services/gateway/` (`@counter-spy/gateway`) — `/v1/intercept`, `/v1/analyze*`, `/v1/translate`, instruction-monitor, CTF review-artifact store, SSR analyst console.
+- `services/sam-spade/` (`@counter-spy/sam-spade`) — standalone `/v1/ctf/sam-spade/*` CTF service with its own SQLite session store.
 
 | Layer | File(s) | Role |
 | :--- | :--- | :--- |
-| 🛡️ **Shield** | `backend/src/security/sanitizer.ts` | The deterministic sanitization engine — PII/secret redaction, entropy, syntactic complexity, decode telemetry, verdict bands. **The trust boundary.** Reached from the UI via `POST /v1/analyze` / `/v1/analyze/full` / `/v1/analyze/output`. |
-| 🔬 **Lab** | `backend/src/analysis/*.ts` | Syntactic-complexity scoring, prompt feature vectors, language-likelihood, the obfuscation lab (~24 transforms), heuristic spell-normalization. Reached via `/v1/analyze/full`, `/v1/analyze/obfuscate`, `/v1/analyze/normalize`. |
-| ⚔️ **Sword** | `backend/src/server.ts` (responder/safeguard provider calls) | Production LLM inference (safeguard judge + downstream responder). Only receives sanitized payloads; `src/lib/gemini.ts` is a disabled browser stub. |
+| 🛡️ **Shield** | `packages/backend-shared/src/security/sanitizer.ts` | The deterministic sanitization engine — PII/secret redaction, entropy, syntactic complexity, decode telemetry, verdict bands. **The trust boundary.** Reached from the UI via `POST /v1/analyze` / `/v1/analyze/full` / `/v1/analyze/output`. |
+| 🔬 **Lab** | `services/gateway/src/analysis/*.ts` | Syntactic-complexity scoring, prompt feature vectors, language-likelihood, the obfuscation lab (~24 transforms), heuristic spell-normalization. Reached via `/v1/analyze/full`, `/v1/analyze/obfuscate`, `/v1/analyze/normalize`. |
+| ⚔️ **Sword** | `services/gateway/src/server.ts` + `services/sam-spade/src/server.ts` (responder/safeguard provider calls via `packages/backend-shared/src/providers/`) | Production LLM inference (safeguard judge + downstream responder). Only receives sanitized payloads; `src/lib/gemini.ts` is a disabled browser stub. |
 | 📡 **Radar** | `src/lib/anomalyDetector.ts`, `src/lib/metrics.ts` | Z-Score anomaly detection + confusion-matrix metrics over audit logs (still client-side; moves server-side with the audit-log store in a later phase). |
 | 🔒 **Vault** | `firestore.rules` | Database-layer RBAC. Enforces integrity even if the client is compromised. |
 
-**The cardinal rule:** no prompt reaches a production LLM (safeguard or responder) without first passing through `backend/src/security/sanitizer.ts`. The browser must not regain a local sanitization/analysis engine — keep all of it behind `/v1/analyze*`.
+**The cardinal rule:** no prompt reaches a production LLM (safeguard or responder) without first passing through `packages/backend-shared/src/security/sanitizer.ts`. The browser must not regain a local sanitization/analysis engine — keep all of it behind `/v1/analyze*`.
 
 ---
 
@@ -31,9 +36,9 @@ This is a **server-hosted app**: the React analyst console is server-rendered an
 > [!CAUTION]
 > The following files are **security-critical**. Any modification requires explicit justification and must not weaken existing controls.
 
-- `backend/src/security/sanitizer.ts` — the Shield. Do not lower entropy thresholds, remove detection patterns, or add pass-throughs.
-- `backend/src/analysis/syntacticAnalyzer.ts` — Thresholds: Suspicious > 50, Adversarial > 90. Do not raise these without documented rationale.
-- `backend/src/server.ts` — the `/v1/intercept` and `/v1/analyze*` route handlers and the safeguard/responder verdict contracts govern firewall/responder behavior. Do not relax them. Do not add a code path that serves prompts to a provider LLM without `sanitizePrompt` first.
+- `packages/backend-shared/src/security/sanitizer.ts` — the Shield. Do not lower entropy thresholds, remove detection patterns, or add pass-throughs.
+- `services/gateway/src/analysis/syntacticAnalyzer.ts` — Thresholds: Suspicious > 50, Adversarial > 90. Do not raise these without documented rationale.
+- `services/gateway/src/server.ts` — the `/v1/intercept` and `/v1/analyze*` route handlers and the safeguard/responder verdict contracts govern firewall/responder behavior. Do not relax them. Do not add a code path that serves prompts to a provider LLM without `sanitizePrompt` first. The standalone CTF surface (`services/sam-spade/src/server.ts`) follows the same contracts via the shared sanitizer/safeguard helpers.
 - `src/lib/policies.ts` — bundled MITRE/MCP-A2A safety policies (the hard-block phrases the console feeds into the Shield's blocked-keyword set). Do not weaken.
 - `firestore.rules` — RBAC rules. Do not broaden read/write permissions.
 
@@ -65,7 +70,7 @@ Do not add new dependencies without updating `Technical/SBOM.md`.
 ### TypeScript
 - Strict mode is enabled. Do not use `any` types in security-critical files.
 - All sanitization/analysis functions must return a typed result — never raw strings from untrusted input.
-- The console (`/src`) reaches the backend only through `src/lib/backendApi.ts` (Zod-validated responses). Do not `fetch` the API directly from a component, and do not import `backend/src/**` from `/src` — the analysis engines must stay server-side.
+- The console (`/src`) reaches the backend only through `src/lib/backendApi.ts` (Zod-validated responses). Do not `fetch` the API directly from a component, and do not import `services/**` or `packages/backend-shared/**` from `/src` — the analysis engines must stay server-side.
 
 ### SSR
 - The app is server-rendered (`src/entry-server.tsx` → `renderToString`) and hydrated (`src/entry-client.tsx`). Anything that touches `window`/`document`/`localStorage`/Firebase at module load or in a `useState` initializer must be SSR-safe (guarded with `typeof window !== 'undefined'`, or deferred to a `useEffect`). The two builds are `vite build` → `dist/client/` and `vite build --ssr src/entry-server.tsx` → `dist/server/`.

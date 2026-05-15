@@ -219,7 +219,7 @@ VITE_API_BASE_URL=http://127.0.0.1:18080
 2. Install dependencies: `npm install`
 3. Start the development server: `npm run dev`
 
-For local review without Google authentication, use **Continue in Local Review Mode** on `localhost`. Direct browser-side inference is disabled so provider secrets do not ship in the client bundle. To route clean prompts through the local backend stub, start `APP_PORT=18080 npm run backend:dev` and run the frontend with `VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev`.
+For local review without Google authentication, use **Continue in Local Review Mode** on `localhost`. Direct browser-side inference is disabled so provider secrets do not ship in the client bundle. To route clean prompts through the local gateway, start `APP_PORT=18080 npm run gateway:dev` and run the frontend with `VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev`. (The Sam Spade CTF surface is now a separate service; only start it with `npx tsx watch services/sam-spade/src/server.ts` if you need the CTF endpoints.)
 
 For the Docker demo stack on `http://localhost:3000`, the frontend uses same-origin proxying to reach the backend. Analyst Chat clean traffic still uses `/v1/intercept` even when `VITE_API_BASE_URL` is unset. That gateway requires the shared backend bearer token, runs local prechecks first, then calls the separately configured OpenAI-compatible safeguard judge, and only then forwards `CLEAN` prompts to the downstream responder. Browser clients cannot choose safeguard/responder provider endpoints or backend model base URLs for protected execution paths; those values come from backend environment configuration such as `SAFEGUARDS_*`, `RESPONDER_*`, and `LLM_*`. The current System Configuration **Safeguard Effective Prompt** is sent to `/v1/intercept` as an allowlisted field and forwarded verbatim as the safeguard system prompt. The Analyst Runtime Settings modal intentionally allows a browser-memory-only Safeguard API Key for local LM Studio testing; when present, `/v1/intercept` forwards that key to the backend safeguard call, and leaving it blank falls back to `SAFEGUARDS_API_KEY`. If LM Studio requires API-token authentication and neither source is set, the backend returns `SHIELD_ERROR` / `SAFEGUARD_ERROR` / `FAIL_SECURE`, queues the audit item, activates Global System Pause, and does not forward to the responder. For OpenAI-compatible responders, set the backend provider to OpenAI-compatible and use an API root such as `https://api.openai.com/v1`; the backend will translate that into a `POST /v1/responses` call when applicable. For Gemini, set `RESPONDER_PROVIDER=gemini`, use a Gemini model ID such as `gemini-2.5-flash`, and leave `RESPONDER_API_BASE_URL` blank to use the Gemini API default. If you also set **Max Context Window**, the browser will estimate the forwarded request footprint and block over-limit submissions before they are sent.
 
@@ -230,7 +230,7 @@ The Docker demo also starts `counter-spy-postgres` on `127.0.0.1:15432` for the 
 For local translation testing, use Lara Translate through the local Counter-Spy.ai backend:
 
 ```bash
-APP_PORT=18080 npm run backend:dev
+APP_PORT=18080 npm run gateway:dev
 VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev
 ```
 

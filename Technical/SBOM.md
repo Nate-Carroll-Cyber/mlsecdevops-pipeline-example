@@ -5,6 +5,18 @@
 **Date Generated:** 2026-05-09
 **Compliance Level:** Internal Security Governance
 
+## 🧱 Workspaces
+
+Counter-Spy.ai is an npm workspaces monorepo. The root `package.json` declares `packages/*` + `services/*`; each workspace pins its own runtime dependencies. The `ctf-frontend/` Vite app is **not** a workspace — it has its own `package.json`/lockfile.
+
+| Workspace | Path | Role |
+| :--- | :--- | :--- |
+| Frontend / analyst console | repo root (`src/`, `vite.config.ts`) | React 19 + Vite analyst console. Built into `dist/client/` and `dist/server/` (SSR bundle) and served by the gateway. |
+| `@counter-spy/backend-shared` | `packages/backend-shared/` | Shared backend primitives: `sanitizer`, `urlGuard`, `rateLimit`, `telemetry`, safeguard defaults, provider clients. Imported by both backend services. |
+| `@counter-spy/gateway` | `services/gateway/` | The `/v1/intercept`, `/v1/analyze*`, `/v1/translate`, instruction-monitor, CTF review-artifact, and SSR analyst-console service. Built into `services/gateway/dist/` and shipped as `services/gateway/Dockerfile`. |
+| `@counter-spy/sam-spade` | `services/sam-spade/` | Standalone Sam Spade CTF service (`/v1/ctf/sam-spade/*`). Built into `services/sam-spade/dist/` and shipped as `services/sam-spade/Dockerfile`. |
+| CTF frontend (non-workspace) | `ctf-frontend/` | Standalone Vite SPA for the noir CTF surface. Own `package.json`/lockfile. |
+
 ## 📦 Core Dependencies
 
 | Package | Version | Description |
@@ -31,7 +43,7 @@
 | `@base-ui/react` | `^1.3.0` | Unstyled UI Components |
 | `@opentelemetry/api` | `^1.9.1` | OpenTelemetry trace/metrics/logs API surface (no-op until the SDK is started) |
 | `@opentelemetry/api-logs` | `^0.217.0` | OpenTelemetry Logs API used by the backend `log()` helper |
-| `@opentelemetry/sdk-node` | `^0.217.0` | Backend OpenTelemetry SDK bootstrap (`backend/src/telemetry.ts`) |
+| `@opentelemetry/sdk-node` | `^0.217.0` | Backend OpenTelemetry SDK bootstrap (`packages/backend-shared/src/telemetry.ts`) |
 | `@opentelemetry/sdk-metrics` | `^2.7.1` | Metrics SDK (`PeriodicExportingMetricReader`) |
 | `@opentelemetry/sdk-logs` | `^0.217.0` | Logs SDK (`BatchLogRecordProcessor`) |
 | `@opentelemetry/auto-instrumentations-node` | `^0.75.0` | Auto-instrumentation bundle (Express 5, http/https, pg, ...) |
@@ -145,7 +157,7 @@ These packages were observed during a one-time `npx firebase-tools` attempt to d
 - **Sam Spade CTF Intake**: The Sam Spade front-end shell now includes a governed question input backed by the dedicated Sam Spade backend API under a `ctf_chat` provenance value. This gives the noir game surface a real control-plane handoff without bypassing the current sanitization, audit, and review flow.
 - **Dedicated Sam Spade API**: Sam Spade now has a separate protected backend session/message/solve API with local SQLite-backed session storage, allowing the CTF surface to evolve toward its own containerized service boundary later. Sessions are bound to the authenticated caller id, and fetch/message/solve operations reject cross-user access. The frontend maintains separate Sam Spade session state, all CTF turns are logged into the audit trail under `ctf_chat`, and every submission is governed by the shared sanitizer and safeguard judge path before clean gameplay replies are forwarded to the configured downstream responder or returned as local responder passthrough when responder routing is disabled.
 - **Sam Spade Sensitive-Redaction Block**: The CTF service treats PII/secret redaction labels (`CREDIT_CARD`, `SSN`, `API_KEY`, `LLM_API_KEY`, `JWT`, `SECRET_KEY`, and related placeholders) as gameplay-blocking signals. These attempts are marked `PENDING_REVIEW`, tagged with `SENSITIVE_DATA_EXPOSURE`, return `Bad content.` to the CTF surface, and are not sent to the Sam Spade responder.
-- **Sam Spade Service Layout**: The backend implementation is now organized under `backend/src/services/sam-spade/` (`types`, `store`, `service`, `index`) so the later Docker/service split is largely a packaging and deployment exercise rather than a major refactor.
+- **Sam Spade Service Layout**: The Sam Spade CTF surface is now its own npm workspace at `services/sam-spade/` (`@counter-spy/sam-spade`), built from its own `Dockerfile` and sharing only `packages/backend-shared/` with the gateway. The service-internal source layout remains `services/sam-spade/src/services/sam-spade/` (`types`, `store`, `service`, `index`).
 - **Sam Spade Service Config Surface**: Sam Spade settings now live behind a separate env/config module (`SAM_SPADE_ENABLED`, `SAM_SPADE_DEFAULT_CASE_ID`, `SAM_SPADE_STORE_PATH`, `SAM_SPADE_SERVICE_PORT`) so the future service split does not have to inherit the main backend configuration surface.
 - **CTF Metrics Filter**: The Metrics dashboard now includes a dedicated `CTF Chat` source filter so Sam Spade telemetry can be isolated across threat velocity, false-positive metrics, obfuscation trends, and operational summaries.
 - **Layered Defense Funnel Metrics**: The Metrics dashboard now computes explicit two-layer defense effectiveness rates: **Pre-Inference Block Rate** (blocked before the Safeguard LLM), **Model Intervention Rate** (caught by the Safeguard LLM after reaching it), and **Post-Model Escape Rate** (likely malicious prompts that bypass both layers and still land clean or informational). ReDoS-triggered latency blocks count in this pre-inference bucket, while the separate resilience panel also reports them explicitly as `ReDoS Trips`. Structured backend outcome fields (`backendGatewayStatus`, `backendSafeguardVerdict`, `backendSafeguardReasoning`, `backendReachedSafeguard`) now drive safeguard/model-intervention attribution for Analyst Chat, Bulk Ingest, and Playground metrics. Split timing includes local precheck, safeguard, gateway, instruction embedding, and responder latency where available. The backend also emits structured `metric_increment` log events for `safeguard.schema` and `safeguard.divergence`, plus detailed `safeguard_decision` and `instruction_embedding_generated` events for log-based extraction. When present, `expectedVerdict` labels from bulk ingest are used to strengthen the post-model escape calculation.

@@ -898,6 +898,91 @@ export async function putSystemConfig(config: SystemConfigDto, callerUserId?: st
   return SystemConfigResponseSchema.parse(payload);
 }
 
+// --- User profile (Phase 3 step 4 — 3/5) ---
+// Replaces Firestore `users/{uid}` doc. The backend also uses the same table
+// for the admin role-check that gates PUT /v1/governance and PUT
+// /v1/system-config, so a 403 from this client surface usually means "caller
+// is signed in but not an admin" — let the call site surface the message.
+
+export const USER_PROFILE_ROLES = ['developer', 'analyst', 'engineer', 'admin'] as const;
+export type UserProfileRole = (typeof USER_PROFILE_ROLES)[number];
+
+const UserProfileResponseSchema = z.object({
+  uid: z.string(),
+  email: z.string(),
+  displayName: z.string(),
+  photoURL: z.string(),
+  role: z.enum(USER_PROFILE_ROLES),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type UserProfileDto = z.infer<typeof UserProfileResponseSchema>;
+
+export class UserProfileNotFoundError extends Error {
+  constructor() {
+    super('User profile not found.');
+    this.name = 'UserProfileNotFoundError';
+  }
+}
+
+/**
+ * Returns the caller's profile, or throws `UserProfileNotFoundError` when the
+ * row doesn't exist yet (the App.tsx auth-state effect catches that and PUTs
+ * a default-shaped profile to materialize it, matching the previous Firestore
+ * onSnapshot-then-setDoc behavior).
+ */
+export async function getUserProfile(callerUserId?: string): Promise<UserProfileDto> {
+  const response = await fetch(resolveBackendUrl('/v1/users/me'), { headers: getProtectedHeaders(callerUserId) });
+  const payload: unknown = await response.json().catch(() => null);
+  if (response.status === 404) {
+    throw new UserProfileNotFoundError();
+  }
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `User profile fetch failed (HTTP ${response.status}).`);
+  }
+  return UserProfileResponseSchema.parse(payload);
+}
+
+export interface PutUserProfileInput {
+  email: string;
+  displayName: string;
+  photoURL: string;
+}
+
+export async function putUserProfile(input: PutUserProfileInput, callerUserId?: string): Promise<UserProfileDto> {
+  const response = await fetch(resolveBackendUrl('/v1/users/me'), {
+    method: 'PUT',
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify(input),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `User profile update failed (HTTP ${response.status}).`);
+  }
+  return UserProfileResponseSchema.parse(payload);
+}
+
+/** Admin-only: change another user's role. 403s for non-admins. */
+export async function updateUserRole(
+  targetUid: string,
+  role: UserProfileRole,
+  callerUserId?: string,
+): Promise<UserProfileDto> {
+  const response = await fetch(resolveBackendUrl(`/v1/users/${encodeURIComponent(targetUid)}/role`), {
+    method: 'PUT',
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify({ role }),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `User role update failed (HTTP ${response.status}).`);
+  }
+  return UserProfileResponseSchema.parse(payload);
+}
+
 export async function lookupInstructionMonitorRecord(
   identifier: string,
   callerUserId?: string,

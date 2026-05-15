@@ -383,3 +383,90 @@ test('/v1/system-config PUT validates the body shape', async () => {
 // Sam Spade safeguard-api-key forwarding + default-prompt fallback tests moved
 // to backend/test/samSpadeRoutes.test.ts when the CTF surface was network-split
 // off the gateway.
+
+// ---------- /v1/users/* (Phase 3 step 4 — 3/5) ----------
+
+test('/v1/users/me rejects unauthenticated GET + PUT', async () => {
+  const getNoAuth = await requestApp('/v1/users/me', { method: 'GET' });
+  assert.equal(getNoAuth.status, 401);
+
+  const putNoAuth = await requestApp('/v1/users/me', {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: { email: 'x@y', displayName: 'x', photoURL: '' },
+  });
+  assert.equal(putNoAuth.status, 401);
+});
+
+test('/v1/users/me returns 503 when the user profile store is not configured', async () => {
+  // No APP_CONFIG_DATABASE_URL/DATABASE_URL/INSTRUCTION_MONITOR_DATABASE_URL
+  // set, so an authenticated request 503s with the user-profile-store message.
+  const get = await requestApp('/v1/users/me', { method: 'GET', headers: authHeaders() });
+  assert.equal(get.status, 503);
+  assert.match((get.payload as { error?: string }).error ?? '', /User profile store is not configured/);
+
+  const put = await requestApp('/v1/users/me', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: { email: 'x@y', displayName: 'x', photoURL: '' },
+  });
+  assert.equal(put.status, 503);
+});
+
+test('/v1/users/me PUT validates the body shape', async () => {
+  // Body validation runs before the store check (matches /v1/governance pattern),
+  // so missing-field requests always 400 even when the store is unconfigured.
+  const missingField = await requestApp('/v1/users/me', {
+    method: 'PUT',
+    headers: authHeaders(),
+    // Missing displayName.
+    body: { email: 'x@y', photoURL: '' },
+  });
+  assert.equal(missingField.status, 400);
+  assert.match((missingField.payload as { error?: string }).error ?? '', /Invalid user profile/);
+
+  const wrongType = await requestApp('/v1/users/me', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: { email: 'x@y', displayName: 42, photoURL: '' }, // number where string expected
+  });
+  assert.equal(wrongType.status, 400);
+
+  const roleSmuggled = await requestApp('/v1/users/me', {
+    method: 'PUT',
+    headers: authHeaders(),
+    // Strict schema rejects the `role` field — PUT /v1/users/me must not be a
+    // self-escalation vector even if the store happens to be unreachable.
+    body: { email: 'x@y', displayName: 'x', photoURL: '', role: 'admin' },
+  });
+  assert.equal(roleSmuggled.status, 400);
+});
+
+test('/v1/users/:uid/role PUT validates the body shape', async () => {
+  const missingRole = await requestApp('/v1/users/target-uid/role', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: {},
+  });
+  assert.equal(missingRole.status, 400);
+  assert.match((missingRole.payload as { error?: string }).error ?? '', /Invalid role update/);
+
+  const unknownRole = await requestApp('/v1/users/target-uid/role', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: { role: 'super-admin' },
+  });
+  assert.equal(unknownRole.status, 400);
+});
+
+test('/v1/users/:uid/role PUT returns 503 when the profile store is unconfigured', async () => {
+  // Body is valid → next gate is the store check, which 503s in this test
+  // bootstrap (no Postgres env). 403 (admin-only) would only fire once the
+  // store is reachable; that path is covered by the demo-compose smoke.
+  const put = await requestApp('/v1/users/target-uid/role', {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: { role: 'admin' },
+  });
+  assert.equal(put.status, 503);
+});

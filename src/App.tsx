@@ -63,6 +63,9 @@ import {
   putGovernanceConfig,
   getSystemConfig,
   putSystemConfig,
+  getUserProfile,
+  putUserProfile,
+  UserProfileNotFoundError,
   checkBackendHealth,
   getCtfReviewArtifacts,
   interceptPrompt,
@@ -2225,55 +2228,68 @@ export default function App() {
     };
   }, [effectiveSafeguardPromptPreview]);
 
-  // Effect hook to handle authentication state changes and set up real-time listeners
+  // Auth state -> profile load. Phase 3 step 4 (3/5) moved the user profile
+  // off Firestore (`users/{uid}` onSnapshot) onto Postgres via /v1/users/me.
+  // There's no real-time multi-tab profile-sync requirement, so this is a
+  // one-shot GET on sign-in. On 404 we PUT a default-shaped profile to
+  // materialize the row — matching the previous setDoc-on-first-login path.
   useEffect(() => {
-    let profileUnsubscribe: (() => void) | null = null;
+    let cancelled = false;
 
-    // Listen for changes in the Firebase authentication state
     const authUnsubscribe = onAuthStateChanged(auth, async (u) => {
-      if (u) {
-        // User is logged in
-        setUser(u);
-        // Set up real-time profile listener
-        const userRef = doc(db, 'users', u.uid);
-        profileUnsubscribe = onSnapshot(userRef, (snap) => {
-          if (snap.exists()) {
-            const parsedProfile = parseUserProfile(snap.data());
-            if (parsedProfile) {
-              setProfile(parsedProfile);
-            } else {
-              toast.error('Profile data is invalid. Please contact an administrator.');
-            }
-          } else {
-            // Initialize profile if it doesn't exist (first-time login)
-            const newProfile: UserProfile = {
-              uid: u.uid,
-              email: u.email || '',
-              role: 'developer', // Default role
-              displayName: u.displayName || 'Anonymous',
-              photoURL: u.photoURL || '',
-            };
-            setDoc(userRef, newProfile);
-          }
-        }, (error) => {
-          // Handle errors fetching the user profile
-          handleFirestoreError(error, OperationType.GET, `users/${u.uid}`);
-        });
-
-      } else {
-        // User is logged out, clear state and unsubscribe from listeners
-        setUser(null);
-        setProfile(null);
-        if (profileUnsubscribe) profileUnsubscribe();
+      if (!u) {
+        if (!cancelled) {
+          setUser(null);
+          setProfile(null);
+          setLoading(false);
+        }
+        return;
       }
-      // Mark loading as complete
-      setLoading(false);
+
+      if (!cancelled) setUser(u);
+
+      try {
+        let record;
+        try {
+          record = await getUserProfile(u.uid);
+        } catch (error) {
+          if (error instanceof UserProfileNotFoundError) {
+            // First-time login: materialize the row. Backend seeds role='developer'
+            // via the user_profiles.role column default; we just supply the
+            // identity fields from the Firebase Auth user record.
+            record = await putUserProfile(
+              {
+                email: u.email || '',
+                displayName: u.displayName || 'Anonymous',
+                photoURL: u.photoURL || '',
+              },
+              u.uid,
+            );
+          } else {
+            throw error;
+          }
+        }
+
+        if (cancelled) return;
+        const parsedProfile = parseUserProfile(record);
+        if (parsedProfile) {
+          setProfile(parsedProfile);
+        } else {
+          toast.error('Profile data is invalid. Please contact an administrator.');
+        }
+      } catch (error) {
+        if (!cancelled) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          toast.error(`Failed to load profile: ${message}`);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     });
 
-    // Cleanup function to unsubscribe from all listeners when the component unmounts
     return () => {
+      cancelled = true;
       authUnsubscribe();
-      if (profileUnsubscribe) profileUnsubscribe();
     };
   }, []);
 

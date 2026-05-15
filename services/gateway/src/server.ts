@@ -55,6 +55,17 @@ import {
 import { normalizeWithHeuristicSync, type NormalizationResult } from './analysis/spellNormalize.js';
 import { appendAuditLog, clearAuditLogs, initAuditStore, isAuditStoreConfigured, listAuditLogs, patchAuditLog, type AuditLogRow } from './audit/auditStore.js';
 import { getConfig, initConfigStore, isConfigStoreConfigured, putConfig } from './config/configStore.js';
+import {
+  USER_ROLES,
+  getCallerRole,
+  getUserProfile,
+  initUserProfileStore,
+  isUserProfileStoreConfigured,
+  setUserRole,
+  upsertOwnProfile,
+  type UserProfileRecord,
+  type UserRole,
+} from './config/userProfileStore.js';
 import { appendCtfReviewArtifact, listCtfReviewArtifacts } from './ctf/reviewArtifactStore.js';
 import { SamSpadeReviewArtifactSchema, type SamSpadeReviewArtifact } from './ctf/types.js';
 import {
@@ -1774,14 +1785,39 @@ app.post('/v1/metrics/aggregate', requireBackendAuth, async (req: AuthenticatedR
 
 // Governance config (HITL toggle, Global Pause, entropy / syntactic thresholds).
 // Phase 3 step 4: this doc used to live in Firestore (`config/governance`); it now
-// rides on the shared `app_config` table via the configStore. PUT is currently
-// gated only by the shared bearer token + caller-id header — admin-only role
-// enforcement is deferred to step 3 (user_profiles), where the role check
-// primitive will be added and back-applied here.
+// rides on the shared `app_config` table via the configStore. Step 3 (3/5) added
+// the admin role-check primitive (`requireAdminRole`); PUT is gated by it.
 function requireConfigStore(res: Response): boolean {
   if (isConfigStoreConfigured()) return true;
   res.status(503).json({ error: 'App config store is not configured (set APP_CONFIG_DATABASE_URL or DATABASE_URL).' });
   return false;
+}
+
+function requireUserProfileStore(res: Response): boolean {
+  if (isUserProfileStoreConfigured()) return true;
+  res.status(503).json({ error: 'User profile store is not configured (set APP_CONFIG_DATABASE_URL or DATABASE_URL).' });
+  return false;
+}
+
+/**
+ * Admin role-check primitive — looks up the caller in `user_profiles` and 403s
+ * unless `role = 'admin'`. The store *must* be reachable before this is called
+ * (callers must invoke `requireUserProfileStore(res)` first, so a missing DB
+ * surfaces as 503, not 403). A caller with no profile row at all is treated as
+ * "not admin" and gets 403, matching the original Firestore-rules posture
+ * (`isAdmin()` returned false unless the doc explicitly set role='admin').
+ */
+async function requireAdminRole(callerId: string, res: Response): Promise<boolean> {
+  try {
+    const role = await getCallerRole(callerId);
+    if (role === 'admin') return true;
+    res.status(403).json({ error: 'Admin role required.' });
+    return false;
+  } catch (error) {
+    log('warn', 'admin_role_check_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'role check error' });
+    res.status(500).json({ error: 'Failed to verify caller role.' });
+    return false;
+  }
 }
 
 const GovernanceConfigSchema = z.object({
@@ -1839,8 +1875,10 @@ app.put('/v1/governance', requireBackendAuth, async (req: AuthenticatedRequest, 
     return;
   }
   if (!requireConfigStore(res)) return;
+  if (!requireUserProfileStore(res)) return;
   const callerId = getAuthenticatedCallerId(req, res);
   if (!callerId) return;
+  if (!(await requireAdminRole(callerId, res))) return;
   try {
     const row = await putConfig<GovernanceConfig>(GOVERNANCE_CONFIG_KEY, parsed.data, callerId);
     res.status(200).json(row.value);
@@ -1858,10 +1896,8 @@ app.put('/v1/governance', requireBackendAuth, async (req: AuthenticatedRequest, 
 // names and bundled defaults); the backend just validates the normalized
 // 9-field shape and stores the JSON.
 //
-// Auth posture matches /v1/governance: shared-bearer + caller-id header today.
-// Admin-only role enforcement is deferred to step 3 of this plan
-// (user_profiles), where the role-check primitive will land and back-apply
-// here.
+// Auth posture matches /v1/governance: shared-bearer + caller-id header +
+// admin role check via `requireAdminRole`.
 const SystemConfigSchema = z.object({
   safeguardEffectivePromptOverride: z.string(),
   firewallPrompt: z.string(),
@@ -1911,14 +1947,119 @@ app.put('/v1/system-config', requireBackendAuth, async (req: AuthenticatedReques
     return;
   }
   if (!requireConfigStore(res)) return;
+  if (!requireUserProfileStore(res)) return;
   const callerId = getAuthenticatedCallerId(req, res);
   if (!callerId) return;
+  if (!(await requireAdminRole(callerId, res))) return;
   try {
     const row = await putConfig<SystemConfigDto>(SYSTEM_CONFIG_KEY, parsed.data, callerId);
     res.status(200).json(row.value);
   } catch (error) {
     log('warn', 'system_config_put_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'put error' });
     res.status(500).json({ error: 'Failed to update system config.' });
+  }
+});
+
+// User profile (replaces Firestore `users/{uid}`). Phase 3 step 4 (3/5).
+//
+// - GET  /v1/users/me              returns the caller's profile, or 404 when no row
+//                                  exists yet (the frontend then PUTs to materialize).
+// - PUT  /v1/users/me              upserts the caller's own profile. Role is *not*
+//                                  an input — see `upsertOwnProfile()` — so the
+//                                  endpoint cannot be used for self-escalation.
+// - PUT  /v1/users/:uid/role       admin-gated; updates a target user's role.
+//
+// The caller-id header (`x-counter-spy-user-id`) determines whose profile is
+// fetched/written for /v1/users/me, matching how every other route reads it.
+
+const OwnProfileSchema = z.object({
+  email: z.string(),
+  displayName: z.string(),
+  photoURL: z.string(),
+}).strict();
+
+const RoleUpdateSchema = z.object({
+  role: z.enum(USER_ROLES),
+}).strict();
+
+function profileToDto(record: UserProfileRecord) {
+  return {
+    uid: record.uid,
+    email: record.email,
+    displayName: record.displayName,
+    photoURL: record.photoURL,
+    role: record.role,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+app.get('/v1/users/me', requireBackendAuth, async (req: AuthenticatedRequest, res: Response) => {
+  if (!requireUserProfileStore(res)) return;
+  const callerId = getAuthenticatedCallerId(req, res);
+  if (!callerId) return;
+  try {
+    const record = await getUserProfile(callerId);
+    if (!record) {
+      res.status(404).json({ error: 'Profile not found.' });
+      return;
+    }
+    res.status(200).json(profileToDto(record));
+  } catch (error) {
+    log('warn', 'user_profile_get_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'get error' });
+    res.status(500).json({ error: 'Failed to read user profile.' });
+  }
+});
+
+app.put('/v1/users/me', requireBackendAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const parsed = OwnProfileSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid user profile.' });
+    return;
+  }
+  if (!requireUserProfileStore(res)) return;
+  const callerId = getAuthenticatedCallerId(req, res);
+  if (!callerId) return;
+  try {
+    const record = await upsertOwnProfile({
+      uid: callerId,
+      email: parsed.data.email,
+      displayName: parsed.data.displayName,
+      photoURL: parsed.data.photoURL,
+    });
+    res.status(200).json(profileToDto(record));
+  } catch (error) {
+    log('warn', 'user_profile_put_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'put error' });
+    res.status(500).json({ error: 'Failed to update user profile.' });
+  }
+});
+
+app.put('/v1/users/:uid/role', requireBackendAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const parsed = RoleUpdateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid role update.' });
+    return;
+  }
+  if (!requireUserProfileStore(res)) return;
+  const callerId = getAuthenticatedCallerId(req, res);
+  if (!callerId) return;
+  if (!(await requireAdminRole(callerId, res))) return;
+  const rawUid = req.params.uid;
+  const targetUid = typeof rawUid === 'string' ? rawUid : Array.isArray(rawUid) ? rawUid[0] : undefined;
+  if (!targetUid) {
+    res.status(400).json({ error: 'Missing target uid.' });
+    return;
+  }
+  try {
+    const updated = await setUserRole(targetUid, parsed.data.role as UserRole);
+    if (!updated) {
+      res.status(404).json({ error: 'Profile not found.' });
+      return;
+    }
+    res.status(200).json(profileToDto(updated));
+  } catch (error) {
+    log('warn', 'user_role_update_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'role update error' });
+    res.status(500).json({ error: 'Failed to update user role.' });
   }
 });
 
@@ -2000,6 +2141,8 @@ mountWebApp(app, { isDev: appEnv === 'dev' });
 void initAuditStore().catch((error) => log('warn', 'audit_store_init_failed', { error: error instanceof Error ? error.message : 'init error' }));
 // Same pattern for the app_config table that backs governance + system config.
 void initConfigStore().catch((error) => log('warn', 'config_store_init_failed', { error: error instanceof Error ? error.message : 'init error' }));
+// And the user_profiles table that backs /v1/users/me + the admin role check.
+void initUserProfileStore().catch((error) => log('warn', 'user_profile_store_init_failed', { error: error instanceof Error ? error.message : 'init error' }));
 
 app.use((_req: Request, res: Response) => {
   res.status(404).json({ error: 'Not found.' });

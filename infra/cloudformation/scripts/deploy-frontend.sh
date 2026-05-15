@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
+# STALE — Phase 4 architecture mismatch. The analyst console is server-rendered
+# by the gateway now (services/gateway/), not a static SPA. `npm run build`
+# emits dist/client/ + dist/server/; only the client half belongs on S3, and
+# the analyst console isn't served from S3 at all. Don't run this against
+# the current 03-frontend.yml stack until the open decision in
+# infra/cloudformation/dev/README.md lands.
 set -euo pipefail
 
 STACK_NAME="${STACK_NAME:-counter-spy-frontend-dev}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
-BUILD_DIR="${BUILD_DIR:-dist}"
+BUILD_DIR="${BUILD_DIR:-dist/client}"
+
+echo "WARN: deploy-frontend.sh is STALE post-Phase-4. See infra/cloudformation/dev/README.md." >&2
 
 aws_args=(--region "$AWS_REGION")
 

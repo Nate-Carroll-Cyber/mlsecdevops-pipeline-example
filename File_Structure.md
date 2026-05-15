@@ -135,8 +135,7 @@ counter-spy.ai/
 │
 ├── 🐳 docker-compose.demo.yml            # Demo stack: gateway + sam-spade-service + ctf-frontend + postgres + otel
 ├── 🐳 docker-compose.sam-spade.yml       # Standalone sam-spade-service (profile: sam-spade)
-├── 🐳 Dockerfile.ctf-frontend            # CTF frontend image
-├── 🐳 Dockerfile.frontend-demo           # (deprecated — analyst console is served by the gateway)
+├── 🐳 Dockerfile.ctf-frontend            # CTF frontend image (Vite dev today; production build is a Phase-4 follow-up)
 │
 ├── otel/                                 # OpenTelemetry collector config for the demo stack
 ├── seeds/pgvector/                       # Instruction-monitor seed snapshots (`core.json`, etc.)

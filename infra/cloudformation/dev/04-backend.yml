@@ -1,4 +1,11 @@
 AWSTemplateFormatVersion: "2010-09-09"
+# Phase 4 follow-up: this template predates the server-hosted rewrite. The
+# gateway image now ALSO serves the SSR analyst console (was a separate
+# static S3 stack), the Sam Spade CTF is its own service on port 18120, and
+# the gateway requires Postgres + admin-gate env wiring. See
+# infra/cloudformation/dev/README.md for the open decisions (Postgres
+# provider, auth model, whether 03-frontend.yml stays for CTF or is dropped)
+# before promoting this to a canonical deploy target.
 Description: Counter-Spy.ai dev API Gateway, internal ALB, and ECS Fargate backend.
 
 Parameters:

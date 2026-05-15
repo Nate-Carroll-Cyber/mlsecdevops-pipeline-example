@@ -1,5 +1,13 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Counter-Spy.ai dev static frontend on private S3 and CloudFront.
+# STALE — Phase 4 architecture mismatch. The analyst console is now server-
+# rendered by the gateway (services/gateway/, see Technical/ARCHITECTURE.md).
+# This template provisions a static SPA bucket that the analyst console no
+# longer needs. Open decision (per infra/cloudformation/dev/README.md):
+# delete this stack OR repurpose for the standalone CTF frontend once
+# ctf-frontend/ has a production Vite build. Do NOT deploy as-is.
+Description: |
+  Counter-Spy.ai dev static frontend on private S3 and CloudFront.
+  STALE post-Phase-4 — see README.md for the open architectural decision.
 
 Parameters:
   Environment:

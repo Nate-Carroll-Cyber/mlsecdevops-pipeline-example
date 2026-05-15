@@ -327,6 +327,141 @@ Refresh `README.md`, `Technical/ARCHITECTURE.md`, `Technical/LOCAL_DEVELOPMENT.m
 
 ---
 
+## Auth-model migration: Firebase Auth → Auth0 — PLANNED, NOT STARTED
+
+> **User decision (2026-05-15):** drop Firebase entirely and adopt **Auth0 Free** as the identity provider. Keep Local Review Mode as the offline bypass. Scope it now in this section, build later.
+
+### Why now
+
+Phase 3 step 4 (5/5) deleted `firestore.rules`, which means Firestore is no longer protecting any data — but the gateway is still using the shared `INTERCEPT_BEARER_TOKEN` plus a spoofable `x-counter-spy-user-id` header for identity. The admin gate added in step 3 (3/5) trusts that header without verification. A leaked bearer token currently equals full takeover. The Auth0 migration adds real per-request identity verification (signed JWTs against the Auth0 tenant's JWKS), turning the admin gate into a meaningful defense-in-depth layer for the first time.
+
+### Target shape
+
+- **Identity provider:** Auth0 Free tier (`https://manage.auth0.com`). Auth0 hosts the login page, owns OIDC, mints signed JWTs.
+- **Frontend SDK:** `@auth0/auth0-spa-js` (lightweight; the React-specific `@auth0/auth0-react` is also viable if we want a context provider).
+- **Backend verification:** `jose` library for JWT/JWS/JWK primitives (modern, well-maintained, smaller dep tree than `jsonwebtoken` + `jwks-rsa`). Verify locally against a cached JWKS — *not* per-request calls to Auth0.
+- **Identity surface contract:**
+  - Browser does OIDC redirect/popup against Auth0 → receives `id_token` + `access_token`.
+  - Browser attaches `Authorization: Bearer <access_token>` on every `/v1/*` request.
+  - Gateway verifies the JWT signature against the cached JWKS, validates `iss` (tenant URL), `aud` (API identifier), `exp`, and `sub` (the verified uid).
+  - Gateway sets `req.auth.uid = claims.sub`; `getAuthenticatedCallerId` returns that uid.
+  - The `x-counter-spy-user-id` header is **ignored** (or rejected with 400 in strict mode) — defense-in-depth.
+- **`user_profiles` table:** unchanged. `uid` PK is now the Auth0 `sub` claim (typically `auth0|<id>` or `google-oauth2|<id>`). First sign-in materializes the row via PUT `/v1/users/me` exactly like today.
+- **Local Review Mode:** unchanged. Bypasses Auth0, sets in-memory `local-review-user` profile with `role='admin'`, never calls `/v1/users/me` or `/v1/policies`. Critical for offline demos and CI smoke without an Auth0 tenant.
+
+### Auth0 tenant configuration (manual, before any code lands)
+
+1. **Create tenant** (e.g., `counter-spy-dev.us.auth0.com` — pick the region closest to your AWS dev account).
+2. **Create a Single Page Application:**
+   - Allowed Callback URLs: `http://localhost:3000`, `http://localhost:18080`, `https://app.cyber-spy.ai` (or the eventual prod domain).
+   - Allowed Logout URLs: same set.
+   - Allowed Web Origins: same set (needed for silent token renewal).
+   - Refresh Token Rotation: **enabled** (use refresh tokens instead of silent iframe for token refresh; more robust against third-party cookie restrictions).
+   - Refresh Token Expiration: rotating, 30-day absolute lifetime.
+3. **Create an API** (separate Auth0 resource):
+   - Identifier: e.g., `https://api.counter-spy.ai` (this becomes the `aud` claim — does NOT need to be a real reachable URL, just unique).
+   - Signing Algorithm: RS256.
+   - RBAC: enabled (we'll define `read:audit_logs`, `write:governance`, `write:policies`, etc. permissions later; for now keep the admin gate role-based out of `user_profiles.role`).
+4. **Optional: Enable Google social connection** (mirrors the current Firebase Google sign-in UX).
+5. **Optional: Database connection** (email + password fallback for non-Google users in early demos).
+
+Tenant config values get written into `.env.demo.local` (for the demo stack) and a future `infra/cloudformation/dev/02-auth.yml` rewrite (for AWS).
+
+### File-by-file migration plan
+
+**Frontend additions:**
+- `src/lib/auth.ts` (new) — wraps `@auth0/auth0-spa-js`'s `createAuth0Client`. SSR-safe (lazy init on `typeof window !== 'undefined'`). Exposes:
+  - `getAuth0Client(): Promise<Auth0Client | null>` — returns null under SSR.
+  - `getAccessToken(): Promise<string | null>` — calls `client.getTokenSilently()`; null when not authenticated or under SSR.
+  - `getUserProfile(): Promise<{ sub, email, name, picture, … } | null>` — calls `client.getUser()`.
+  - `loginWithPopup() / loginWithRedirect()` — pick one based on Phase 0 callback-URL config.
+  - `logout({ logoutParams: { returnTo: window.location.origin } })`.
+
+**Frontend changes (App.tsx + helpers):**
+- Replace the `onAuthStateChanged` effect with a new effect keyed on `isAuthenticated` (subscription to Auth0 client state). On `true` → fetch profile from Auth0 + materialize via `PUT /v1/users/me` (existing logic). On `false` → `setUser(null)` + `setProfile(null)`.
+- `handleLogin` → `loginWithPopup()` (or redirect — decide based on Auth0 SPA UX preference).
+- `handleLogout` → `logout({ logoutParams: { returnTo: ... } })`.
+- The user object shape changes: `u.uid` → `auth0User.sub`; `u.email` → `auth0User.email`; `u.displayName` → `auth0User.name`; `u.photoURL` → `auth0User.picture`.
+- `handleLocalReviewMode` — **unchanged**.
+
+**Frontend changes (`src/lib/backendApi.ts`):**
+- `getProtectedHeaders(callerUserId?)` currently reads `VITE_BACKEND_BEARER_TOKEN` at module load. Replace with: call `getAccessToken()` (from `src/lib/auth.ts`) at request time, fall back to the static `VITE_BACKEND_BEARER_TOKEN` only when in Local Review Mode + `APP_ENV=dev`.
+- Drop the `x-counter-spy-user-id` header entirely — the verified uid comes from the gateway's JWT decode, not from the client.
+
+**Backend additions:**
+- `packages/backend-shared/src/auth/jwtVerify.ts` (new) — exports `createJwtAuthMiddleware({ domain, audience, allowLocalReview })`. Returns Express middleware that:
+  - Reads `Authorization: Bearer <token>`.
+  - Verifies signature against the cached JWKS from `https://${domain}/.well-known/jwks.json`. Uses `jose.createRemoteJWKSet({ cacheMaxAge, cooldownDuration })`.
+  - Validates `iss === \`https://${domain}/\``, `aud === audience`, `exp` not expired.
+  - On success: sets `req.auth = { uid: claims.sub, claims }`. On failure: 401 with structured error.
+  - If `allowLocalReview` is enabled AND the env is `dev` AND the token equals a configured `LOCAL_REVIEW_STATIC_TOKEN`, bypass verification with a synthetic `req.auth = { uid: 'local-review-user', claims: {} }` — keeps CI smoke + Local Review Mode working without an Auth0 tenant.
+- Add `npm install --save jose` in `packages/backend-shared/`.
+
+**Backend changes (`packages/backend-shared/src/auth.ts`):**
+- `createBackendAuthMiddleware(token: string)` currently does a string-compare against the shared bearer. Replace its body with a call to `createJwtAuthMiddleware` when `AUTH0_DOMAIN` + `AUTH0_AUDIENCE` are set, falling back to the static check only when both are unset (which keeps tests + Local Review Mode bootstrap working).
+- `getAuthenticatedCallerId(req)` currently reads `x-counter-spy-user-id`. Replace with `req.auth?.uid`. Header reads go away.
+
+**Backend changes (`services/gateway/src/server.ts` + `services/sam-spade/src/server.ts`):**
+- Read `AUTH0_DOMAIN` + `AUTH0_AUDIENCE` env in the existing `EnvSchema`. When both are set, the JWT path is mandatory; when both are unset (test bootstrap), fall back to the static bearer.
+- No route handlers need changing — they already call `getAuthenticatedCallerId(req, res)` which now returns the verified uid.
+
+**Test changes:**
+- `services/gateway/test/securityRoutes.test.ts` + `services/sam-spade/test/samSpadeRoutes.test.ts` currently send `x-counter-spy-user-id: <whatever>`. Replace with: pre-sign a test JWT using a test private key, set `AUTH0_DOMAIN`/`AUTH0_AUDIENCE` to a test value, mount a local mock JWKS endpoint serving the matching public key, and put the signed token in `Authorization: Bearer`. The `jose` library has `SignJWT` for this.
+- New `packages/backend-shared/test/jwtVerify.test.ts`: valid token → 200, expired → 401, bad signature → 401, wrong `aud` → 401, wrong `iss` → 401, missing `sub` → 401, local-review bypass works only in `dev`.
+
+**Retirement (file deletions):**
+- `src/lib/firebase.ts` — gone.
+- `firebase-applet-config.json` — gone.
+- `firebase-blueprint.json` — gone (or kept as architectural reference if you want; it's already not loaded by any code).
+- `package.json`: drop `firebase` (and any leftover `firebase-tools` dev-dep mentions).
+- `vite.config.ts`: drop the `firebase-vendor` chunk.
+- `Technical/SBOM.md`: drop the Firebase dependency entries.
+
+**Documentation updates:**
+- `CLAUDE.md`: the **Persistence** section already says firebase.ts is auth-only; update to say Auth0 is the identity provider, `src/lib/auth.ts` is the wrapper.
+- `Technical/ARCHITECTURE.md` §5.1: rewrite the **Authentication** subsection. Bearer-token model → Auth0 JWT model. Document the verified-uid contract.
+- `Technical/LOCAL_DEVELOPMENT.md`: add an **Auth0 tenant setup** subsection before the Docker demo. Update the smoke-curl examples to obtain an access token via `curl https://${AUTH0_DOMAIN}/oauth/token -d 'grant_type=client_credentials' …` (for service-to-service smoke against an M2M client) or fall back to the local-review static token (for everything else).
+- `OPERATIONS_GUIDE.MD`: update the §1.1 Operator Roles note to mention that the uid stored in `user_profiles` is the Auth0 `sub` claim, not a Firebase UID. Also note the bootstrap-admin flow uses Auth0 `sub`s now (operator signs in via Auth0 once, then a real admin promotes them; only the first admin still needs the psql one-shot).
+- `infra/cloudformation/dev/02-auth.yml`: either delete (Auth0 is now the identity provider) or repurpose as a Cognito *fallback* path for AWS-internal-only environments.
+- `infra/cloudformation/dev/04-backend.yml`: ECS task gains `AUTH0_DOMAIN` + `AUTH0_AUDIENCE` env vars; drops `INTERCEPT_BEARER_TOKEN`.
+
+### Commit ordering
+
+A 6-commit migration to keep each commit reviewable:
+
+1. **Add Auth0 deps + frontend client wiring (no breaking changes).** `npm install @auth0/auth0-spa-js`. Add `src/lib/auth.ts` alongside `src/lib/firebase.ts`. App.tsx still uses Firebase; Auth0 client lives unwired. Lint + tests green.
+2. **Backend JWT verification middleware (behind feature flag).** Add `jose`, new `packages/backend-shared/src/auth/jwtVerify.ts`, gate behind `AUTH0_DOMAIN` + `AUTH0_AUDIENCE` env. Existing tests stay green (env unset → fall back to bearer). Add `jwtVerify.test.ts`.
+3. **Frontend cut over to Auth0.** Rewrite App.tsx auth-state effect, `handleLogin`/`handleLogout`, `backendApi.getProtectedHeaders`. Keep Firebase imports + lib/firebase.ts in tree for one more commit. Local Review Mode unchanged.
+4. **Backend cut over to JWT-only.** Set `AUTH0_DOMAIN` + `AUTH0_AUDIENCE` required (unless `APP_ENV=test`). Drop `x-counter-spy-user-id` header reads. Rewrite test setup to use signed test JWTs + mock JWKS endpoint. Drop the `LOCAL_REVIEW_STATIC_TOKEN` bypass to a strict APP_ENV=dev-only path.
+5. **Retire Firebase.** Delete `src/lib/firebase.ts`, `firebase-applet-config.json`, `firebase-blueprint.json`, the `firebase` + `firebase-tools` deps, the `firebase-vendor` Vite chunk. Update CLAUDE.md, ARCHITECTURE.md, LOCAL_DEVELOPMENT.md, OPERATIONS_GUIDE.MD, SBOM.md, File_Structure.md.
+6. **CloudFormation alignment.** Update `04-backend.yml` for Auth0 env vars + retired bearer; either delete `02-auth.yml` or repurpose as a Cognito-fallback path.
+
+Each commit lints + tests green standalone.
+
+### Risks + open sub-decisions
+
+- **Auth0 free-tier rate limits.** Auth0's `/.well-known/jwks.json` and `/oauth/token` endpoints have per-tenant rate limits. Mitigation: `jose.createRemoteJWKSet` caches with `cacheMaxAge: 600_000` (10min) and `cooldownDuration: 30_000` to throttle refetches on signature mismatch. **Do NOT call Auth0 per request** — verify locally against cached keys. This matters for bulk-ingest paths where the gateway sees hundreds of requests/sec.
+- **Existing audit_logs `userId` rows reference Firebase UIDs.** A demo with pre-Auth0 audit history won't have matching `user_profiles` rows after the cutover. Two recovery paths: (a) re-bootstrap the demo from empty (the durable Postgres volume needs `docker volume rm` once), or (b) write a one-time SQL migration mapping `audit_logs.userId` from Firebase UIDs to Auth0 sub claims via email. (a) is simpler for a dev environment.
+- **First-admin bootstrap.** Same chicken-and-egg as before: first Auth0 user signs in → uid materialized as `developer` → can't promote themselves. Recipe stays the same psql one-shot, but the uid arg is the Auth0 `sub` claim, not a Firebase UID. **Possible improvement:** an Auth0 Action that, on first user signup, calls a backend endpoint that flags them admin if the `user_profiles` table is empty. Skip for v1.
+- **MFA.** Auth0 free tier supports MFA (TOTP, push). Decide whether to enforce. Default: off for dev; admin role optionally enforced for prod.
+- **Token refresh strategy.** Refresh Token Rotation requires the Auth0 SPA app to be configured for it. The `@auth0/auth0-spa-js` client handles the rotation automatically with `useRefreshTokens: true` in the constructor.
+- **JWKS endpoint reachability under air-gap demo.** The static `LOCAL_REVIEW_STATIC_TOKEN` bypass handles this. Make sure it's clearly off-by-default in production (`APP_ENV=dev` only, fail loud if both bypass + non-dev).
+- **Existing test suite assumes spoofable headers.** Commit 4 rewrites every test that sends `x-counter-spy-user-id` to instead sign a test JWT. ~15 files touch this header today — the test diff will be bigger than the production-code diff.
+
+### What stays exactly the same
+
+- `user_profiles` table schema + the `requireAdminRole` middleware logic. The role-check primitive doesn't care where the uid comes from — it just reads `user_profiles.role`.
+- The four admin-gated routes (`PUT /v1/governance`, `/v1/system-config`, `POST/PATCH/DELETE /v1/policies`, `PUT /v1/users/:uid/role`). Behavior identical; the uid source becomes a verified claim.
+- All other gateway routes' contract — they don't care about the auth backend.
+- Local Review Mode UX.
+- The Postgres durable-volume work from Phase 3 step 4 (5/5).
+
+### Build/verify after each commit
+
+`npm run lint && npm run gateway:test && npm run sam-spade:test && npm run build && npm run gateway:build`. Final verification: rebuild the demo stack with `AUTH0_DOMAIN` + `AUTH0_AUDIENCE` set in `.env.demo.local`, sign in through the analyst console with a real Auth0 account, confirm the admin gate fires for non-admins and allows for admins. Project memory: `server-hosted-rewrite.md` + a new `auth0-migration.md` covering tenant config + secrets.
+
+---
+
 ## Current Runtime Shape
 
 - The Docker demo stack is the active local test path:

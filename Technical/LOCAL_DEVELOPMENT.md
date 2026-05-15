@@ -211,9 +211,36 @@ This starts:
 
 The frontend uses Vite's proxy layer inside the container to reach the backend cleanly, so browser requests stay same-origin for `/v1/*` and `/healthz`.
 
-The instruction-monitor database is intentionally ephemeral in the demo stack. `counter-spy-postgres` stores `/var/lib/postgresql/data` on tmpfs, so `docker compose --env-file .env.demo.local -f docker-compose.demo.yml up --build --force-recreate -d` recreates a clean database. The gateway initializes the pgvector schema lazily on first use. Sam Spade session data is different: the standalone `counter-spy-sam-spade-service` keeps it in a named Docker SQLite volume so CTF sessions can survive normal gateway/frontend rebuilds.
+The Postgres data directory now lives on the named Docker volume `counter_spy_postgres_data` (Phase 3 step 4 retired Firestore; Postgres backs all long-lived state — audit logs, governance config, system config, user profiles, KB policies, and the instruction-similarity corpus). A normal `docker compose up --build -d` keeps every row across rebuilds. To wipe for a clean-slate test run, stop the stack and remove the volume explicitly:
 
-The Docker demo reads local-only database secrets from `.env.demo.local`. Set both `POSTGRES_PASSWORD` and `INSTRUCTION_MONITOR_DATABASE_URL` there, using the same password value, and pass the file to Compose with `--env-file .env.demo.local` so the Postgres container receives only the database password it needs. The compose stack does not hard-code the pgvector password, binds Postgres only to localhost, initializes the tmpfs database with SCRAM authentication and data checksums, and applies defensive runtime settings for connection logging, DDL logging, slow-query logging, statement timeout, and max connections.
+```bash
+docker compose --env-file .env.demo.local -f docker-compose.demo.yml down
+docker volume rm counterspyclaudeai_counter_spy_postgres_data
+```
+
+(Volume name uses the Compose project prefix; run `docker volume ls | grep postgres` if the prefix differs in your clone.) The next `up` will recreate the volume + reinitialize Postgres via `POSTGRES_INITDB_ARGS`, and the gateway will lazy-create every table on first hit. After a wipe you'll need to redo the first-time admin bootstrap (see next subsection). Sam Spade session data lives in its own `sam_spade_data` volume on the standalone CTF service.
+
+The Docker demo reads local-only database secrets from `.env.demo.local`. Set both `POSTGRES_PASSWORD` and `INSTRUCTION_MONITOR_DATABASE_URL` there, using the same password value, and pass the file to Compose with `--env-file .env.demo.local` so the Postgres container receives only the database password it needs. The compose stack does not hard-code the password, binds Postgres only to localhost, initializes the database with SCRAM authentication and data checksums, and applies defensive runtime settings for connection logging, DDL logging, slow-query logging, statement timeout, and max connections.
+
+### First-time admin bootstrap
+
+After Phase 3 step 4, `PUT /v1/governance`, `PUT /v1/system-config`, `POST/PATCH/DELETE /v1/policies`, and `PUT /v1/users/:uid/role` are gated by `requireAdminRole`, which checks `user_profiles.role = 'admin'`. The default role for a freshly materialized profile is `developer`, so on a clean database **every operator is locked out of those routes** until at least one admin row exists. The fix is a one-shot SQL insert through the running Postgres container:
+
+```bash
+# 1. Confirm the Postgres user / db (they come from .env.demo.local):
+docker exec counter-spy-postgres env | grep POSTGRES_ | grep -v PASSWORD
+# 2. Bootstrap an admin row. ON CONFLICT keeps it idempotent.
+docker exec -i counter-spy-postgres psql -U counter_spy -d counter_spy -c \
+  "INSERT INTO user_profiles (uid, email, display_name, role)
+   VALUES ('bootstrap-admin', 'admin@example.com', 'Bootstrap Admin', 'admin')
+   ON CONFLICT (uid) DO UPDATE SET role='admin', updated_at=now();"
+```
+
+psql will prompt for the SCRAM password (from `POSTGRES_PASSWORD` in `.env.demo.local`). If the `user_profiles` table doesn't exist yet, hit `GET /v1/users/me` once first — that triggers `initUserProfileStore()` on the gateway, which lazy-creates the table.
+
+Once `bootstrap-admin` exists you can use it as the `x-counter-spy-user-id` for the admin-only smoke curls below to promote a real operator's profile (sent via the UI's auth-state effect into `user_profiles`) to admin. After that, retire the bootstrap row if you want: `DELETE FROM user_profiles WHERE uid='bootstrap-admin'`.
+
+The four roles (`developer` / `analyst` / `engineer` / `admin`) are documented in [Operator roles](../OPERATIONS_GUIDE.MD).
 
 Useful instruction-monitor env vars:
 
@@ -388,6 +415,89 @@ curl -i \
 ```
 
 Expected result is HTTP `200` with Spanish output in the response body. This path is also manual-only in the Playground UI.
+
+### User profile and admin gate smoke
+
+After [First-time admin bootstrap](#first-time-admin-bootstrap) is done you can exercise the admin gate end-to-end. The `x-counter-spy-user-id` header determines whose profile the route operates on (and whose role is checked for admin gates), so a single bearer token can stand in for multiple operators during smoke.
+
+```bash
+# 1. Caller with no profile row yet → 404 (the UI's auth-state effect uses
+#    this signal to PUT a default-shaped profile and materialize the row).
+curl -i http://127.0.0.1:18080/v1/users/me \
+  -H "authorization: Bearer $INTERCEPT_BEARER_TOKEN" \
+  -H "x-counter-spy-user-id: smoke-user-1"
+# Expected: HTTP 404 {"error":"Profile not found."}
+
+# 2. Materialize the row (default role=developer via the column default).
+curl -i -X PUT http://127.0.0.1:18080/v1/users/me \
+  -H "authorization: Bearer $INTERCEPT_BEARER_TOKEN" \
+  -H "x-counter-spy-user-id: smoke-user-1" \
+  -H "content-type: application/json" \
+  -d '{"email":"smoke@example.com","displayName":"Smoke User","photoURL":""}'
+# Expected: HTTP 200 with role=developer.
+
+# 3. As a non-admin, try to mutate governance — admin gate fires.
+curl -i -X PUT http://127.0.0.1:18080/v1/governance \
+  -H "authorization: Bearer $INTERCEPT_BEARER_TOKEN" \
+  -H "x-counter-spy-user-id: smoke-user-1" \
+  -H "content-type: application/json" \
+  -d '{"isHitlActive":false,"isGlobalPause":false,"entropyThreshold":4.0,"syntacticThreshold":65}'
+# Expected: HTTP 403 {"error":"Admin role required."}
+
+# 4. From bootstrap-admin, promote smoke-user-1 to admin.
+curl -i -X PUT http://127.0.0.1:18080/v1/users/smoke-user-1/role \
+  -H "authorization: Bearer $INTERCEPT_BEARER_TOKEN" \
+  -H "x-counter-spy-user-id: bootstrap-admin" \
+  -H "content-type: application/json" \
+  -d '{"role":"admin"}'
+# Expected: HTTP 200 with role=admin.
+
+# 5. Re-run step 3 — should now 200.
+
+# 6. Self-escalation guard: smuggle role into PUT /v1/users/me.
+curl -i -X PUT http://127.0.0.1:18080/v1/users/me \
+  -H "authorization: Bearer $INTERCEPT_BEARER_TOKEN" \
+  -H "x-counter-spy-user-id: smoke-user-1" \
+  -H "content-type: application/json" \
+  -d '{"email":"x@y","displayName":"x","photoURL":"","role":"admin"}'
+# Expected: HTTP 400 {"error":"Invalid user profile."} — the strict() schema
+# rejects the extra field BEFORE the store/admin checks even fire.
+```
+
+### Knowledge-base policies smoke
+
+```bash
+# 1. Empty list on a fresh DB. The analyst console will then POST defaults
+#    using deterministic ids (default-N + golden-set) so concurrent admins
+#    don't duplicate rows.
+curl -i http://127.0.0.1:18080/v1/policies \
+  -H "authorization: Bearer $INTERCEPT_BEARER_TOKEN" \
+  -H "x-counter-spy-user-id: smoke-user-1"
+# Expected: HTTP 200 {"policies":[]}
+
+# 2. Create with a fixed id (re-running is a no-op — ON CONFLICT keeps the
+#    original row). Requires admin.
+curl -i -X POST http://127.0.0.1:18080/v1/policies \
+  -H "authorization: Bearer $INTERCEPT_BEARER_TOKEN" \
+  -H "x-counter-spy-user-id: smoke-user-1" \
+  -H "content-type: application/json" \
+  -d '{"id":"default-0","title":"Test","date":"2026-05-15","content":"# test","isDefault":true}'
+# Expected: HTTP 200 with the inserted policy.
+
+# 3. Patch fields (admin-gated).
+curl -i -X PATCH http://127.0.0.1:18080/v1/policies/default-0 \
+  -H "authorization: Bearer $INTERCEPT_BEARER_TOKEN" \
+  -H "x-counter-spy-user-id: smoke-user-1" \
+  -H "content-type: application/json" \
+  -d '{"content":"# patched"}'
+
+# 4. Golden-set DELETE is refused intrinsically — the guard runs BEFORE the
+#    store / admin checks, so this 409s even if you wipe the DB.
+curl -i -X DELETE http://127.0.0.1:18080/v1/policies/golden-set \
+  -H "authorization: Bearer $INTERCEPT_BEARER_TOKEN" \
+  -H "x-counter-spy-user-id: smoke-user-1"
+# Expected: HTTP 409 {"error":"Cannot delete the golden-set policy."}
+```
 
 ## Verification
 

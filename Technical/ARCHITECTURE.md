@@ -151,8 +151,30 @@ Future external services would authenticate with the Counter-Spy gateway using *
     *   **TTL:** Token lifespan and refresh cycles are governed by the Identity Provider's policy.
 
 Current Beta protected routes use a shared `INTERCEPT_BEARER_TOKEN` static bearer credential. JWT/OIDC validation is not implemented in the backend yet.
-*   **Current Beta Note:** Protected execution routes require the shared backend bearer token when they are called. `INTERCEPT_BEARER_TOKEN` configures the backend-side credential, and browser gateway clients send the matching `VITE_BACKEND_BEARER_TOKEN` value with `/v1/intercept`, `/v1/translate`, `/v1/instruction-monitor/reviewed-adversarial`, and `/v1/ctf/sam-spade/*` requests.
+*   **Current Beta Note:** Protected execution routes require the shared backend bearer token when they are called. `INTERCEPT_BEARER_TOKEN` configures the backend-side credential, and browser gateway clients send the matching `VITE_BACKEND_BEARER_TOKEN` value with `/v1/intercept`, `/v1/analyze*`, `/v1/translate`, `/v1/audit-logs`, `/v1/governance`, `/v1/system-config`, `/v1/users/*`, `/v1/policies`, `/v1/metrics/aggregate`, `/v1/instruction-monitor/*`, `/v1/ctf/review-artifacts`, and all `/v1/ctf/sam-spade/*` requests.
+*   **Admin role gate (Phase 3 step 4):** Beyond the bearer check, four route families also require the caller's `user_profiles.role` to equal `'admin'`: `PUT /v1/governance`, `PUT /v1/system-config`, `POST/PATCH/DELETE /v1/policies`, and `PUT /v1/users/:uid/role`. The check is implemented by `requireAdminRole` in [services/gateway/src/server.ts](../services/gateway/src/server.ts), which reads `user_profiles.role` via `getCallerRole()` and 403s unless the caller is an admin. Ordering on those PUTs is `body-validate (400) → configStore (503) → userProfileStore (503) → caller-id (400) → admin (403)`, so a downed Postgres always surfaces as 503 — reviewers should not expect 403 before 503 when the DB is unreachable. A caller with no profile row at all is treated as "not admin" (matches the prior Firestore-rules posture). First-time bootstrap of an admin row is documented in [Technical/LOCAL_DEVELOPMENT.md](LOCAL_DEVELOPMENT.md#first-time-admin-bootstrap).
+*   **Self-escalation guard:** `PUT /v1/users/me` accepts only `{email, displayName, photoURL}` and rejects unknown fields via `.strict()`; the store's `upsertOwnProfile` deliberately doesn't take a role argument and the upsert SQL leaves the existing `role` column unchanged on conflict, so this endpoint cannot be used to promote oneself even if the schema check were bypassed.
 *   **Additional Future Support:** Integration with **AWS IAM SigV4** is planned for service-to-service communication within VPC environments.
+
+### 5.1.1 Route map (current gateway surface)
+
+| Method + Path | Auth | Notes |
+| :--- | :--- | :--- |
+| `GET /healthz` | none | Container health probe. |
+| `POST /v1/intercept` | bearer + caller-id | Governed prompt path: sanitizer → instruction monitor → safeguard judge → responder. |
+| `POST /v1/analyze` / `POST /v1/analyze/output` / `POST /v1/analyze/full` | bearer | Deterministic sanitizer + analysis (no LLM call). |
+| `GET\|POST /v1/analyze/obfuscate` / `POST /v1/analyze/normalize` | bearer | Obfuscation lab + heuristic spell normalize. |
+| `POST /v1/translate` | bearer | Manual Lara Translate proxy. |
+| `POST /v1/audit-logs` / `GET /v1/audit-logs` / `PATCH /v1/audit-logs/:id` / `DELETE /v1/audit-logs` | bearer + caller-id | Postgres-backed audit trail (Phase 3 step 4 step 2). |
+| `POST /v1/metrics/aggregate` | bearer + caller-id | Confusion-matrix + anomaly aggregation over audit rows. |
+| `GET\|PUT /v1/governance` | bearer + caller-id + **admin** (PUT only) | HITL toggle, Global Pause, entropy/syntactic thresholds. |
+| `GET\|PUT /v1/system-config` | bearer + caller-id + **admin** (PUT only) | Safeguard / firewall / responder / Sam Spade prompts + blocked keywords / forbidden topics / regex rules / guardrails policy. |
+| `GET\|PUT /v1/users/me` | bearer + caller-id | Own profile read / upsert. `.strict()` schema blocks role smuggling. |
+| `PUT /v1/users/:uid/role` | bearer + caller-id + **admin** | Promote / demote another user. |
+| `GET\|POST\|PATCH\|DELETE /v1/policies[/:id]` | bearer + caller-id + **admin** (write only) | KB policies + golden-set. DELETE refuses `golden-set` id intrinsically (before any auth/store check). |
+| `POST /v1/instruction-monitor/reviewed-adversarial` / `GET /v1/instruction-monitor/records/:identifier` | bearer | pgvector instruction-similarity corpus + record lookup. |
+| `POST\|GET /v1/ctf/review-artifacts` | bearer + caller-id | Gateway-owned SQLite store the CTF frontend posts every turn's review artifact into. |
+| `POST /v1/ctf/sam-spade/*` | (routed to sam-spade-service) | Gateway 404s these now; CTF frontend talks to `counter-spy-sam-spade-service:18120` directly. |
 
 ### 5.2 Endpoint Specification
 `POST /v1/intercept`

@@ -25,7 +25,7 @@ Workspaces:
 | 🔬 **Lab** | `services/gateway/src/analysis/*.ts` | Syntactic-complexity scoring, prompt feature vectors, language-likelihood, the obfuscation lab (~24 transforms), heuristic spell-normalization. Reached via `/v1/analyze/full`, `/v1/analyze/obfuscate`, `/v1/analyze/normalize`. |
 | ⚔️ **Sword** | `services/gateway/src/server.ts` + `services/sam-spade/src/server.ts` (responder/safeguard provider calls via `packages/backend-shared/src/providers/`) | Production LLM inference (safeguard judge + downstream responder). Only receives sanitized payloads; `src/lib/gemini.ts` is a disabled browser stub. |
 | 📡 **Radar** | `src/lib/anomalyDetector.ts`, `src/lib/metrics.ts` | Z-Score anomaly detection + confusion-matrix metrics over audit logs (still client-side; moves server-side with the audit-log store in a later phase). |
-| 🔒 **Vault** | `firestore.rules` | Database-layer RBAC. Enforces integrity even if the client is compromised. |
+| 🔒 **Vault** | `services/gateway/src/config/userProfileStore.ts` + the `requireAdminRole` middleware in `services/gateway/src/server.ts` | Postgres-backed RBAC. The `user_profiles.role` CHECK constraint enumerates the legal roles; `requireAdminRole` gates every admin-only `/v1/*` write (governance config, system config, KB policies, role updates). Enforced server-side, so a compromised client cannot escalate. |
 
 **The cardinal rule:** no prompt reaches a production LLM (safeguard or responder) without first passing through `packages/backend-shared/src/security/sanitizer.ts`. The browser must not regain a local sanitization/analysis engine — keep all of it behind `/v1/analyze*`.
 
@@ -40,7 +40,7 @@ Workspaces:
 - `services/gateway/src/analysis/syntacticAnalyzer.ts` — Thresholds: Suspicious > 50, Adversarial > 90. Do not raise these without documented rationale.
 - `services/gateway/src/server.ts` — the `/v1/intercept` and `/v1/analyze*` route handlers and the safeguard/responder verdict contracts govern firewall/responder behavior. Do not relax them. Do not add a code path that serves prompts to a provider LLM without `sanitizePrompt` first. The standalone CTF surface (`services/sam-spade/src/server.ts`) follows the same contracts via the shared sanitizer/safeguard helpers.
 - `src/lib/policies.ts` — bundled MITRE/MCP-A2A safety policies (the hard-block phrases the console feeds into the Shield's blocked-keyword set). Do not weaken.
-- `firestore.rules` — RBAC rules. Do not broaden read/write permissions.
+- `services/gateway/src/server.ts` `requireAdminRole` + the `user_profiles.role` CHECK constraint in [services/gateway/src/config/userProfileStore.ts](services/gateway/src/config/userProfileStore.ts) — RBAC. Do not loosen the admin gate on `PUT /v1/governance`, `PUT /v1/system-config`, `POST/PATCH/DELETE /v1/policies`, or `PUT /v1/users/:uid/role` without explicit justification.
 
 **Entropy thresholds (do not modify without review):**
 
@@ -75,9 +75,10 @@ Do not add new dependencies without updating `Technical/SBOM.md`.
 ### SSR
 - The app is server-rendered (`src/entry-server.tsx` → `renderToString`) and hydrated (`src/entry-client.tsx`). Anything that touches `window`/`document`/`localStorage`/Firebase at module load or in a `useState` initializer must be SSR-safe (guarded with `typeof window !== 'undefined'`, or deferred to a `useEffect`). The two builds are `vite build` → `dist/client/` and `vite build --ssr src/entry-server.tsx` → `dist/server/`.
 
-### Firestore
-- Firestore (`src/lib/firebase.ts`) is client-only and lazily initialized (inert under SSR). It currently still backs audit logs / governance / policies; that data path moves server-side in a later phase.
-- Never write directly to Firestore from a component — always go through `src/lib/`.
+### Persistence
+- All durable data is in Postgres behind `/v1/*` gateway routes: audit logs (`audit_logs`), governance + system config (`app_config`), user profiles (`user_profiles`), KB policies (`kb_policies`), and the instruction-similarity corpus (`instruction_records` / `instruction_chunks`). Phase 3 step 4 retired Firestore.
+- `src/lib/firebase.ts` is **auth-only** now — it provides Firebase Google sign-in and the resulting uid. No Firestore client in the browser.
+- Never persist data from a component — always go through a Zod-validated client in [src/lib/backendApi.ts](src/lib/backendApi.ts).
 - The `sanitizedPrompt` field must never contain raw PII. The Shield always redacts before returning, so write what `/v1/analyze*` produced; do not reconstruct the raw prompt.
 
 ### React

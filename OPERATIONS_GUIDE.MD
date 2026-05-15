@@ -13,6 +13,24 @@ Counter-Spy.ai is an **Adversary-Aware Security Gateway**. It sits between untru
 
 As an Analyst or Administrator, you are the final decision-maker in the **Human-in-the-Loop (HITL)** cycle. Your primary goal is to maintain the balance between **System Resilience** (blocking attacks) and **User Experience** (minimizing false positives).
 
+### 1.1 Operator Roles
+
+Counter-Spy.ai stores each operator's role in the gateway's `user_profiles` table. There are four roles, enforced server-side by `requireAdminRole` (see [Technical/ARCHITECTURE.md §5.1](Technical/ARCHITECTURE.md#51-authentication)):
+
+| Role | What it can do | Default? |
+| :--- | :--- | :--- |
+| `developer` | Sign in; submit prompts through Analyst Chat / Playground / Bulk Ingest; read audit logs, metrics, and policies; promote audit rows to the Golden Set; review and re-classify their own work. **Cannot** edit governance, system config, or KB policies, and cannot change anyone's role. | Yes — every newly materialized profile lands here. |
+| `analyst` | Same scope as `developer` today. The role exists for forward compatibility (e.g. a future read-only / write-restricted analyst tier) but isn't differentiated from `developer` in the current build. | No |
+| `engineer` | Same scope as `developer` today. Placeholder for an "ops engineer" tier — same caveat as `analyst`. | No |
+| `admin` | All `developer` capabilities, **plus** edit governance (HITL toggle, Global Pause, entropy / syntactic thresholds), edit system configuration (safeguard / firewall / responder / Sam Spade prompts + blocked keywords / forbidden topics / regex rules / guardrails policy), create / edit / delete KB policies (the golden-set row is intrinsically protected from DELETE), and promote or demote any user's role. | No |
+
+The admin gate is back-applied to `PUT /v1/governance`, `PUT /v1/system-config`, `POST/PATCH/DELETE /v1/policies`, and `PUT /v1/users/:uid/role`. Non-admins receive HTTP 403 (`{"error":"Admin role required."}`) from those routes and a toast in the UI.
+
+**Role promotion is itself admin-gated**, so a fresh deployment with no admin row has nobody who can hand out admin. The first admin must be inserted directly into Postgres — see the **First-time admin bootstrap** subsection in [Technical/LOCAL_DEVELOPMENT.md](Technical/LOCAL_DEVELOPMENT.md#first-time-admin-bootstrap). After that, the bootstrap row can promote real operators via the UI (or `PUT /v1/users/:uid/role`) and itself be retired.
+
+> [!NOTE]
+> The role is stored in the gateway's database, not in Firebase Auth claims. A user who is `admin` on this deployment is not automatically `admin` on another deployment that shares the same Firebase project — each gateway maintains its own `user_profiles` table.
+
 ---
 
 ## 2. Daily Operations Checklist

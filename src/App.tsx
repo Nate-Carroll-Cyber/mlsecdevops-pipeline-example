@@ -13,14 +13,10 @@
  */
 // Import React and necessary hooks for state, side effects, refs, and memoization
 import React, { lazy, Suspense, useState, useEffect, useRef, useMemo, useCallback } from 'react';
-// Import Firebase configuration and utility functions
-import { 
-  auth, 
-  db, 
-  googleProvider, 
-  handleFirestoreError, 
-  OperationType 
-} from './lib/firebase';
+// Firebase Auth is the only piece of Firebase still in play — sign-in + uid.
+// Firestore retired in Phase 3 step 4 (5/5); all data lives in Postgres now
+// behind /v1/* endpoints.
+import { auth, googleProvider } from './lib/firebase';
 // Import Firebase Authentication functions and types
 import { 
   signInWithPopup, 
@@ -28,21 +24,6 @@ import {
   onAuthStateChanged, 
   User as FirebaseUser 
 } from 'firebase/auth';
-// Import Firestore functions for database operations. The audit-log collection
-// now lives in Postgres behind /v1/audit-logs (see backendApi imports below);
-// Firestore still backs governance config, the knowledge base, and user profiles.
-import {
-  doc,
-  setDoc,
-  getDoc,
-  collection,
-  addDoc,
-  serverTimestamp,
-  onSnapshot,
-  deleteDoc,
-  updateDoc,
-  getDocFromServer
-} from 'firebase/firestore';
 // Sanitization shapes/constants only — the deterministic Shield itself now runs
 // server-side (packages/backend-shared/src/security/sanitizer.ts via /v1/analyze); the browser no
 // longer ships the engine. See runPromptShield / runOutputShield below.
@@ -545,22 +526,6 @@ function buildObfuscationSummary(
     decodeTelemetry,
   };
 }
-
-// --- Connection Test ---
-// Asynchronous function to test the connection to Firestore on startup
-async function testConnection() {
-  try {
-    // Attempt to fetch a specific test document from the server
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    // If the error indicates the client is offline, log a warning
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error("Please check your Firebase configuration. ");
-    }
-  }
-}
-// Execute the connection test
-testConnection();
 
 // --- Constants ---
 // Local brand shield used in app chrome and authentication screens.
@@ -2651,8 +2616,7 @@ export default function App() {
       await observeReviewedAdversarialLog(targetLog, logId, resultantSeverity);
       toast.success(`Log marked as reviewed (${resultantSeverity})`);
     } catch (error) {
-      // Handle errors updating the log
-      handleFirestoreError(error, OperationType.UPDATE, `audit_logs/${logId}`);
+      console.error(`audit_logs PATCH /${logId} failed:`, error);
       toast.error('Failed to update log review status');
     }
   };
@@ -2981,7 +2945,7 @@ export default function App() {
         responderLatencyMs: auditEntry.responderLatencyMs ?? null,
       }, profile.uid);
     } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
+      console.error('audit_logs append failed:', error);
     }
   };
 
@@ -3073,8 +3037,7 @@ export default function App() {
           : `Audit logs cleared successfully (${removedCount} entries removed)`,
       );
     } catch (error) {
-      // Handle errors deleting the logs
-      handleFirestoreError(error, OperationType.DELETE, 'audit_logs');
+      console.error('audit_logs DELETE failed:', error);
       toast.error('Failed to clear audit logs');
     }
   };
@@ -3242,7 +3205,7 @@ export default function App() {
       clearLocalSessionArtifacts();
       toast.success(`Session purged successfully (${removedCount} audit entries removed)`);
     } catch (error) {
-      handleFirestoreError(error, OperationType.DELETE, 'session_purge');
+      console.error('session purge failed:', error);
       toast.error('Failed to purge session data');
     }
   };
@@ -3677,7 +3640,7 @@ export default function App() {
                 }, profile.uid);
               }
             } catch (error) {
-              handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
+              console.error('audit_logs append failed:', error);
             }
           }
           if (options?.source === 'bulk_ingest') {
@@ -3748,8 +3711,7 @@ export default function App() {
           }, profile.uid);
           }
 	        } catch (error) {
-	          // Handle errors creating the audit log
-	          handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
+	          console.error('audit_logs append failed:', error);
 	        }
 	      }
 	      await activateGlobalPause(`Automatic Global System Pause triggered by sanitization latency (${sanitization.latencyMs}ms).`);
@@ -3851,8 +3813,7 @@ export default function App() {
             setAuditLogs(prev => [createdAuditLog!, ...prev.filter((log) => log.id !== createdAuditLog!.id)]);
           }
         } catch (error) {
-          // Handle errors creating the audit log
-          handleFirestoreError(error, OperationType.CREATE, 'audit_logs');
+          console.error('audit_logs append failed:', error);
         }
       }
 

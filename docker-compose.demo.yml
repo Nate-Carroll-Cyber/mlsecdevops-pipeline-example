@@ -171,8 +171,20 @@ services:
       - "max_connections=100"
     ports:
       - "127.0.0.1:15432:5432"
-    tmpfs:
-      - /var/lib/postgresql/data
+    # Durable named volume. After Phase 3 step 4 (5/5), Postgres backs ALL the
+    # long-lived data — audit logs, governance config, system config, user
+    # profiles (the admin-gate source of truth), KB policies, and the
+    # instruction-similarity corpus. Container restarts must NOT nuke that.
+    #
+    # To wipe for a clean-slate test run: stop the stack, then
+    #   docker volume rm counterspyclaudeai_counter_spy_postgres_data
+    # (or use `docker compose down -v`). The next `up` will recreate the
+    # volume + reinitialize Postgres with SCRAM auth + data checksums via
+    # POSTGRES_INITDB_ARGS above, and the gateway will lazy-create every
+    # table on first hit. For an admin afterward, see the
+    # "First-time admin bootstrap" section in Technical/LOCAL_DEVELOPMENT.md.
+    volumes:
+      - counter_spy_postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U counter_spy -d counter_spy"]
       interval: 5s
@@ -211,3 +223,8 @@ volumes:
   sam_spade_data:
   # Named volume for the gateway's durable CTF review-artifact store.
   counter_spy_gateway_data:
+  # Durable storage for the shared Postgres (audit logs, app_config, user_profiles,
+  # kb_policies, instruction-similarity corpus). Phase 3 step 4 (5/5) switched
+  # this off tmpfs once Firestore was retired and Postgres became the only
+  # long-lived data store.
+  counter_spy_postgres_data:

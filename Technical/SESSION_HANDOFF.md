@@ -462,6 +462,77 @@ Each commit lints + tests green standalone.
 
 ---
 
+## Security review follow-ups (2026-05-15)
+
+> External read-only review of `feat/server-hosted-app` at `15c91c7`. Six findings, three high / two medium / one dep-risk. Verified against the cited locations before queuing. Several findings overlap with the Auth0 migration scoped above — call-outs noted per item.
+
+### 1. High — Browser-bundled shared bearer + spoofable identity (overlap with Auth0 migration)
+
+Frontend ships `VITE_BACKEND_BEARER_TOKEN` in the client bundle ([src/lib/backendApi.ts](../src/lib/backendApi.ts) `getProtectedHeaders`) and the backend treats `x-counter-spy-user-id` as authenticated identity after only a static bearer compare ([packages/backend-shared/src/auth.ts](../packages/backend-shared/src/auth.ts) `createBackendAuthMiddleware`). Anyone with the bundled token can claim any uid, including admin.
+
+**Status:** **fully addressed by the Auth0 migration plan above.** Don't ship a separate fix — bundle it into the Auth0 cutover. The migration's commit 4 ("Backend cut over to JWT-only") deletes the `x-counter-spy-user-id` header read and replaces the static bearer with a JWT signature check; uid comes from the verified `sub` claim.
+
+### 2. High — Audit-log routes are globally readable/mutable by any authenticated caller (NEW, not in Auth0 plan)
+
+`/v1/audit-logs` GET/PATCH/DELETE only require a caller id, never check ownership or admin role:
+
+- GET [services/gateway/src/server.ts:1638](../services/gateway/src/server.ts#L1638) — `userId` is an optional filter, not a scope. Any caller can read any user's rows.
+- PATCH [services/gateway/src/server.ts:1658](../services/gateway/src/server.ts#L1658) — only validates id format + non-empty patch; never compares caller against the row's `user_id`.
+- DELETE [services/gateway/src/server.ts:1686](../services/gateway/src/server.ts#L1686) — accepts `?userId=` as an arbitrary filter, not a permission check.
+
+**Status:** **independent fix.** Auth0 migration gives us a verified `req.auth.uid` to compare against, but the *authorization* gap stays open unless we add the scoping. **Recommended fix** (lands as a follow-up commit after Auth0 migration step 4):
+
+- GET: default scope to `WHERE user_id = req.auth.uid`. Admin callers can pass `?all=true` (or omit the auto-filter) to see the full shared trail. Document the "shared trail for admins" posture explicitly.
+- PATCH: 403 unless `existingRow.user_id === req.auth.uid` OR caller is admin. Loaded as a single SELECT-then-UPDATE in a transaction.
+- DELETE: admin-only (matches the analyst-console UX — only admins see the "Clear Audit Logs" button today; the backend just doesn't enforce it).
+
+Pre-Auth0 hot-fix option: same fixes but using the spoofable header. Doesn't actually defend against the bundled-bearer threat, but closes the cross-caller leakage path between known-good clients.
+
+### 3. High — Sam Spade accepts client-controlled safeguard prompts + API keys outside dev (NEW)
+
+The gateway has a dev-only guard on the request-supplied `safeguardApiKey` ([services/gateway/src/server.ts:1334-1339](../services/gateway/src/server.ts#L1334) — logs a warn + drops the override when `APP_ENV !== 'dev'`). The standalone sam-spade-service has **no equivalent**:
+
+- [services/sam-spade/src/server.ts:232-237](../services/sam-spade/src/server.ts#L232) `SamSpadeMetadataSchema` accepts both `safeguardEffectivePrompt` and `safeguardApiKey`.
+- [services/sam-spade/src/server.ts:356-364](../services/sam-spade/src/server.ts#L356) passes both directly into `safeguardClient.generateSafeguardVerdict` regardless of env.
+
+A CTF caller can redirect the safety judge to their own LM Studio or weaken the prompt with no env-gate. The divergence is a clear copy-paste miss from the 3/5 source-split — gateway has the guard, sam-spade lost it.
+
+**Status:** **independent fix, small.** Add the same `appEnv === 'dev'` guard to sam-spade's safeguardApiKey path. The `safeguardEffectivePrompt` override is intentionally caller-supplied (analyst console forwards the operator-tuned prompt), but the same "dev-only for non-dev environments" reasoning applies post-Auth0 when the CTF frontend has a verified caller. Defer: leave `safeguardEffectivePrompt` open until Auth0 lands, then revisit whether the iframe origin (verified via the verified caller's role) is sufficient trust.
+
+### 4. Medium — SSRF guard is hostname-string-only, no DNS resolution (NEW)
+
+[packages/backend-shared/src/security/urlGuard.ts:61](../packages/backend-shared/src/security/urlGuard.ts#L61) `assertEgressAllowed` checks the literal hostname against the allowlist. A public-looking hostname that resolves to `169.254.169.254`, `127.0.0.1`, or RFC1918 space bypasses the intent. DNS rebinding (different IP per resolution) is also unhandled.
+
+**Status:** **independent fix.** Two-layer mitigation:
+
+1. **At startup (fail-fast):** resolve every configured base URL via `dns.lookup` and reject if the resolved IP is in the deny set (link-local, loopback outside dev, etc.). Catches static misconfig.
+2. **At request time:** use a custom HTTPS agent with a `lookup` callback that re-checks the resolved IP against the deny set, so DNS rebinding between resolutions is blocked. Slightly more code; needed for full mitigation.
+
+If 2 is too involved for this pass, ship 1 alone and document the residual rebinding risk.
+
+### 5. Medium — Dev CORS reflects any origin (NEW, partially addressed by Auth0)
+
+[services/gateway/src/server.ts:1058-1065](../services/gateway/src/server.ts#L1058) — when `APP_ENV=dev`, any `Origin` header gets reflected back. Combined with the bundled bearer, anyone on the LAN can drive the dev gateway from any origin.
+
+**Status:** **partially addressed by Auth0 (no more bundled credential), but worth tightening anyway.** Replace the reflect-any branch with an explicit allowlist that defaults to `http://localhost:3000` + `http://localhost:18080` + `http://localhost:3001` (CTF frontend) and an opt-in `CORS_ALLOWLIST` env var for adding extra dev origins. Reflect-any becomes a deliberate `CORS_ALLOWLIST=*` opt-in, not the default.
+
+### 6. Dependency — `protobufjs <=7.5.5` flagged by `npm audit --omit=dev`
+
+One high + one moderate prod advisory (code injection / prototype pollution / DoS). The repo's `overrides` block already pins `protobufjs: ^7.5.5`, so a fix is gated on a patched upstream release. Transitive via the OpenTelemetry exporters.
+
+**Status:** **monitor.** Re-check `npm audit` every few weeks; when a patched version lands, bump the override and rebuild the demo stack. No code change needed today.
+
+### Recommended ordering
+
+1. **Auth0 migration** (above) — resolves finding 1 and unblocks 2.
+2. **Audit-log authorization scoping** (finding 2) — small follow-up commit on top of Auth0 step 4.
+3. **Sam Spade dev-only safeguard-API-key guard** (finding 3) — tiny, can land anytime, but logically belongs alongside 2.
+4. **SSRF DNS resolution** (finding 4) — independent, can run in parallel.
+5. **CORS allowlist tightening** (finding 5) — trivial, lands alongside Auth0 cutover for a coherent "demo-stack security pass" story.
+6. **protobufjs** (finding 6) — wait-and-watch.
+
+---
+
 ## Current Runtime Shape
 
 - The Docker demo stack is the active local test path:

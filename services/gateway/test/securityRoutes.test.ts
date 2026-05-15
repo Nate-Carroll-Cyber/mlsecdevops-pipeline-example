@@ -44,7 +44,8 @@ const safeguardAddress = safeguardMockServer.address();
 assert.ok(safeguardAddress && typeof safeguardAddress === 'object');
 process.env.SAFEGUARDS_API_BASE_URL = `http://127.0.0.1:${safeguardAddress.port}/v1`;
 
-const { app, resolveSafeguardJudgeInstructions } = await import('../src/server.ts');
+const { app } = await import('../src/server.ts');
+const { resolveSafeguardJudgeInstructions } = await import('@counter-spy/backend-shared/providers/safeguardClient.js');
 
 after(async () => {
   await new Promise<void>((resolve, reject) => {

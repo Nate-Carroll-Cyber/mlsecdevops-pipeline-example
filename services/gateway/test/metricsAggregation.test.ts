@@ -1,5 +1,5 @@
 /**
- * Unit coverage for the analytics modules that moved to backend/src/analysis/
+ * Unit coverage for the analytics modules that moved to services/gateway/src/analysis/
  * in Phase 3 step 3: detectThreatSpikes (Z-score-style hourly threat anomaly
  * detection) and calculateFalsePositiveMetrics (FPR/FNR confusion-matrix over
  * reviewed audit logs). Route-level coverage of /v1/metrics/aggregate lives in

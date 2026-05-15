@@ -147,9 +147,9 @@ export function normalizeForPolicy(input: string): string {
 // Flag likely leetspeak obfuscation only when the prompt mixes letters with multiple
 // substitution characters and the normalized result actually changes meaningfully.
 export function hasLeetspeakObfuscation(input: string): boolean {
-  const tokens = input.match(/\b[\w@]+\b/g) || [];
+  const tokens: string[] = input.match(/\b[\w@]+\b/g) ?? [];
   const suspiciousTokens = tokens.filter((token) => {
-    const replacementCount = (token.match(/[0134578@]/g) || []).length;
+    const replacementCount = (token.match(/[0134578@]/g) ?? []).length;
     const hasLetters = /[a-zA-Z]/.test(token);
     const hasLeetishShape = /^[a-zA-Z0-9@]+$/.test(token);
     if (ORDINAL_TOKEN_REGEX.test(token) || DIMENSION_TOKEN_REGEX.test(token)) return false;

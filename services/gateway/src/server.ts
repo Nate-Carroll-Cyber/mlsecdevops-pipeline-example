@@ -9,15 +9,38 @@ import { TELEMETRY_SERVICE_NAME } from '@counter-spy/backend-shared/telemetry.js
 import express, { type Request, type Response } from 'express';
 import { Credentials, Translator } from '@translated/lara';
 import { createHash } from 'node:crypto';
-import { metrics, trace, type Attributes } from '@opentelemetry/api';
-import { logs, SeverityNumber } from '@opentelemetry/api-logs';
+import { trace } from '@opentelemetry/api';
 import { z } from 'zod';
 import { sanitizeOutput, sanitizePrompt, type BackendSanitizationResult, type FirewallVerdict, type OutputSanitizationResult } from '@counter-spy/backend-shared/security/sanitizer.js';
 import { DEFAULT_SAFEGUARD_EFFECTIVE_PROMPT } from '@counter-spy/backend-shared/security/safeguardDefaults.js';
-import { detectThreatSpikes, type ThreatLog } from './analysis/anomalyDetector.js';
-import { calculateFalsePositiveMetrics, type AuditLogMetrics } from './analysis/metrics.js';
 import { assertEgressAllowed } from '@counter-spy/backend-shared/security/urlGuard.js';
 import { createRateLimiter } from '@counter-spy/backend-shared/middleware/rateLimit.js';
+import {
+  createBackendAuthMiddleware,
+  getAuthenticatedCallerId,
+  type AuthenticatedRequest,
+} from '@counter-spy/backend-shared/auth.js';
+import { createObservability } from '@counter-spy/backend-shared/observability.js';
+import {
+  createSafeguardClient,
+  SafeguardTimeoutError,
+  type SafeguardResponseShape,
+} from '@counter-spy/backend-shared/providers/safeguardClient.js';
+import {
+  createResponderClient,
+  UpstreamResponderError,
+  type ResponderProvider,
+} from '@counter-spy/backend-shared/providers/responderClient.js';
+import {
+  getOpenAiCompatibleEmbeddingsEndpoint,
+  isLocalOpenAiCompatibleUrl,
+} from '@counter-spy/backend-shared/providers/openaiCompat.js';
+import {
+  LOCAL_INSPECTION_RESPONSE_TEXT,
+  LOCAL_RESPONDER_PASSTHROUGH_RESPONSE_TEXT,
+} from '@counter-spy/backend-shared/prompts/samSpadeDefaults.js';
+import { detectThreatSpikes, type ThreatLog } from './analysis/anomalyDetector.js';
+import { calculateFalsePositiveMetrics, type AuditLogMetrics } from './analysis/metrics.js';
 import { mountWebApp } from './web/ssr.js';
 import { analyzeSyntacticComplexity } from './analysis/syntacticAnalyzer.js';
 import { buildPromptFeatureVector } from './analysis/promptFeatureVector.js';
@@ -46,8 +69,7 @@ import {
   type InstructionSource,
 } from './services/instruction-monitor/index.js';
 
-export const LOCAL_INSPECTION_RESPONSE_TEXT = 'NO-LLM LOCAL INSPECTION: This prompt passed deterministic local guardrails. No safeguard LLM, responder LLM, Firebase, or backend provider call was made.';
-export const LOCAL_RESPONDER_PASSTHROUGH_RESPONSE_TEXT = 'LOCAL RESPONDER PASSTHROUGH: This prompt passed deterministic local guardrails and the Safeguard LLM judge. No downstream responder LLM or backend responder provider call was made.';
+export { LOCAL_INSPECTION_RESPONSE_TEXT, LOCAL_RESPONDER_PASSTHROUGH_RESPONSE_TEXT };
 
 const EnvSchema = z.object({
   APP_PORT: z.coerce.number().int().min(1).max(65535).optional(),
@@ -123,7 +145,6 @@ const allowedOrigins = (
 const safeguardsModelId = env.SAFEGUARDS_MODEL_ID;
 const safeguardsTimeoutMs = env.SAFEGUARDS_TIMEOUT_MS;
 const responderModelId = env.LLM_MODEL_ID || env.RESPONDER_MODEL_ID;
-const responderProvider = env.RESPONDER_PROVIDER || 'openai_compatible';
 const defaultGeminiResponderModelId = 'gemini-2.5-flash';
 
 // SSRF egress guard: validate every configurable outbound base URL once at boot
@@ -144,108 +165,12 @@ for (const [label, value] of [
 }
 const recentPromptHashes = new Map<string, number>();
 const RETRY_WINDOW_MS = 5 * 60_000;
-// Opt-in safeguard-verdict cache (see SAFEGUARD_CACHE_TTL_MS). Map insertion
-// order gives us a cheap FIFO eviction once we exceed SAFEGUARD_CACHE_MAX_ENTRIES.
-interface CachedSafeguardVerdict {
-  modelId: string;
-  verdict: FirewallVerdict;
-  analystReasoning: string;
-  responseShape: SafeguardResponseShape;
-  gatewayStatus?: 'QUEUED';
-  rawReasoningTrace?: string;
-  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
-  expiresAt: number;
-}
-const safeguardVerdictCache = new Map<string, CachedSafeguardVerdict>();
 let instructionMonitorPromise: Promise<PgvectorInstructionMonitor | null> | undefined;
 
-type ResponderProvider = 'openai_compatible' | 'gemini';
-type AuthenticatedRequest = Request & { authenticatedCallerId?: string };
-
-class UpstreamResponderError extends Error {
-  status: number;
-
-  constructor(status: number, message: string) {
-    super(message);
-    this.name = 'UpstreamResponderError';
-    this.status = status;
-  }
-}
-
-class SafeguardTimeoutError extends Error {
-  constructor(timeoutMs: number) {
-    super(`Safeguard LLM timed out after ${timeoutMs}ms.`);
-    this.name = 'SafeguardTimeoutError';
-  }
-}
-
-const SafeguardJudgePayloadSchema = z.object({
-  verdict: z.enum(['CLEAN', 'SUSPICIOUS', 'ADVERSARIAL']),
-  analystReasoning: z.string().optional(),
-});
-
-const NonRuntimeSafeguardDecisionPayloadSchema = z.object({
-  decision: z.enum(['ALLOW_AND_FORWARD', 'BLOCK', 'QUEUE_FOR_REVIEW', 'FAIL_SECURE']),
-  analystReasoning: z.string().optional(),
-  reasonCodes: z.array(z.string()).optional(),
-}).passthrough();
-
-function isLocalOpenAiCompatibleUrl(baseUrl: string): boolean {
-  try {
-    const parsedUrl = new URL(baseUrl);
-    return parsedUrl.hostname === 'localhost' ||
-      parsedUrl.hostname === '127.0.0.1' ||
-      (parsedUrl.hostname === '::1' || parsedUrl.hostname === '[::1]') ||
-      parsedUrl.hostname === 'host.docker.internal' ||
-      parsedUrl.hostname.startsWith('192.168.') ||
-      parsedUrl.hostname.startsWith('10.') ||
-      /^172\.(1[6-9]|2\d|3[0-1])\./.test(parsedUrl.hostname);
-  } catch {
-    return false;
-  }
-}
-
-export function getOpenAiCompatibleEndpoint(baseUrl: string) {
-  const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
-  const isLocalOpenAiCompatibleHost = isLocalOpenAiCompatibleUrl(normalizedBaseUrl);
-  if (normalizedBaseUrl.endsWith('/responses') || normalizedBaseUrl.endsWith('/chat/completions')) {
-    return normalizedBaseUrl;
-  }
-  if (normalizedBaseUrl.endsWith('/v1')) {
-    return isLocalOpenAiCompatibleHost
-      ? `${normalizedBaseUrl}/chat/completions`
-      : `${normalizedBaseUrl}/responses`;
-  }
-  return `${normalizedBaseUrl}/chat/completions`;
-}
-
-function getOpenAiCompatibleEmbeddingsEndpoint(baseUrl: string) {
-  const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
-  return normalizedBaseUrl.endsWith('/embeddings')
-    ? normalizedBaseUrl
-    : normalizedBaseUrl.endsWith('/chat/completions')
-      ? normalizedBaseUrl.replace(/\/chat\/completions$/, '/embeddings')
-    : normalizedBaseUrl.endsWith('/v1')
-      ? `${normalizedBaseUrl}/embeddings`
-      : `${normalizedBaseUrl}/embeddings`;
-}
-
-function isLocalOpenAiCompatibleBaseUrl(baseUrl: string | undefined): boolean {
-  if (!baseUrl) return false;
-  try {
-    const parsedUrl = new URL(baseUrl);
-    return parsedUrl.hostname === 'localhost' ||
-      parsedUrl.hostname === '127.0.0.1' ||
-      (parsedUrl.hostname === '::1' || parsedUrl.hostname === '[::1]') ||
-      parsedUrl.hostname === 'host.docker.internal' ||
-      parsedUrl.hostname.startsWith('192.168.') ||
-      parsedUrl.hostname.startsWith('10.') ||
-      /^172\.(1[6-9]|2\d|3[0-1])\./.test(parsedUrl.hostname);
-  } catch {
-    return false;
-  }
-}
-
+// Reports the runtime config for the instruction-monitor's embeddings sidecar.
+// Embedding upstreams must stay loopback/RFC1918 in dev/demo; an explicitly
+// configured external URL is "blocked_external" and the monitor refuses to
+// embed against it.
 function getInstructionEmbeddingsRuntimeConfig(): {
   baseUrl?: string;
   apiKey?: string;
@@ -253,7 +178,7 @@ function getInstructionEmbeddingsRuntimeConfig(): {
   source: 'explicit' | 'blocked_external' | 'disabled';
 } {
   if (env.INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL) {
-    if (!isLocalOpenAiCompatibleBaseUrl(env.INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL)) {
+    if (!isLocalOpenAiCompatibleUrl(env.INSTRUCTION_MONITOR_EMBEDDINGS_API_BASE_URL)) {
       return { source: 'blocked_external' };
     }
     return {
@@ -266,317 +191,22 @@ function getInstructionEmbeddingsRuntimeConfig(): {
   return { source: 'disabled' };
 }
 
-function extractOpenAiCompatibleText(payload: {
-  output_text?: string;
-  output?: Array<{
-    content?: Array<{ type?: string; text?: string }>;
-  }>;
-  choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }>;
-}) {
-  if (typeof payload.output_text === 'string' && payload.output_text.trim()) {
-    return payload.output_text;
-  }
-  const outputText = payload.output
-    ?.flatMap((item) => item.content ?? [])
-    .filter((part) => part?.type === 'output_text' || typeof part?.text === 'string')
-    .map((part) => part?.text ?? '')
-    .join('')
-    .trim();
-  if (outputText) return outputText;
+const responderProvider = env.RESPONDER_PROVIDER || 'openai_compatible';
 
-  const content = payload.choices?.[0]?.message?.content;
-  if (typeof content === 'string') return content;
-  if (Array.isArray(content)) return content.map((part) => part?.text ?? '').join('').trim();
-  return '';
-}
-
-function extractOpenAiCompatibleUsage(payload: {
-  usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-    prompt_tokens?: number;
-    completion_tokens?: number;
-    total_tokens?: number;
-  };
-}): { promptTokens?: number; completionTokens?: number; totalTokens?: number } | undefined {
-  const promptTokens = payload.usage?.input_tokens ?? payload.usage?.prompt_tokens;
-  const completionTokens = payload.usage?.output_tokens ?? payload.usage?.completion_tokens;
-  const totalTokens = payload.usage?.total_tokens ??
-    (promptTokens !== undefined && completionTokens !== undefined ? promptTokens + completionTokens : undefined);
-
-  if (promptTokens === undefined && completionTokens === undefined && totalTokens === undefined) return undefined;
-  return {
-    ...(promptTokens !== undefined ? { promptTokens } : {}),
-    ...(completionTokens !== undefined ? { completionTokens } : {}),
-    ...(totalTokens !== undefined ? { totalTokens } : {}),
-  };
-}
-
-export function resolveSafeguardJudgeInstructions(runtimeConfig?: { systemPrompt?: string }): string {
-  if (runtimeConfig?.systemPrompt === undefined || runtimeConfig.systemPrompt.length === 0) {
-    throw new Error('Safeguard Effective Prompt is required for provider safeguard calls.');
-  }
-  return runtimeConfig.systemPrompt;
-}
-
-type SafeguardResponseShape = 'verdict' | 'decision' | 'malformed';
-
-function parseSafeguardJudgePayload(text: string): {
-  verdict: FirewallVerdict;
-  analystReasoning: string;
-  responseShape: SafeguardResponseShape;
-  gatewayStatus?: 'QUEUED';
-} {
-  const jsonMatch = text.match(/\{[\s\S]*\}/);
-  if (!jsonMatch) {
-    return {
-      verdict: 'SUSPICIOUS',
-      analystReasoning: 'Safeguard returned non-JSON output; queued for human review.',
-      responseShape: 'malformed',
-      gatewayStatus: 'QUEUED',
-    };
-  }
-
-  let parsedJson: unknown;
-  try {
-    parsedJson = JSON.parse(jsonMatch[0]) as unknown;
-  } catch {
-    return {
-      verdict: 'SUSPICIOUS',
-      analystReasoning: 'Safeguard returned malformed JSON; queued for human review.',
-      responseShape: 'malformed',
-      gatewayStatus: 'QUEUED',
-    };
-  }
-
-  const parsed = SafeguardJudgePayloadSchema.safeParse(parsedJson);
-  if (parsed.success) {
-    return {
-      verdict: parsed.data.verdict,
-      analystReasoning: parsed.data.analystReasoning || 'Safeguard LLM returned no reasoning.',
-      responseShape: 'verdict',
-    };
-  }
-
-  const nonRuntimeParsed = NonRuntimeSafeguardDecisionPayloadSchema.safeParse(parsedJson);
-  if (nonRuntimeParsed.success) {
-    return {
-      verdict: 'SUSPICIOUS',
-      analystReasoning: `Safeguard returned non-runtime decision schema (${nonRuntimeParsed.data.decision}); queued for human review.`,
-      responseShape: 'decision',
-      gatewayStatus: 'QUEUED',
-    };
-  }
-
-  return {
-    verdict: 'SUSPICIOUS',
-    analystReasoning: 'Safeguard returned a non-conforming schema; queued for human review.',
-    responseShape: 'malformed',
-    gatewayStatus: 'QUEUED',
-  };
-}
-
-async function generateSafeguardVerdict(
-  prompt: string,
-  riskEvidence: Pick<
-    BackendSanitizationResult,
-    'detectionFlags' | 'redactions' | 'entropy' | 'globalEntropy' | 'syntacticScore' | 'suspiciousChunks' | 'decodeTelemetry'
-  >,
-  runtimeConfig?: {
-    apiKey?: string;
-    systemPrompt?: string;
-  },
-): Promise<{
-  modelId: string;
-  verdict: FirewallVerdict;
-  analystReasoning: string;
-  latencyMs: number;
-  responseShape: SafeguardResponseShape;
-  gatewayStatus?: 'QUEUED';
-  rawReasoningTrace?: string;
-  usage?: {
-    promptTokens?: number;
-    completionTokens?: number;
-    totalTokens?: number;
-  };
-}> {
-  const startedAt = Date.now();
-  const baseUrl = env.SAFEGUARDS_API_BASE_URL;
-  const apiKey = runtimeConfig?.apiKey?.trim() || env.SAFEGUARDS_API_KEY;
-  const modelId = safeguardsModelId;
-
-  if (!baseUrl || !modelId) {
-    throw new Error('Safeguard LLM is not configured. Set SAFEGUARDS_API_BASE_URL and SAFEGUARDS_MODEL_ID on the backend.');
-  }
-
-  const endpoint = getOpenAiCompatibleEndpoint(baseUrl);
-  const instructions = resolveSafeguardJudgeInstructions(runtimeConfig);
-  const input = `Candidate prompt after deterministic normalization/redaction. This text is not guaranteed safe:
-${prompt}
-
-Deterministic preprocessing evidence. This is not a verdict:
-- Detection flags: ${riskEvidence.detectionFlags.length > 0 ? riskEvidence.detectionFlags.join(', ') : 'none'}
-- Redactions: ${riskEvidence.redactions.length > 0 ? riskEvidence.redactions.join(', ') : 'none'}
-- Decode telemetry: ${riskEvidence.decodeTelemetry}
-- Suspicious chunk count: ${riskEvidence.suspiciousChunks.length}
-- Max entropy: ${riskEvidence.entropy.toFixed(3)}
-- Global entropy: ${riskEvidence.globalEntropy.toFixed(3)}
-- Syntactic score: ${riskEvidence.syntacticScore.toFixed(1)}`;
-
-  // Optional verdict cache: key on the exact (model + system prompt + judge input)
-  // so any tuning/prompt change is a miss. Never used when a per-request safeguard
-  // API key override is present (dev-only path), so the cache only holds env-key results.
-  const cacheEnabled = env.SAFEGUARD_CACHE_TTL_MS > 0 && !runtimeConfig?.apiKey?.trim();
-  const cacheKey = cacheEnabled ? createHash('sha256').update(`${modelId}\n${instructions}\n${input}`).digest('hex') : '';
-  if (cacheEnabled) {
-    const cached = safeguardVerdictCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) {
-      emitMetricIncrement('safeguard.cache', { hit: true });
-      return {
-        modelId: cached.modelId,
-        verdict: cached.verdict,
-        analystReasoning: cached.analystReasoning,
-        latencyMs: 0,
-        responseShape: cached.responseShape,
-        ...(cached.usage ? { usage: cached.usage } : {}),
-        ...(cached.gatewayStatus ? { gatewayStatus: cached.gatewayStatus } : {}),
-        ...(cached.rawReasoningTrace ? { rawReasoningTrace: cached.rawReasoningTrace } : {}),
-      };
-    }
-    if (cached) safeguardVerdictCache.delete(cacheKey);
-  }
-
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), safeguardsTimeoutMs);
-  let response: globalThis.Response;
-  try {
-    response = await fetch(endpoint, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        'content-type': 'application/json',
-        ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-      },
-      body: JSON.stringify(
-        endpoint.endsWith('/responses')
-          ? {
-              model: modelId,
-              instructions,
-              input,
-              store: false,
-            }
-          : {
-              model: modelId,
-              messages: [
-                { role: 'system', content: instructions },
-                { role: 'user', content: input },
-              ],
-              temperature: 0,
-            },
-      ),
-    });
-  } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new SafeguardTimeoutError(safeguardsTimeoutMs);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
-
-  if (!response.ok) {
-    const upstreamError = await response.text();
-    log('warn', 'safeguard_upstream_rejected', {
-      status: response.status,
-      upstreamError,
-      modelId,
-    });
-    throw new Error(`Safeguard API ${response.status} rejected the request.`);
-  }
-
-  const payload = await response.json() as {
-    output_text?: string;
-    output?: Array<{
-      content?: Array<{ type?: string; text?: string }>;
-    }>;
-    choices?: Array<{ message?: { content?: string | Array<{ text?: string }>; reasoning?: string } }>;
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      total_tokens?: number;
-    };
-  };
-  const text = extractOpenAiCompatibleText(payload);
-  if (!text) {
-    throw new Error('Safeguard API returned no message content.');
-  }
-  const verdictPayload = parseSafeguardJudgePayload(text);
-  const rawReasoningTrace = payload.choices?.[0]?.message?.reasoning;
-  const usage = extractOpenAiCompatibleUsage(payload);
-  const result = {
-    modelId,
-    verdict: verdictPayload.verdict,
-    analystReasoning: verdictPayload.analystReasoning,
-    latencyMs: Date.now() - startedAt,
-    responseShape: verdictPayload.responseShape,
-    ...(usage ? { usage } : {}),
-    ...(verdictPayload.gatewayStatus ? { gatewayStatus: verdictPayload.gatewayStatus } : {}),
-    ...(typeof rawReasoningTrace === 'string' && rawReasoningTrace.trim() ? { rawReasoningTrace } : {}),
-  };
-
-  if (cacheEnabled) {
-    emitMetricIncrement('safeguard.cache', { hit: false });
-    const now = Date.now();
-    safeguardVerdictCache.set(cacheKey, {
-      modelId: result.modelId,
-      verdict: result.verdict,
-      analystReasoning: result.analystReasoning,
-      responseShape: result.responseShape,
-      ...(result.usage ? { usage: result.usage } : {}),
-      ...(result.gatewayStatus ? { gatewayStatus: result.gatewayStatus } : {}),
-      ...(typeof rawReasoningTrace === 'string' && rawReasoningTrace.trim() ? { rawReasoningTrace } : {}),
-      expiresAt: now + env.SAFEGUARD_CACHE_TTL_MS,
-    });
-    for (const [key, entry] of safeguardVerdictCache) {
-      if (entry.expiresAt <= now) safeguardVerdictCache.delete(key);
-    }
-    while (safeguardVerdictCache.size > env.SAFEGUARD_CACHE_MAX_ENTRIES) {
-      const oldestKey = safeguardVerdictCache.keys().next().value;
-      if (oldestKey === undefined) break;
-      safeguardVerdictCache.delete(oldestKey);
-    }
-  }
-
-  return result;
-}
-
-function inferResponderProvider(provider?: string, baseUrl?: string): ResponderProvider {
-  if (provider === 'gemini') return 'gemini';
-  if (provider === 'openai_compatible') return 'openai_compatible';
-  return baseUrl?.includes('generativelanguage.googleapis.com') ? 'gemini' : 'openai_compatible';
-}
-
-const LOG_LEVELS = {
-  debug: 10,
-  info: 20,
-  warn: 30,
-  error: 40,
-} as const;
-
-const OTEL_SEVERITY: Record<keyof typeof LOG_LEVELS, SeverityNumber> = {
-  debug: SeverityNumber.DEBUG,
-  info: SeverityNumber.INFO,
-  warn: SeverityNumber.WARN,
-  error: SeverityNumber.ERROR,
-};
-
-// --- OpenTelemetry instruments ---------------------------------------------
-// These resolve to no-ops unless the OTel SDK was started (see telemetry.ts), so
-// they are always safe to call.
-const otelMeter = metrics.getMeter(TELEMETRY_SERVICE_NAME);
-const otelLogger = logs.getLogger(TELEMETRY_SERVICE_NAME);
+// Observability + provider clients are constructed once at boot from the shared
+// factories in @counter-spy/backend-shared. The gateway and sam-spade-service
+// share the exact same implementations; each service constructs its own
+// instance with its env-derived config.
+const observability = createObservability({
+  telemetryServiceName: TELEMETRY_SERVICE_NAME,
+  logServiceName: 'counter-spy-backend',
+  environment: appEnv,
+  minLogLevel: env.LOG_LEVEL,
+});
+const { log, emitMetricIncrement } = observability;
+const otelMeter = observability.meter;
+// These instruments resolve to no-ops unless the OTel SDK was started (see
+// telemetry.ts), so they are always safe to call.
 const requestDurationHistogram = otelMeter.createHistogram('counterspy.http.server.duration', {
   description: 'Counter-Spy backend HTTP request duration.',
   unit: 'ms',
@@ -592,53 +222,42 @@ const responderLatencyHistogram = otelMeter.createHistogram('counterspy.responde
 const interceptVerdictCounter = otelMeter.createCounter('counterspy.intercept.verdict', {
   description: 'Gateway intercept decisions by status.',
 });
-// Generic counter cache so emitMetricIncrement() can mint arbitrary named counters.
-const dynamicCounters = new Map<string, ReturnType<typeof otelMeter.createCounter>>();
-function getDynamicCounter(metricName: string) {
-  const name = `counterspy.${metricName}`;
-  let counter = dynamicCounters.get(name);
-  if (!counter) {
-    counter = otelMeter.createCounter(name, { description: `Counter-Spy event counter: ${metricName}.` });
-    dynamicCounters.set(name, counter);
-  }
-  return counter;
-}
-function toOtelAttributes(tags: Record<string, unknown>): Attributes {
-  const attributes: Attributes = {};
-  for (const [key, value] of Object.entries(tags)) {
-    if (value === undefined || value === null) continue;
-    attributes[key] = typeof value === 'object' ? JSON.stringify(value) : (value as string | number | boolean);
-  }
-  return attributes;
-}
 
-// Emit a structured event: always to stdout JSON (CloudWatch-friendly, and the
-// only sink when OTLP is not configured) and also through the OpenTelemetry Logs
-// API. The active trace/span ids are stamped onto the stdout record so logs and
-// traces correlate.
-function log(level: keyof typeof LOG_LEVELS, message: string, extra: Record<string, unknown> = {}) {
-  if (LOG_LEVELS[level] < LOG_LEVELS[env.LOG_LEVEL]) {
-    return;
-  }
+const safeguardClient = createSafeguardClient(
+  {
+    baseUrl: env.SAFEGUARDS_API_BASE_URL,
+    apiKey: env.SAFEGUARDS_API_KEY,
+    modelId: safeguardsModelId,
+    timeoutMs: safeguardsTimeoutMs,
+    // Opt-in safeguard-verdict cache (see SAFEGUARD_CACHE_TTL_MS). Keyed by the
+    // exact (modelId + system prompt + judge input) so any tuning/prompt change
+    // is a miss; a per-request safeguard API key override is never cached.
+    ...(env.SAFEGUARD_CACHE_TTL_MS > 0
+      ? { cache: { ttlMs: env.SAFEGUARD_CACHE_TTL_MS, maxEntries: env.SAFEGUARD_CACHE_MAX_ENTRIES } }
+      : {}),
+  },
+  {
+    log,
+    onCacheEvent: (event) => emitMetricIncrement('safeguard.cache', { hit: event === 'hit' }),
+  },
+);
+const generateSafeguardVerdict = safeguardClient.generateSafeguardVerdict;
 
-  const spanContext = trace.getActiveSpan()?.spanContext();
-  const record = {
-    level,
-    message,
-    service: 'counter-spy-backend',
-    environment: appEnv,
-    timestamp: new Date().toISOString(),
-    ...(spanContext ? { trace_id: spanContext.traceId, span_id: spanContext.spanId } : {}),
-    ...extra,
-  };
-  console.log(JSON.stringify(record));
-  otelLogger.emit({
-    severityNumber: OTEL_SEVERITY[level],
-    severityText: level.toUpperCase(),
-    body: message,
-    attributes: toOtelAttributes(extra),
-  });
-}
+const responderClient = createResponderClient(
+  {
+    configuredProvider: env.RESPONDER_PROVIDER,
+    responderBaseUrl: env.RESPONDER_API_BASE_URL,
+    fallbackOpenAiBaseUrl: env.LLM_API_BASE_URL,
+    apiKey: env.RESPONDER_API_KEY,
+    fallbackApiKey: env.LLM_API_KEY,
+    openAiModelId: responderModelId,
+    geminiModelId: defaultGeminiResponderModelId,
+  },
+  { log },
+);
+const generateResponderOutput = responderClient.generateResponderOutput;
+
+const requireBackendAuth = createBackendAuthMiddleware(env.INTERCEPT_BEARER_TOKEN);
 
 async function getInstructionMonitor(): Promise<PgvectorInstructionMonitor | null> {
   if (!instructionMonitorConfig.INSTRUCTION_MONITOR_ENABLED) return null;
@@ -1003,15 +622,6 @@ function tagRetry(prompt: string, nowMs: number = Date.now()) {
   };
 }
 
-function emitMetricIncrement(name: string, tags: Record<string, string | boolean | number | undefined>) {
-  getDynamicCounter(name).add(1, toOtelAttributes(tags));
-  log('info', 'metric_increment', {
-    metric: name,
-    value: 1,
-    tags,
-  });
-}
-
 function hasSafeguardDivergence(verdict: FirewallVerdict, gatewayAction: InterceptResponse['status']) {
   if (verdict === 'CLEAN') return gatewayAction !== 'CLEAN';
   if (verdict === 'SUSPICIOUS') return gatewayAction !== 'QUEUED';
@@ -1052,213 +662,6 @@ function emitSafeguardDecisionObservability(args: {
     rawReasoningTrace: args.rawReasoningTrace,
     latencyMs: args.latencyMs,
   });
-}
-
-async function generateResponderOutput(
-  prompt: string,
-  systemPrompt?: string,
-): Promise<{
-  provider: ResponderProvider;
-  modelId: string;
-  response: string;
-  usage?: {
-    promptTokens?: number;
-    completionTokens?: number;
-    totalTokens?: number;
-  };
-  latencyMs: number;
-}> {
-  const startedAt = Date.now();
-  const provider = inferResponderProvider(
-    responderProvider,
-    env.RESPONDER_API_BASE_URL || env.LLM_API_BASE_URL,
-  );
-  const configuredBaseUrl = provider === 'gemini'
-      ? env.RESPONDER_API_BASE_URL
-      : env.RESPONDER_API_BASE_URL || env.LLM_API_BASE_URL;
-  const baseUrl = configuredBaseUrl || (provider === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta' : undefined);
-  const apiKey = env.RESPONDER_API_KEY || env.LLM_API_KEY;
-  const modelId = provider === 'gemini' ? defaultGeminiResponderModelId : responderModelId;
-
-  if (!baseUrl || !apiKey || !modelId) {
-    return {
-      provider,
-      modelId,
-      response: 'Counter-Spy.ai backend accepted this clean prompt. Configure responder provider, API key, base URL, and model ID to enable live downstream inference.',
-      latencyMs: Date.now() - startedAt,
-    };
-  }
-
-  const normalizedBaseUrl = baseUrl.replace(/\/$/, '');
-  if (provider === 'gemini') {
-    const endpoint = `${normalizedBaseUrl}/models/${encodeURIComponent(modelId)}:generateContent`;
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        'x-goog-api-key': apiKey,
-      },
-      body: JSON.stringify({
-        ...(systemPrompt ? { systemInstruction: { parts: [{ text: systemPrompt }] } } : {}),
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: prompt }],
-          },
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      const upstreamError = await response.text();
-      log('warn', 'responder_upstream_rejected', {
-        provider,
-        status: response.status,
-        upstreamError,
-        modelId,
-      });
-      throw new UpstreamResponderError(response.status, `Responder API ${response.status} rejected the request.`);
-    }
-
-    const payload = await response.json() as {
-      candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-      usageMetadata?: {
-        promptTokenCount?: number;
-        candidatesTokenCount?: number;
-        totalTokenCount?: number;
-      };
-    };
-    const geminiText = payload.candidates?.[0]?.content?.parts
-      ?.map((part) => part.text ?? '')
-      .join('')
-      .trim();
-    if (!geminiText) {
-      throw new Error('Responder API returned no Gemini candidate text.');
-    }
-    return {
-      provider,
-      modelId,
-      response: geminiText,
-      latencyMs: Date.now() - startedAt,
-      usage: {
-        promptTokens: payload.usageMetadata?.promptTokenCount,
-        completionTokens: payload.usageMetadata?.candidatesTokenCount,
-        totalTokens: payload.usageMetadata?.totalTokenCount,
-      },
-    };
-  }
-
-  const endpoint = getOpenAiCompatibleEndpoint(normalizedBaseUrl);
-
-  const response = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'content-type': 'application/json',
-      authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify(
-      endpoint.endsWith('/responses')
-        ? {
-            model: modelId,
-            input: prompt,
-            ...(systemPrompt ? { instructions: systemPrompt } : {}),
-            store: true,
-          }
-        : {
-            model: modelId,
-            messages: [
-              ...(systemPrompt ? [{ role: 'system', content: systemPrompt }] : []),
-              { role: 'user', content: prompt },
-            ],
-            temperature: 0,
-          },
-    ),
-  });
-
-  if (!response.ok) {
-    const upstreamError = await response.text();
-    log('warn', 'responder_upstream_rejected', {
-      status: response.status,
-      upstreamError,
-      modelId,
-    });
-    throw new UpstreamResponderError(response.status, `Responder API ${response.status} rejected the request.`);
-  }
-
-  const payload = await response.json() as {
-    output_text?: string;
-    output?: Array<{
-      content?: Array<{ type?: string; text?: string }>;
-    }>;
-    choices?: Array<{ message?: { content?: string | Array<{ text?: string }> } }>;
-    usage?: {
-      input_tokens?: number;
-      output_tokens?: number;
-      prompt_tokens?: number;
-      completion_tokens?: number;
-      total_tokens?: number;
-    };
-  };
-  if (typeof payload.output_text === 'string' && payload.output_text.trim()) {
-    return {
-      provider,
-      modelId,
-      response: payload.output_text,
-      latencyMs: Date.now() - startedAt,
-      usage: {
-        promptTokens: payload.usage?.input_tokens ?? payload.usage?.prompt_tokens,
-        completionTokens: payload.usage?.output_tokens ?? payload.usage?.completion_tokens,
-        totalTokens: payload.usage?.total_tokens,
-      },
-    };
-  }
-  const outputText = payload.output
-    ?.flatMap((item) => item.content ?? [])
-    .filter((part) => part?.type === 'output_text' || typeof part?.text === 'string')
-    .map((part) => part?.text ?? '')
-    .join('')
-    .trim();
-  if (outputText) {
-    return {
-      provider,
-      modelId,
-      response: outputText,
-      latencyMs: Date.now() - startedAt,
-      usage: {
-        promptTokens: payload.usage?.input_tokens ?? payload.usage?.prompt_tokens,
-        completionTokens: payload.usage?.output_tokens ?? payload.usage?.completion_tokens,
-        totalTokens: payload.usage?.total_tokens,
-      },
-    };
-  }
-  const content = payload.choices?.[0]?.message?.content;
-  if (typeof content === 'string') {
-    return {
-      provider,
-      modelId,
-      response: content,
-      latencyMs: Date.now() - startedAt,
-      usage: {
-        promptTokens: payload.usage?.prompt_tokens,
-        completionTokens: payload.usage?.completion_tokens,
-        totalTokens: payload.usage?.total_tokens,
-      },
-    };
-  }
-  if (Array.isArray(content)) {
-    return {
-      provider,
-      modelId,
-      response: content.map((part) => part?.text ?? '').join('').trim(),
-      latencyMs: Date.now() - startedAt,
-      usage: {
-        promptTokens: payload.usage?.prompt_tokens,
-        completionTokens: payload.usage?.completion_tokens,
-        totalTokens: payload.usage?.total_tokens,
-      },
-    };
-  }
-  throw new Error('Responder API returned no message content.');
 }
 
 const RESPONDER_OUTPUT_WITHHELD_TEXT =
@@ -1661,29 +1064,6 @@ app.use(createRateLimiter({
   exempt: (req) => req.path === '/healthz' || ((req.method === 'GET' || req.method === 'HEAD') && req.path !== '/v1' && !req.path.startsWith('/v1/')),
   onLimited: (req) => emitMetricIncrement('ratelimit.dropped', { path: req.path, method: req.method }),
 }));
-
-function requireBackendAuth(req: AuthenticatedRequest, res: Response, next: () => void) {
-  const authHeader = req.header('authorization');
-  if (!env.INTERCEPT_BEARER_TOKEN || authHeader !== `Bearer ${env.INTERCEPT_BEARER_TOKEN}`) {
-    res.status(401).json({ error: 'Unauthorized protected route request.' });
-    return;
-  }
-
-  const callerId = req.header('x-counter-spy-user-id')?.trim();
-  if (callerId) {
-    req.authenticatedCallerId = callerId;
-  }
-  next();
-}
-
-function getAuthenticatedCallerId(req: AuthenticatedRequest, res: Response): string | null {
-  const callerId = req.authenticatedCallerId;
-  if (!callerId) {
-    res.status(401).json({ error: 'Missing authenticated caller identity.' });
-    return null;
-  }
-  return callerId;
-}
 
 app.use((req: Request, res: Response, next) => {
   const requestId = crypto.randomUUID();

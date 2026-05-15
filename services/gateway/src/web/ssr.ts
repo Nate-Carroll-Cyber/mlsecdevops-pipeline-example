@@ -23,9 +23,10 @@ import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-// This module is backend/src/web/ssr.ts in dev (tsx) and backend/dist/web/ssr.js
-// when built — both are three levels below the repo root.
-const repoRoot = fileURLToPath(new URL('../../../', import.meta.url));
+// This module is services/gateway/src/web/ssr.ts in dev (tsx) and
+// services/gateway/dist/web/ssr.js when built — both are four levels below
+// the repo root.
+const repoRoot = fileURLToPath(new URL('../../../../', import.meta.url));
 const clientDir = path.join(repoRoot, 'dist', 'client');
 const templatePath = path.join(clientDir, 'index.html');
 const entryServerPath = path.join(repoRoot, 'dist', 'server', 'entry-server.js');
@@ -52,7 +53,7 @@ async function loadRender(isDev: boolean): Promise<RenderFn | null> {
     // In dev, bust the ESM module cache so `vite build --watch` rebuilds are
     // picked up without a server restart. The non-literal specifier also keeps
     // tsc from trying to type-check this Vite artifact (it is not part of
-    // backend/tsconfig.json).
+    // services/gateway/tsconfig.json).
     const specifier = isDev
       ? `${pathToFileURL(entryServerPath).href}?t=${Date.now()}`
       : pathToFileURL(entryServerPath).href;

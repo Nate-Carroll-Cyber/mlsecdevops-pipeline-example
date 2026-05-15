@@ -4,7 +4,7 @@
  * Phase 3 (1) of the server-hosted rewrite: the analyst audit trail moves off
  * browser→Firestore and into Postgres (the same instance the instruction monitor
  * already uses). This module is the store; the gateway exposes it over
- * /v1/audit-logs (see backend/src/server.ts), and the console will be rewired to
+ * /v1/audit-logs (see services/gateway/src/server.ts), and the console will be rewired to
  * read/write it in Phase 3 (2). Until then it is additive — nothing in the UI
  * uses it yet.
  *

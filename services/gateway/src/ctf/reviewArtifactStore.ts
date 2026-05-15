@@ -12,7 +12,7 @@ import { dirname, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { SamSpadeReviewArtifact } from './types.js';
 
-const STORE_PATH = resolve(process.cwd(), process.env.CTF_REVIEW_ARTIFACTS_STORE_PATH || 'backend/data/ctf-review-artifacts.db');
+const STORE_PATH = resolve(process.cwd(), process.env.CTF_REVIEW_ARTIFACTS_STORE_PATH || 'services/gateway/data/ctf-review-artifacts.db');
 const MAX_ROWS = (() => {
   const parsed = Number(process.env.CTF_REVIEW_ARTIFACTS_MAX);
   return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : 5000;

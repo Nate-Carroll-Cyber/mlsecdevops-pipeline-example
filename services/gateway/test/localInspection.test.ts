@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitizePrompt } from '@counter-spy/backend-shared/security/sanitizer.js';
+import { getOpenAiCompatibleEndpoint } from '@counter-spy/backend-shared/providers/openaiCompat.js';
+import { LOCAL_INSPECTION_RESPONSE_TEXT } from '@counter-spy/backend-shared/prompts/samSpadeDefaults.js';
 
 process.env.COUNTER_SPY_DISABLE_SERVER_LISTEN = 'true';
 process.env.APP_ENV = 'dev';
@@ -13,9 +15,7 @@ delete process.env.LLM_API_KEY;
 
 const {
   buildLocalInspectionInterceptResponse,
-  getOpenAiCompatibleEndpoint,
   getInstructionMatchReasons,
-  LOCAL_INSPECTION_RESPONSE_TEXT,
 } = await import('../src/server.ts');
 
 test('OpenAI-compatible endpoint resolver keeps LM Studio on chat completions', () => {

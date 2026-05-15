@@ -66,6 +66,17 @@ import {
   type UserProfileRecord,
   type UserRole,
 } from './config/userProfileStore.js';
+import {
+  GOLDEN_SET_POLICY_ID,
+  createPolicy,
+  deletePolicy,
+  getPolicy,
+  initPolicyStore,
+  isPolicyStoreConfigured,
+  listPolicies,
+  updatePolicy,
+  type PolicyRecord,
+} from './config/policyStore.js';
 import { appendCtfReviewArtifact, listCtfReviewArtifacts } from './ctf/reviewArtifactStore.js';
 import { SamSpadeReviewArtifactSchema, type SamSpadeReviewArtifact } from './ctf/types.js';
 import {
@@ -2063,6 +2074,154 @@ app.put('/v1/users/:uid/role', requireBackendAuth, async (req: AuthenticatedRequ
   }
 });
 
+// Knowledge-base policies (Phase 3 step 4 — 4/5). Replaces Firestore
+// `knowledge_base/*` collection and the special `knowledge_base/golden-set`
+// doc. The golden-set is stored as a regular `kb_policies` row keyed
+// 'golden-set'; only its DELETE is refused (and the row is never
+// auto-seeded — the frontend seeds it via POST on first empty GET, same as
+// the bundled default policies, with deterministic ids so concurrent
+// admin tabs are safe under INSERT ... ON CONFLICT DO NOTHING).
+
+function requirePolicyStore(res: Response): boolean {
+  if (isPolicyStoreConfigured()) return true;
+  res.status(503).json({ error: 'Policy store is not configured (set APP_CONFIG_DATABASE_URL or DATABASE_URL).' });
+  return false;
+}
+
+const CreatePolicySchema = z.object({
+  id: z.string().min(1).optional(),
+  title: z.string().min(1),
+  date: z.string().min(1),
+  content: z.string(),
+  isDefault: z.boolean().optional(),
+}).strict();
+
+const UpdatePolicySchema = z.object({
+  title: z.string().min(1).optional(),
+  date: z.string().min(1).optional(),
+  content: z.string().optional(),
+}).strict().refine(
+  (value) => value.title !== undefined || value.date !== undefined || value.content !== undefined,
+  { message: 'At least one of title, date, or content is required.' },
+);
+
+function policyToDto(record: PolicyRecord) {
+  return {
+    id: record.id,
+    title: record.title,
+    date: record.date,
+    content: record.content,
+    isDefault: record.isDefault,
+    uploadedBy: record.uploadedBy,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+app.get('/v1/policies', requireBackendAuth, async (_req: AuthenticatedRequest, res: Response) => {
+  if (!requirePolicyStore(res)) return;
+  try {
+    const rows = await listPolicies();
+    res.status(200).json({ policies: rows.map(policyToDto) });
+  } catch (error) {
+    log('warn', 'policies_list_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'list error' });
+    res.status(500).json({ error: 'Failed to list policies.' });
+  }
+});
+
+app.post('/v1/policies', requireBackendAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const parsed = CreatePolicySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid policy.' });
+    return;
+  }
+  if (!requirePolicyStore(res)) return;
+  if (!requireUserProfileStore(res)) return;
+  const callerId = getAuthenticatedCallerId(req, res);
+  if (!callerId) return;
+  if (!(await requireAdminRole(callerId, res))) return;
+  try {
+    const record = await createPolicy({
+      id: parsed.data.id,
+      title: parsed.data.title,
+      date: parsed.data.date,
+      content: parsed.data.content,
+      isDefault: parsed.data.isDefault,
+      uploadedBy: callerId,
+    });
+    res.status(200).json(policyToDto(record));
+  } catch (error) {
+    log('warn', 'policies_create_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'create error' });
+    res.status(500).json({ error: 'Failed to create policy.' });
+  }
+});
+
+app.patch('/v1/policies/:id', requireBackendAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const parsed = UpdatePolicySchema.safeParse(req.body);
+  if (!parsed.success) {
+    res.status(400).json({ error: 'Invalid policy update.' });
+    return;
+  }
+  if (!requirePolicyStore(res)) return;
+  if (!requireUserProfileStore(res)) return;
+  const callerId = getAuthenticatedCallerId(req, res);
+  if (!callerId) return;
+  if (!(await requireAdminRole(callerId, res))) return;
+  const rawId = req.params.id;
+  const policyId = typeof rawId === 'string' ? rawId : Array.isArray(rawId) ? rawId[0] : undefined;
+  if (!policyId) {
+    res.status(400).json({ error: 'Missing policy id.' });
+    return;
+  }
+  try {
+    const updated = await updatePolicy(policyId, parsed.data);
+    if (!updated) {
+      res.status(404).json({ error: 'Policy not found.' });
+      return;
+    }
+    res.status(200).json(policyToDto(updated));
+  } catch (error) {
+    log('warn', 'policies_update_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'update error' });
+    res.status(500).json({ error: 'Failed to update policy.' });
+  }
+});
+
+app.delete('/v1/policies/:id', requireBackendAuth, async (req: AuthenticatedRequest, res: Response) => {
+  const rawId = req.params.id;
+  const policyId = typeof rawId === 'string' ? rawId : Array.isArray(rawId) ? rawId[0] : undefined;
+  if (!policyId) {
+    res.status(400).json({ error: 'Missing policy id.' });
+    return;
+  }
+  if (policyId === GOLDEN_SET_POLICY_ID) {
+    // The golden-set row is the durable handle the promote-to-KB flow appends
+    // to; deleting it would silently break that workflow on the next promote.
+    // The guard runs before the store / admin checks so the rule is intrinsic
+    // to the id and doesn't depend on DB or caller state.
+    res.status(409).json({ error: 'Cannot delete the golden-set policy.' });
+    return;
+  }
+  if (!requirePolicyStore(res)) return;
+  if (!requireUserProfileStore(res)) return;
+  const callerId = getAuthenticatedCallerId(req, res);
+  if (!callerId) return;
+  if (!(await requireAdminRole(callerId, res))) return;
+  try {
+    // 404 over 200-with-deleted-count so the client surfaces a typo or stale
+    // selection rather than treating a missing id as a success.
+    const existing = await getPolicy(policyId);
+    if (!existing) {
+      res.status(404).json({ error: 'Policy not found.' });
+      return;
+    }
+    await deletePolicy(policyId);
+    res.status(200).json({ ok: true });
+  } catch (error) {
+    log('warn', 'policies_delete_failed', { requestId: res.locals.requestId, error: error instanceof Error ? error.message : 'delete error' });
+    res.status(500).json({ error: 'Failed to delete policy.' });
+  }
+});
+
 // Translation proxy route:
 // keeps provider keys on the server side and gives the Playground a single stable
 // API shape no matter which translation vendor is in use.
@@ -2143,6 +2302,8 @@ void initAuditStore().catch((error) => log('warn', 'audit_store_init_failed', { 
 void initConfigStore().catch((error) => log('warn', 'config_store_init_failed', { error: error instanceof Error ? error.message : 'init error' }));
 // And the user_profiles table that backs /v1/users/me + the admin role check.
 void initUserProfileStore().catch((error) => log('warn', 'user_profile_store_init_failed', { error: error instanceof Error ? error.message : 'init error' }));
+// And the kb_policies table that backs /v1/policies (Phase 3 step 4 — 4/5).
+void initPolicyStore().catch((error) => log('warn', 'policy_store_init_failed', { error: error instanceof Error ? error.message : 'init error' }));
 
 app.use((_req: Request, res: Response) => {
   res.status(404).json({ error: 'Not found.' });

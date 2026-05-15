@@ -983,6 +983,95 @@ export async function updateUserRole(
   return UserProfileResponseSchema.parse(payload);
 }
 
+// --- Knowledge-base policies (Phase 3 step 4 — 4/5) ---
+// Replaces Firestore `knowledge_base/*` (the Policies tab list, custom
+// markdown uploads, edits, deletions) and the special
+// `knowledge_base/golden-set` doc (the promote-to-KB DPO append workflow).
+// All four mutations are admin-gated by `requireAdminRole` on the gateway;
+// a 403 from this surface usually means the signed-in user isn't an admin.
+
+const PolicyRecordResponseSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  date: z.string(),
+  content: z.string(),
+  isDefault: z.boolean(),
+  uploadedBy: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+export type PolicyRecordDto = z.infer<typeof PolicyRecordResponseSchema>;
+
+const PolicyListResponseSchema = z.object({
+  policies: z.array(PolicyRecordResponseSchema),
+});
+
+export async function listPolicies(callerUserId?: string): Promise<PolicyRecordDto[]> {
+  const response = await fetch(resolveBackendUrl('/v1/policies'), { headers: getProtectedHeaders(callerUserId) });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Policies fetch failed (HTTP ${response.status}).`);
+  }
+  return PolicyListResponseSchema.parse(payload).policies;
+}
+
+export interface CreatePolicyInput {
+  /** Optional deterministic id. Used by the default-seeding flow ("default-N" / "golden-set") so concurrent admin tabs don't duplicate rows. */
+  id?: string;
+  title: string;
+  date: string;
+  content: string;
+  /** Marks the row as a bundled-default for stable display ordering. */
+  isDefault?: boolean;
+}
+
+export async function createPolicy(input: CreatePolicyInput, callerUserId?: string): Promise<PolicyRecordDto> {
+  const response = await fetch(resolveBackendUrl('/v1/policies'), {
+    method: 'POST',
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify(input),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Policy create failed (HTTP ${response.status}).`);
+  }
+  return PolicyRecordResponseSchema.parse(payload);
+}
+
+export interface PatchPolicyInput {
+  title?: string;
+  date?: string;
+  content?: string;
+}
+
+export async function patchPolicy(id: string, input: PatchPolicyInput, callerUserId?: string): Promise<PolicyRecordDto> {
+  const response = await fetch(resolveBackendUrl(`/v1/policies/${encodeURIComponent(id)}`), {
+    method: 'PATCH',
+    headers: getProtectedHeaders(callerUserId),
+    body: JSON.stringify(input),
+  });
+  const payload: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Policy update failed (HTTP ${response.status}).`);
+  }
+  return PolicyRecordResponseSchema.parse(payload);
+}
+
+export async function deletePolicy(id: string, callerUserId?: string): Promise<void> {
+  const response = await fetch(resolveBackendUrl(`/v1/policies/${encodeURIComponent(id)}`), {
+    method: 'DELETE',
+    headers: getProtectedHeaders(callerUserId),
+  });
+  if (!response.ok) {
+    const payload: unknown = await response.json().catch(() => null);
+    const errorPayload = z.object({ error: z.string() }).safeParse(payload);
+    throw new Error(errorPayload.success ? errorPayload.data.error : `Policy delete failed (HTTP ${response.status}).`);
+  }
+}
+
 export async function lookupInstructionMonitorRecord(
   identifier: string,
   callerUserId?: string,

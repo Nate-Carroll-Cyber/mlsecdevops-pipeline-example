@@ -66,6 +66,10 @@ import {
   getUserProfile,
   putUserProfile,
   UserProfileNotFoundError,
+  listPolicies,
+  createPolicy as createPolicyApi,
+  patchPolicy,
+  deletePolicy as deletePolicyApi,
   checkBackendHealth,
   getCtfReviewArtifacts,
   interceptPrompt,
@@ -323,6 +327,14 @@ const StructuredResponderPayloadSchema = z.object({
 }).catchall(z.unknown());
 
 type StructuredResponderPayload = z.infer<typeof StructuredResponderPayloadSchema>;
+
+// Golden Set (Phase 3 step 4 — 4/5). Server-side row id is reserved so the
+// promote-to-KB workflow can read-modify-write a deterministic record rather
+// than juggling Firestore-doc-exists branching.
+const GOLDEN_SET_POLICY_ID = 'golden-set';
+const GOLDEN_SET_POLICY_TITLE = 'Fine-Tuning Training Data';
+const GOLDEN_SET_SEED_CONTENT =
+  '# Golden Set (DPO Fine-Tuning Data)\n\nThis document contains curated responses for Direct Preference Optimization.\n';
 
 type PolicyRecord = Policy & {
   id?: string;
@@ -2755,23 +2767,40 @@ export default function App() {
         return;
       }
 
-      // Reference the golden-set document in the knowledge_base collection
-      const goldenSetRef = doc(db, 'knowledge_base', 'golden-set');
-      const goldenSetSnap = await getDoc(goldenSetRef);
-
-      if (goldenSetSnap.exists()) {
-        // If the document exists, append the new content
-        await updateDoc(goldenSetRef, {
-          content: goldenSetSnap.data().content + markdownContent,
-          timestamp: serverTimestamp()
-        });
+      // Phase 3 step 4 (4/5): promote-to-KB writes through /v1/policies. The
+      // empty golden-set row is materialized during the initial seed so we
+      // only need to read the current content out of state, append the new
+      // DPO chunk, and PATCH it back. If the row is somehow missing (e.g. a
+      // fresh database the admin never opened the Policies tab against) we
+      // create it on the spot to keep the workflow recoverable.
+      const nextDate = new Date().toISOString().split('T')[0] ?? new Date().toISOString();
+      const existing = customPolicies.find((policy) => policy.id === GOLDEN_SET_POLICY_ID);
+      const baseContent = existing?.content ?? GOLDEN_SET_SEED_CONTENT;
+      let updated: PolicyRecord | null;
+      if (existing) {
+        const dto = await patchPolicy(
+          GOLDEN_SET_POLICY_ID,
+          { content: baseContent + markdownContent, date: nextDate },
+          profile?.uid,
+        );
+        updated = parsePolicyRecord(dto);
       } else {
-        // If it doesn't exist, create it with the initial content
-        await setDoc(goldenSetRef, {
-          title: 'Fine-Tuning Training Data',
-          content: `# Golden Set (DPO Fine-Tuning Data)\n\nThis document contains curated responses for Direct Preference Optimization.\n${markdownContent}`,
-          date: new Date().toISOString().split('T')[0],
-          timestamp: serverTimestamp()
+        const dto = await createPolicyApi(
+          {
+            id: GOLDEN_SET_POLICY_ID,
+            title: GOLDEN_SET_POLICY_TITLE,
+            date: nextDate,
+            content: GOLDEN_SET_SEED_CONTENT + markdownContent,
+            isDefault: false,
+          },
+          profile?.uid,
+        );
+        updated = parsePolicyRecord(dto);
+      }
+      if (updated) {
+        setCustomPolicies((prev) => {
+          const next = prev.filter((policy) => policy.id !== GOLDEN_SET_POLICY_ID);
+          return [...next, updated];
         });
       }
 
@@ -2783,9 +2812,8 @@ export default function App() {
       setPromotingLog(null);
       setRejectedReason("");
     } catch (error) {
-      // Handle errors writing to the golden set
-      handleFirestoreError(error, OperationType.WRITE, 'knowledge_base/golden-set');
-      toast.error('Failed to promote to Golden Set');
+      const message = error instanceof Error ? error.message : 'Failed to promote to Golden Set';
+      toast.error(message);
     }
   };
 
@@ -3099,19 +3127,23 @@ export default function App() {
       toast.error('Unauthorized: Admin role required to save policy changes');
       return;
     }
+    const nextDate = new Date().toISOString().split('T')[0] ?? new Date().toISOString();
     try {
-      // Update the policy document in Firestore
-      await updateDoc(doc(db, 'knowledge_base', selectedPolicy.id), {
-        content: policyFormContent,
-        timestamp: serverTimestamp(),
-        date: new Date().toISOString().split('T')[0]
-      });
+      const updated = await patchPolicy(
+        selectedPolicy.id,
+        { content: policyFormContent, date: nextDate },
+        profile.uid,
+      );
+      const parsed = parsePolicyRecord(updated);
+      setCustomPolicies((prev) =>
+        prev.map((policy) => (policy.id === selectedPolicy.id ? (parsed ?? policy) : policy)),
+      );
+      setSelectedPolicy(parsed ?? selectedPolicy);
       setIsEditingPolicy(false);
       toast.success('Policy updated successfully');
     } catch (error) {
-      // Handle errors updating the policy
-      handleFirestoreError(error, OperationType.UPDATE, `knowledge_base/${selectedPolicy.id}`);
-      toast.error('Failed to save policy');
+      const message = error instanceof Error ? error.message : 'Failed to save policy';
+      toast.error(message);
     }
   };
 
@@ -3346,7 +3378,13 @@ export default function App() {
     return () => { cancelled = true; window.clearInterval(interval); };
   }, [profile, localReviewMode]);
 
-  // Effect hook to listen for real-time updates to the knowledge base policies
+  // Phase 3 step 4 (4/5): policies tab moved off Firestore
+  // (`onSnapshot(collection(db, 'knowledge_base'))`) onto Postgres via
+  // GET /v1/policies. Sub-second multi-tab sync isn't needed for an admin
+  // doc-management view, so this is a one-shot load on tab open. On empty
+  // server-side state, the frontend seeds the bundled `POLICIES` defaults
+  // (deterministic ids `default-N`) plus an empty golden-set row via
+  // idempotent POSTs, then renders the seeded list.
   useEffect(() => {
     if (!profile) return;
     if (localReviewMode) return;
@@ -3355,38 +3393,63 @@ export default function App() {
       setSelectedPolicy(null);
       return;
     }
-    const unsubscribe = onSnapshot(collection(db, 'knowledge_base'), async (snapshot) => {
-      if (snapshot.empty) {
-        // Seed default policies if the collection is empty
-        try {
-          for (const policy of POLICIES) {
-            await addDoc(collection(db, 'knowledge_base'), {
-              ...policy,
-              isDefault: true,
-              timestamp: serverTimestamp()
-            });
-          }
-        } catch (error) {
-          console.error("Failed to seed default policies", error);
+
+    let cancelled = false;
+    void (async () => {
+      try {
+        let policies = await listPolicies(profile.uid);
+        if (policies.length === 0) {
+          // First admin to visit after deploy: seed defaults. INSERT ... ON
+          // CONFLICT DO NOTHING on the server keeps this safe under
+          // concurrent admin tabs.
+          const seeded = await Promise.all([
+            ...POLICIES.map((policy, index) =>
+              createPolicyApi(
+                {
+                  id: `default-${index}`,
+                  title: policy.title,
+                  date: policy.date,
+                  content: policy.content,
+                  isDefault: true,
+                },
+                profile.uid,
+              ),
+            ),
+            createPolicyApi(
+              {
+                id: GOLDEN_SET_POLICY_ID,
+                title: GOLDEN_SET_POLICY_TITLE,
+                date: new Date().toISOString().split('T')[0] ?? new Date().toISOString(),
+                content: GOLDEN_SET_SEED_CONTENT,
+                isDefault: false,
+              },
+              profile.uid,
+            ),
+          ]);
+          // Re-read to honor the server-side ordering (defaults first).
+          policies = await listPolicies(profile.uid);
+          if (policies.length === 0) policies = seeded;
         }
-      } else {
-        // Update state with fetched policies
-        const policies = snapshot.docs
-          .map(doc => parsePolicyRecord({ id: doc.id, ...doc.data() }))
+        if (cancelled) return;
+        const parsed = policies
+          .map((policy) => parsePolicyRecord(policy))
           .filter((policy): policy is PolicyRecord => policy !== null);
-        setCustomPolicies(policies);
-        // Ensure a valid policy is selected
+        setCustomPolicies(parsed);
         setSelectedPolicy((prev: PolicyRecord | null) => {
-          if (!prev || !prev.id) return policies[0];
-          const stillExists = policies.find(p => p.id === prev.id);
-          return stillExists || policies[0] || null;
+          if (!prev || !prev.id) return parsed[0] ?? null;
+          return parsed.find((p) => p.id === prev.id) ?? parsed[0] ?? null;
         });
+      } catch (error) {
+        if (!cancelled) {
+          const message = error instanceof Error ? error.message : 'Unknown error';
+          toast.error(`Failed to load policies: ${message}`);
+        }
       }
-    }, (error) => {
-      // Handle errors fetching policies
-      handleFirestoreError(error, OperationType.LIST, 'knowledge_base');
-    });
-    return unsubscribe;
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, [profile, localReviewMode]);
 
   // Function to handle uploading a markdown file as a new policy
@@ -3415,19 +3478,16 @@ export default function App() {
           toast.success('Document added to local review session');
           return;
         }
-        // Add the new policy document to Firestore
-        await addDoc(collection(db, 'knowledge_base'), {
-          title,
-          date,
-          content,
-          uploadedBy: user?.uid,
-          timestamp: serverTimestamp()
-        });
+        const created = await createPolicyApi({ title, date, content }, profile?.uid);
+        const parsed = parsePolicyRecord(created);
+        if (parsed) {
+          setCustomPolicies((prev) => [...prev, parsed]);
+          setSelectedPolicy(parsed);
+        }
         toast.success('Document uploaded successfully');
       } catch (error) {
-        // Handle errors uploading the policy
-        handleFirestoreError(error, OperationType.CREATE, 'knowledge_base');
-        toast.error('Failed to upload document');
+        const message = error instanceof Error ? error.message : 'Failed to upload document';
+        toast.error(message);
       }
     };
     reader.readAsText(file);
@@ -3451,17 +3511,15 @@ export default function App() {
         toast.success('Document removed from local review session');
         return;
       }
-      // Delete the document from Firestore
-      await deleteDoc(doc(db, 'knowledge_base', id));
-      // Update selection if the deleted policy was selected
+      await deletePolicyApi(id, profile?.uid);
+      setCustomPolicies((prev) => prev.filter((policy) => policy.id !== id));
       if (selectedPolicy?.id === id) {
-        setSelectedPolicy(customPolicies.find(p => p.id !== id) || null);
+        setSelectedPolicy(customPolicies.find((p) => p.id !== id) || null);
       }
       toast.success('Document deleted successfully');
     } catch (error) {
-      // Handle errors deleting the policy
-      handleFirestoreError(error, OperationType.DELETE, `knowledge_base/${id}`);
-      toast.error('Failed to delete document');
+      const message = error instanceof Error ? error.message : 'Failed to delete document';
+      toast.error(message);
     }
   };
 

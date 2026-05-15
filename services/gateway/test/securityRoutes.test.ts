@@ -470,3 +470,99 @@ test('/v1/users/:uid/role PUT returns 503 when the profile store is unconfigured
   });
   assert.equal(put.status, 503);
 });
+
+// ---------- /v1/policies (Phase 3 step 4 — 4/5) ----------
+
+test('/v1/policies rejects unauthenticated GET / POST / PATCH / DELETE', async () => {
+  const get = await requestApp('/v1/policies', { method: 'GET' });
+  assert.equal(get.status, 401);
+
+  const post = await requestApp('/v1/policies', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: { title: 'x', date: '2026-05-15', content: 'y' },
+  });
+  assert.equal(post.status, 401);
+
+  const patch = await requestApp('/v1/policies/some-id', {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: { content: 'z' },
+  });
+  assert.equal(patch.status, 401);
+
+  const del = await requestApp('/v1/policies/some-id', { method: 'DELETE' });
+  assert.equal(del.status, 401);
+});
+
+test('/v1/policies returns 503 when the policy store is unconfigured', async () => {
+  const get = await requestApp('/v1/policies', { method: 'GET', headers: authHeaders() });
+  assert.equal(get.status, 503);
+  assert.match((get.payload as { error?: string }).error ?? '', /Policy store is not configured/);
+
+  const post = await requestApp('/v1/policies', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: { title: 'x', date: '2026-05-15', content: 'y' },
+  });
+  assert.equal(post.status, 503);
+});
+
+test('/v1/policies POST validates the body shape', async () => {
+  // Body validation runs before the store check, so structural errors
+  // always 400 even when the store is unconfigured.
+  const missingTitle = await requestApp('/v1/policies', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: { date: '2026-05-15', content: 'y' },
+  });
+  assert.equal(missingTitle.status, 400);
+  assert.match((missingTitle.payload as { error?: string }).error ?? '', /Invalid policy/);
+
+  const emptyTitle = await requestApp('/v1/policies', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: { title: '', date: '2026-05-15', content: 'y' },
+  });
+  assert.equal(emptyTitle.status, 400);
+
+  const extraField = await requestApp('/v1/policies', {
+    method: 'POST',
+    headers: authHeaders(),
+    body: { title: 'x', date: '2026-05-15', content: 'y', isDefault: false, somethingElse: true },
+  });
+  // strict() schema rejects unknown fields — defense against silently storing
+  // client-supplied extras alongside the canonical columns.
+  assert.equal(extraField.status, 400);
+});
+
+test('/v1/policies PATCH validates the body shape', async () => {
+  const empty = await requestApp('/v1/policies/some-id', {
+    method: 'PATCH',
+    headers: authHeaders(),
+    body: {},
+  });
+  // refine() requires at least one mutable field — empty PATCH is meaningless.
+  assert.equal(empty.status, 400);
+  assert.match((empty.payload as { error?: string }).error ?? '', /Invalid policy update/);
+
+  const wrongType = await requestApp('/v1/policies/some-id', {
+    method: 'PATCH',
+    headers: authHeaders(),
+    body: { content: 42 },
+  });
+  assert.equal(wrongType.status, 400);
+});
+
+test('/v1/policies DELETE refuses the golden-set id even when the store is unconfigured', async () => {
+  // The golden-set delete-guard sits BEFORE the policy-store check (and
+  // before the admin-role check), so it always 409s regardless of DB state.
+  // This keeps the promote-to-KB workflow's durable handle from being a
+  // single-button-click away from disappearing.
+  const del = await requestApp('/v1/policies/golden-set', {
+    method: 'DELETE',
+    headers: authHeaders(),
+  });
+  assert.equal(del.status, 409);
+  assert.match((del.payload as { error?: string }).error ?? '', /Cannot delete the golden-set/);
+});

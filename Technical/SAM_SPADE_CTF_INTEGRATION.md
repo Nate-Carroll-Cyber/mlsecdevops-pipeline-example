@@ -6,6 +6,7 @@
 | v1.1 | 2026-04-21 | Runtime sync: provenance normalized to `ctf_chat`, and every submission mirrors into the shared governed review path. |
 | v1.2 | 2026-04-24 | Runtime sync: clean Sam Spade turns now use the downstream responder after local and safeguard approval, with admin-managed persona/scenario prompts assembled backend-side. |
 | v1.3 | 2026-04-25 | Runtime sync: sensitive redaction placeholders are intercepted before gameplay/responder inference, and blocked CTF surfaces display only `Bad content.` while Audit Logs retain sanitized review artifacts. |
+| v1.4 | 2026-06-04 | Runtime sync: Sam Spade runs as a standalone CTF frontend/service and is no longer embedded in the backend analyst console navigation. |
 
 ---
 
@@ -45,14 +46,14 @@ The analyst should feel like they are:
 
 ### 2.2 Intended Counter-Spy.ai Role
 
-Counter-Spy.ai should sit **between the game UI and the character-response service**.
+Counter-Spy.ai should sit **between the game UI and the character-response service**, even though the game UI is now opened as a standalone surface rather than a backend analyst-console tab.
 
 That means:
 - the game frontend never talks directly to an LLM provider
-- game prompts go through Counter-Spy.ai sanitization and governance first
-- approved prompts are forwarded to the NPC orchestration backend
-- responses are returned through the same control-plane path
-- prompts and outcomes are auditable inside the existing review workflow
+- game prompts go through Sam Spade service sanitization/governance first
+- approved prompts are forwarded to the NPC orchestration path
+- responses are returned through the standalone CTF frontend
+- review artifacts are posted back to the Counter-Spy gateway so prompts and outcomes remain auditable inside the existing review workflow
 
 ---
 
@@ -120,25 +121,24 @@ The browser can propose metadata, but authoritative audit records should be crea
 
 ```mermaid
 flowchart LR
-  A["Sam Spade Game UI"] --> B["Counter-Spy.ai Frontend API Boundary"]
+  A["Standalone Sam Spade CTF UI (:3001)"] --> B["Sam Spade Service (:18120)"]
   B --> C["Sanitization + Governance Layer"]
-  C -->|Approved| D["NPC Orchestration Backend"]
-  C -->|Queued/Blocked| E["Analyst Review + Audit Logs"]
+  C -->|Approved| D["NPC Orchestration + Responder Path"]
+  C -->|Queued/Blocked| E["Gateway Review Artifacts"]
   D --> F["Character Response + State Update"]
-  F --> B
-  B --> E
+  F --> A
+  E --> G["Analyst Console Audit + Metrics (:18080)"]
 ```
 
 ### 5.1 High-Level Flow
 
-1. Player submits a message in the Sam Spade UI
-2. Counter-Spy.ai receives the prompt as a distinct `source`
-3. Sanitization and guardrails run first
-4. If blocked or queued, the attempt is handled by the normal governance path
-5. If approved, the message is forwarded to the Sam Spade orchestration service
-6. The orchestration service updates game state, evaluates progression, and generates the next NPC response
-7. Counter-Spy.ai records the interaction in Audit Logs
-8. Analysts can review the conversation just like any other governed traffic
+1. Player submits a message in the standalone Sam Spade UI at `http://localhost:3001/`.
+2. The CTF frontend calls the standalone Sam Spade service at `http://localhost:18120/`.
+3. Sanitization and guardrails run before gameplay/responder inference.
+4. If blocked or queued, the CTF UI displays the governed blocked state and the service prepares review telemetry.
+5. If approved, the service updates scenario state, evaluates progression, and generates the next NPC response.
+6. The CTF frontend posts each turn's review artifact to the Counter-Spy gateway.
+7. The analyst console at `http://localhost:18080/` surfaces that traffic in Audit Logs and Metrics under `ctf_chat`.
 
 ---
 
@@ -153,7 +153,8 @@ The Sam Spade frontend should be intentionally narrow.
 - local session UX state
 - lightweight progression indicators
 - optional clue-board or notebook UI
-- transport of player messages to Counter-Spy.ai
+- transport of player messages to the Sam Spade service
+- posting review artifacts to the Counter-Spy gateway
 
 ### 6.2 Frontend Must Not Own
 
@@ -204,12 +205,12 @@ This allows:
 
 ### 7.2 Counter-Spy.ai Responsibilities In This Flow
 
-- sanitize the player prompt
-- detect obfuscation, injection, exfiltration, and non-plain-text garbage
-- decide whether to block, queue, or forward
-- persist the authoritative audit event
-- mirror each submission into the same governed Analyst Chat review path used by other intake surfaces
+- receive CTF review artifacts from the standalone CTF frontend
+- persist review artifacts for Audit Logs and Metrics
+- keep CTF provenance filterable under `ctf_chat`
 - preserve request and response lineage for analyst review
+
+The Sam Spade service owns the CTF request-time sanitization/governance path. The backend analyst console no longer embeds the CTF iframe or shows a Sam Spade navigation tab.
 
 ### 7.3 Desired Policy Posture
 

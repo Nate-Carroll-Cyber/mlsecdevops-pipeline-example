@@ -16,7 +16,7 @@ import React, { lazy, Suspense, useState, useEffect, useRef, useMemo, useCallbac
 // Firebase Auth is the only piece of Firebase still in play — sign-in + uid.
 // Firestore retired in Phase 3 step 4 (5/5); all data lives in Postgres now
 // behind /v1/* endpoints.
-import { auth, googleProvider } from './lib/firebase';
+import { auth, firebaseAuthAvailable, googleProvider } from './lib/firebase';
 // Import Firebase Authentication functions and types
 import { 
   signInWithPopup, 
@@ -1890,7 +1890,7 @@ export default function App() {
   // State to indicate if a message is currently being processed
   const [isProcessing, setIsProcessing] = useState(false);
   // State to track the currently active tab in the UI
-  const [activeTab, setActiveTab] = useState<'sam_spade' | 'chat' | 'responder' | 'audit' | 'policies' | 'metrics' | 'playground'>('sam_spade');
+  const [activeTab, setActiveTab] = useState<'chat' | 'responder' | 'audit' | 'policies' | 'metrics' | 'playground'>('chat');
   const [sanitizationPreview, setSanitizationPreview] = useState<SanitizationResult | null>(null);
   // State to store the result of the last executed sanitization
   const [lastExecutedSanitization, setLastExecutedSanitization] = useState<SanitizationResult | null>(null);
@@ -1986,30 +1986,6 @@ export default function App() {
   // Ref for the chat scroll area to auto-scroll to the bottom
   const scrollRef = useRef<HTMLDivElement>(null);
   const analystTranscriptEndRef = useRef<HTMLDivElement>(null);
-  // Sam Spade CTF iframe handle — used to forward Runtime Settings (currently
-  // just the safeguardApiKey) into the iframe via postMessage. The iframe is
-  // a separate origin/bundle, so it can't read the parent's localStorage; this
-  // bridge keeps the two surfaces in sync without duplicating secrets.
-  const samSpadeIframeRef = useRef<HTMLIFrameElement>(null);
-
-  // Once the operator opens the Sam Spade tab, keep the iframe MOUNTED for the
-  // life of the session (toggle visibility with display:none, don't unmount).
-  // Reason: Safari 26.2 / macOS 14.8.3 (and likely others) has a bug in its
-  // FormCredentialSaver::offerToSaveCredential path where removing a
-  // cross-origin iframe from the DOM triggers
-  // -[BrowserViewController saveUnsubmittedFormDataFromRemovedFrameIfNecessary…]
-  // which calls a selector the password-suggester object doesn't implement
-  // (bestUsernameSuggestionForUsernamePromptOnURL:inContext:completionHandler:),
-  // raises NSInvalidArgumentException, and SIGABRTs the entire browser
-  // process. Repro: open Sam Spade, switch to any other tab — Safari dies.
-  // Captured crash report `626BC344-CE31-4B9E-A15A-3B9F1DBDEEDF`. By keeping
-  // the iframe attached we never trigger the form-data-from-removed-frame
-  // path; the iframe just hides. We still gate on first-open so the CTF
-  // bundle isn't fetched until the operator actually visits the tab.
-  const [hasOpenedSamSpade, setHasOpenedSamSpade] = useState(false);
-  useEffect(() => {
-    if (activeTab === 'sam_spade') setHasOpenedSamSpade(true);
-  }, [activeTab]);
   const effectiveSafeguardPolicies = customPolicies.length > 0 ? customPolicies : POLICIES;
   const effectiveSafeguardPromptPreview = useMemo(() => buildCanonicalSafeguardPromptForHash({
     systemConfig,
@@ -2073,28 +2049,6 @@ export default function App() {
   const safeguardModelIdOverride = safeguardRuntimeConfig.modelId.trim();
   const safeguardApiKeyOverride = safeguardApiKey.trim();
 
-  // Forward Runtime Settings into the Sam Spade iframe. The CTF iframe is a
-  // separate bundle/origin (vite preview at :3001), so it can't read the
-  // parent's React state directly; the parent posts the safeguardApiKey to it
-  // and the CTF echoes it back as metadata.safeguardApiKey on /v1/ctf/sam-spade
-  // calls. Origin is set to CTF_FRONTEND_URL so the message isn't broadcast.
-  const postSamSpadeRuntimeSettings = useCallback((iframe: HTMLIFrameElement | null) => {
-    if (!iframe || !iframe.contentWindow || !CTF_FRONTEND_URL) return;
-    iframe.contentWindow.postMessage(
-      {
-        type: 'counter-spy:runtime-settings',
-        payload: { safeguardApiKey: safeguardApiKeyOverride || null },
-      },
-      CTF_FRONTEND_URL,
-    );
-  }, [safeguardApiKeyOverride]);
-
-  // Re-post whenever the safeguardApiKey changes so the iframe stays in sync
-  // without needing to be reopened (the iframe is also re-posted to on each
-  // `onLoad` via the iframe element below).
-  useEffect(() => {
-    postSamSpadeRuntimeSettings(samSpadeIframeRef.current);
-  }, [postSamSpadeRuntimeSettings]);
   const backendSafeguardBaseUrl = backendHealth?.safeguards?.baseUrl?.trim() || '';
   const backendSafeguardModelId = backendHealth?.safeguards?.modelId?.trim() || '';
   const displayedSafeguardBaseUrl = safeguardBaseUrlOverride || backendSafeguardBaseUrl || 'BACKEND / ENV MANAGED';
@@ -2212,6 +2166,15 @@ export default function App() {
   // materialize the row — matching the previous setDoc-on-first-login path.
   useEffect(() => {
     let cancelled = false;
+
+    if (!auth) {
+      setUser(null);
+      setProfile(null);
+      setLoading(false);
+      return () => {
+        cancelled = true;
+      };
+    }
 
     const authUnsubscribe = onAuthStateChanged(auth, async (u) => {
       if (!u) {
@@ -2345,6 +2308,11 @@ export default function App() {
 
   // Function to handle user login via Google Popup
   const handleLogin = async () => {
+    if (!auth || !googleProvider) {
+      toast.error('Firebase authentication is not configured. Use Local Review Mode for this demo stack.');
+      return;
+    }
+
     try {
       await signInWithPopup(auth, googleProvider);
       toast.success('Authenticated successfully');
@@ -2537,7 +2505,15 @@ export default function App() {
   };
 
   // Function to handle user logout
-  const handleLogout = () => signOut(auth);
+  const handleLogout = () => {
+    if (!auth) {
+      setUser(null);
+      setProfile(null);
+      clearLocalSessionArtifacts();
+      return;
+    }
+    void signOut(auth);
+  };
 
   const observeReviewedAdversarialLog = async (log: AuditLog | null, logId: string, resultantSeverity: AuditLog['resultantSeverity']) => {
     if (resultantSeverity !== 'Adversarial') return true;
@@ -4394,9 +4370,10 @@ export default function App() {
               </div>
               <Button 
                 onClick={handleLogin} 
+                disabled={!firebaseAuthAvailable}
                 className="w-full rounded-xl font-medium text-sm h-12 transition-all hover:scale-[1.02]"
               >
-                Authenticate with Google
+                {firebaseAuthAvailable ? 'Authenticate with Google' : 'Google Auth Not Configured'}
               </Button>
               {isLocalReviewHost && (
                 <Button
@@ -4440,14 +4417,6 @@ export default function App() {
         
         {/* Navigation Links */}
         <nav className="flex-1 p-4 space-y-1">
-          <Button 
-            variant={activeTab === 'sam_spade' ? 'secondary' : 'ghost'} 
-            className={`w-full justify-start rounded-lg font-medium text-sm ${activeTab === 'sam_spade' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
-            onClick={() => setActiveTab('sam_spade')}
-          >
-            <Search className="w-4 h-4 mr-3" />
-            Sam Spade CTF
-          </Button>
           <Button 
             variant={activeTab === 'chat' ? 'secondary' : 'ghost'} 
             className={`w-full justify-start rounded-lg font-medium text-sm ${activeTab === 'chat' ? 'bg-secondary text-secondary-foreground' : 'text-muted-foreground hover:text-foreground'}`}
@@ -4590,36 +4559,7 @@ export default function App() {
         </header>
 
         {/* Content Body */}
-        <div className={`flex-1 min-h-0 p-6 ${activeTab === 'sam_spade' ? 'overflow-hidden' : 'overflow-y-auto'}`}>
-          {/* Sam Spade CTF Tab — kept mounted (display:none when inactive) to
-              avoid the Safari 26.2 FormCredentialSaver crash on iframe unmount.
-              See samSpadeIframeRef declaration above for the full root cause. */}
-          {hasOpenedSamSpade && (
-            <div
-              className={`h-full overflow-hidden bg-black ${activeTab === 'sam_spade' ? '' : 'hidden'}`}
-              aria-hidden={activeTab !== 'sam_spade'}
-            >
-              {CTF_FRONTEND_URL ? (
-                <iframe
-                  ref={samSpadeIframeRef}
-                  src={CTF_FRONTEND_URL}
-                  title="Sam Spade CTF"
-                  className="h-full w-full border-0"
-                  allow="clipboard-write"
-                  onLoad={() => postSamSpadeRuntimeSettings(samSpadeIframeRef.current)}
-                />
-              ) : (
-                <div className="flex h-full items-center justify-center p-8 text-center text-sm text-slate-400">
-                  <p className="max-w-md leading-6">
-                    The Sam Spade CTF runs as its own container. Set <code className="font-mono text-slate-300">VITE_CTF_FRONTEND_URL</code> to embed it here
-                    (the demo stack points it at <code className="font-mono text-slate-300">http://localhost:3001</code>), or open the CTF app directly.
-                    Its review artifacts still flow into the Audit and Metrics tabs.
-                  </p>
-                </div>
-              )}
-            </div>
-          )}
-
+        <div className="flex-1 min-h-0 p-6 overflow-y-auto">
           <Dialog open={isEditingRuntimeApiConfig} onOpenChange={setIsEditingRuntimeApiConfig}>
             <DialogContent className="sm:max-w-[560px]">
               <DialogHeader>

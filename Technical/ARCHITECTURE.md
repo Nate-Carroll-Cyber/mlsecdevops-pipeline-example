@@ -11,7 +11,7 @@
 Counter-Spy.ai employs a **Shield-and-Sword** architectural pattern to secure Large Language Model (LLM) interactions. This multi-stage defense-in-depth strategy ensures that adversarial payloads are neutralized at the edge before reaching high-compute inference engines.
 
 ### 1.0 Current Beta Implementation
-The current Beta is a React/Vite/Firebase application with a TypeScript/Express backend gateway. Governance is still enforced first by local TypeScript sanitization logic in the client, while backend routes now own the secure intercept path, pgvector-backed instruction similarity memory, downstream responder handoff, manual Lara translation proxying, and the Sam Spade CTF API. Firebase Authentication still provides user identity and Firestore still stores audit logs, knowledge-base content, and synchronized governance configuration.
+The current Beta is a React/Vite application with a TypeScript/Express backend gateway. The gateway serves the server-rendered analyst console and owns `/v1/*` routes for secure intercepts, pgvector-backed instruction similarity memory, downstream responder handoff, manual Lara translation proxying, Postgres-backed audit/governance/system/policy/user state, and CTF review artifacts. Firebase Authentication is optional for deployed identity; local demo builds can omit Firebase client config and use Local Review Mode instead. The Sam Spade CTF surface runs separately from the backend analyst console as its own frontend and service.
 
 ### 1.1 Logical Flow
 The system bifurcates the request lifecycle into two distinct phases:
@@ -95,15 +95,15 @@ The deterministic sanitizer also flags jailbreak structures that are independent
 ## 3. State Management & Persistence
 
 ### 3.1 Global Pause (HOTL) Persistence
-The governance state is persisted in Firestore (`config/governance`). 
-*   **Current runtime behavior:** The frontend initializes `isGlobalPause` to `false` and then overlays Firestore state when the governance document arrives. In local review mode the same state remains in memory only. Operators should not assume startup automatically begins in a paused state.
+The governance state is persisted in Postgres behind `/v1/governance`.
+*   **Current runtime behavior:** The frontend initializes `isGlobalPause` to `false` and then overlays backend state when `/v1/governance` returns. In Local Review Mode the same state remains browser-local. Operators should not assume startup automatically begins in a paused state.
 
 ### 3.2 Audit Log Retention
-*   **Policy:** By default, logs are intended to be permanent for forensic auditability.
-*   **Cost Management:** The Beta supports **Firestore TTL (Time-to-Live)**. Administrators can designate a TTL policy field in the Google Cloud Console, enabling automatic purging of logs older than a defined retention period (e.g., 90 days).
+*   **Policy:** By default, logs are intended to be permanent for forensic auditability and are stored in Postgres behind `/v1/audit-logs`.
+*   **Cost Management:** Production retention should be enforced with database lifecycle policy, scheduled archival/purge jobs, or deployment-specific retention controls. Firestore TTL is no longer part of the current local/Beta persistence path.
 
 > [!NOTE]
-> **Forensic Gap Awareness**: Firestore audit logs are retained independently of any downstream provider-side abuse monitoring window. If provider-side request logs are part of an investigation, forensic correlation must still happen inside that provider's retention window.
+> **Forensic Gap Awareness**: Counter-Spy audit logs are retained independently of any downstream provider-side abuse monitoring window. If provider-side request logs are part of an investigation, forensic correlation must still happen inside that provider's retention window.
 
 ---
 

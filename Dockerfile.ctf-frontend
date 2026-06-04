@@ -33,4 +33,6 @@ EXPOSE 3001
 
 # vite preview reads server config from vite.config.ts (host 0.0.0.0, port 3001,
 # /v1 + /healthz proxy).
+RUN chown -R node:node /app/ctf-frontend
+USER node
 CMD ["npm", "run", "preview"]

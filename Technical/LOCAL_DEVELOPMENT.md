@@ -24,7 +24,7 @@ Direct browser-side inference is disabled so provider keys are not exposed in th
 
 ## Frontend With Local Backend
 
-Use this when you want the frontend to call the local `/v1/intercept` gateway, backend-mediated translation routes, and optional downstream responder APIs.
+Use this when you want the local gateway to serve the analyst console and own `/v1/intercept`, backend-mediated translation routes, and optional downstream responder APIs.
 
 Terminal 1 (gateway — analyst console SSR + `/v1/*`):
 
@@ -38,13 +38,15 @@ Terminal 2 (Sam Spade CTF service — only needed if you want the noir CTF surfa
 SAM_SPADE_SERVICE_PORT=18120 npx tsx watch services/sam-spade/src/server.ts
 ```
 
-Terminal 3 (Vite dev for the analyst console, if you want HMR instead of the gateway's SSR build):
+Terminal 3 (optional Vite dev for the analyst console, if you want HMR instead of the gateway's SSR build):
 
 ```bash
 VITE_API_BASE_URL=http://127.0.0.1:18080 npm run dev
 ```
 
-Open `http://localhost:3000/`.
+Open the gateway-served analyst console at `http://localhost:18080/`. If you run the optional Vite dev server, open `http://localhost:3000/` for HMR.
+
+The analyst console can run without Firebase client config. When `VITE_FIREBASE_API_KEY`, `VITE_FIREBASE_AUTH_DOMAIN`, `VITE_FIREBASE_PROJECT_ID`, and `VITE_FIREBASE_APP_ID` are absent, Google Auth is disabled and localhost operators should use **Continue in Local Review Mode**. Local Review Mode uses the shared backend bearer token plus local profile state for demo work; it does not require Firebase.
 
 Clean prompts are routed to the backend gateway. The gateway runs local prechecks first, calls a separately configured OpenAI-compatible safeguard judge, and forwards to the downstream responder only after the safeguard judge returns `CLEAN` and **Responder Routing** is enabled. Analyst Chat safeguard configuration remains separate from responder provider, Base URL, Model ID, API key, and context-window controls, but protected backend calls use server-side environment/configuration only. Max context window is now a browser-local submission limit used by Analyst Chat and the Prompt Playground before dispatch.
 
@@ -168,7 +170,7 @@ LARA_API_BASE_URL=https://api.laratranslate.com
 
 ### Optional: Sam Spade Service Config
 
-Sam Spade still runs in-process today, but its config is now isolated from the main backend env so the later service split is easier.
+Sam Spade now runs as a standalone service and standalone CTF frontend. The backend analyst console no longer embeds or links the CTF surface; CTF traffic still posts review artifacts to the gateway so Audit Logs and Metrics can include `ctf_chat` records.
 
 Useful vars:
 
@@ -185,31 +187,34 @@ Useful vars:
 
 These are documented in `.env.example`.
 
-### Future Service Stub
+### Standalone Sam Spade Service
 
-There is now a compose stub for the future Sam Spade container boundary:
+For service-only local testing:
 
 ```bash
 docker compose -f docker-compose.sam-spade.yml --profile sam-spade up
 ```
 
-Right now this starts a placeholder container only. It is there to make the eventual split more mechanical and to document the intended service boundary.
+The full demo stack already wires the service and CTF frontend together.
 
 ## Local Docker Demo Pass
 
 For a minimal full-stack demo using Docker:
 
 ```bash
-docker compose --env-file .env.demo.local -f docker-compose.demo.yml up --build
+docker compose --env-file .env.demo.local -f docker-compose.demo.yml up -d --build
 ```
 
 This starts:
 
-- `counter-spy-backend` on `http://localhost:18080`
-- `counter-spy-frontend` on `http://localhost:3000`
-- `counter-spy-postgres` on `127.0.0.1:15432` for pgvector-backed instruction similarity memory
+- `counter-spy-backend` on `http://localhost:18080` for the analyst console and `/v1/*`
+- `counter-spy-ctf-frontend` on `http://localhost:3001` for the standalone Sam Spade CTF UI
+- `counter-spy-sam-spade-service` on `http://localhost:18120` for `/healthz` and `/v1/ctf/sam-spade/*`
+- `counter-spy-postgres` on `127.0.0.1:15432` for Postgres + pgvector-backed instruction similarity memory and durable app state
+- `counter-spy-otel-collector` on `127.0.0.1:4317`, `127.0.0.1:4318`, and `127.0.0.1:8889`
+- `counter-spy-jaeger` on `http://localhost:16686` for trace search
 
-The frontend uses Vite's proxy layer inside the container to reach the backend cleanly, so browser requests stay same-origin for `/v1/*` and `/healthz`.
+The analyst console is server-rendered and served by the gateway container, so browser requests stay same-origin for `/v1/*` and `/healthz`. The CTF frontend uses its own Vite preview/proxy container and talks directly to `counter-spy-sam-spade-service` for Sam Spade API calls while posting review artifacts back to the gateway.
 
 The Postgres data directory now lives on the named Docker volume `counter_spy_postgres_data` (Phase 3 step 4 retired Firestore; Postgres backs all long-lived state — audit logs, governance config, system config, user profiles, KB policies, and the instruction-similarity corpus). A normal `docker compose up --build -d` keeps every row across rebuilds. To wipe for a clean-slate test run, stop the stack and remove the volume explicitly:
 
@@ -271,7 +276,7 @@ Fresh database workflow:
 docker compose --env-file .env.demo.local -f docker-compose.demo.yml up --build --force-recreate -d
 ```
 
-Because demo Postgres uses tmpfs, recreating `counter-spy-postgres` starts with a clean instruction-monitor database. Tables are lazily created by backend comparison/observe calls, seed import, or seed export.
+Because demo Postgres uses a named Docker volume, recreating `counter-spy-postgres` does not wipe the instruction-monitor database. Use `docker compose ... down` plus `docker volume rm counterspyclaudeai_counter_spy_postgres_data` when you need a clean corpus. Tables are lazily created by backend comparison/observe calls, seed import, or seed export.
 
 Import the current `core` seed:
 
@@ -354,9 +359,9 @@ Guardrail toggle note: Active Guardrails includes a `Similarity Monitor` switch.
 
 Sanitizer note: the current runtime treats recognized decode/structural obfuscation signals as `Adversarial`, including alphabetic substitution gibberish detected by the English-likeness heuristic. Covered local test families include byte-delimited Hex, binary, ASCII decimal, A1Z26, URL/HTML/unicode escapes, leetspeak, ROT13, reverse text, NATO phonetic, Morse, vertical reflow, and recursive decode chains. Pig Latin is the exception: it is detected as `PIG_LATIN` and routed to `Suspicious` review without decoding unless another stronger signal fires. The sanitizer also flags forced-prefix injection, anti-sanitization/no-disclaimer clauses, persona assignment plus unrestricted-capability language, and all-caps hyphenated persona handles (`ALLCAPS_PERSONA` is telemetry-only). Entropy follows the shared live policy: `<= 3.8` stays allowed on entropy grounds, `> 3.8` up to the configured threshold is `Suspicious`, and anything above the configured threshold is `Adversarial`.
 
-Sam Spade session data is stored in a named Docker volume backing the standalone `counter-spy-sam-spade-service` container; the file path inside the container is `/app/data/sam-spade.db` (`SAM_SPADE_STORE_PATH`), and the host-side default for a non-Docker run is `services/sam-spade/data/sam-spade.db`. The pgvector instruction-monitor database is not stored in a named volume in the demo stack.
+Sam Spade session data is stored in a named Docker volume backing the standalone `counter-spy-sam-spade-service` container; the file path inside the container is `/app/data/sam-spade.db` (`SAM_SPADE_STORE_PATH`), and the host-side default for a non-Docker run is `services/sam-spade/data/sam-spade.db`. The pgvector instruction-monitor database is stored in the Postgres named volume.
 
-Note: in the current demo build, Sam Spade clean turns use the same governed path as Analyst Chat after local sanitizer and safeguard approval. The protected Sam Spade API binds each session to the authenticated caller id and rejects cross-user fetch/message/solve attempts. When responder routing is enabled, the backend assembles the Sam Spade persona and scenario prompts before calling the responder; browser callers cannot override those prompts. When responder routing is disabled, the safeguard verdict and latency are retained and the turn uses local responder passthrough. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.
+Note: in the current demo build, Sam Spade is opened directly at `http://localhost:3001/`, not from the backend analyst console. Clean CTF turns use the standalone Sam Spade service after local sanitizer and safeguard approval. The protected Sam Spade API binds each session to the authenticated caller id and rejects cross-user fetch/message/solve attempts. When responder routing is enabled, the service assembles the Sam Spade persona and scenario prompts before calling the responder; browser callers cannot override those prompts. When responder routing is disabled, the safeguard verdict and latency are retained and the turn uses local responder passthrough. Every Sam Spade submission is still mirrored into the shared governed review path and audit trail under the `ctf_chat` source so case traffic is inspected like any other intake.
 
 Blocked Sam Spade note: CTF turns with sensitive redaction labels such as `CREDIT_CARD`, `SSN`, `API_KEY`, `LLM_API_KEY`, `JWT`, or `SECRET_KEY` are blocked before gameplay/responder inference even when the wider sanitizer would treat the redaction as informational. The CTF modal shows only `Submitted Prompt` -> `Bad content.`, clears the input, and keeps the detailed sanitized artifact in Audit Logs.
 

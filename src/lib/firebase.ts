@@ -12,7 +12,6 @@
 import { initializeApp, type FirebaseApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider, type Auth } from 'firebase/auth';
 import { z } from 'zod';
-import firebaseConfig from '../../firebase-applet-config.json';
 
 const FirebaseConfigSchema = z.object({
   apiKey: z.string().min(1),
@@ -24,14 +23,31 @@ const FirebaseConfigSchema = z.object({
   measurementId: z.string().optional(),
 });
 
+const firebaseConfig = {
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
+};
+
+const hasFirebaseConfig = Boolean(
+  firebaseConfig.apiKey &&
+    firebaseConfig.authDomain &&
+    firebaseConfig.projectId &&
+    firebaseConfig.appId,
+);
+
 // Parse without echoing the (potentially sensitive) config values on failure —
 // just report which keys were missing/invalid.
-const parsedFirebaseConfigResult = FirebaseConfigSchema.safeParse(firebaseConfig);
-if (!parsedFirebaseConfigResult.success) {
+const parsedFirebaseConfigResult = hasFirebaseConfig ? FirebaseConfigSchema.safeParse(firebaseConfig) : null;
+if (parsedFirebaseConfigResult && !parsedFirebaseConfigResult.success) {
   const badKeys = parsedFirebaseConfigResult.error.issues.map((issue) => issue.path.join('.')).join(', ');
-  throw new Error(`Invalid firebase-applet-config.json (check: ${badKeys || 'schema'}).`);
+  throw new Error(`Invalid Firebase client configuration (check: ${badKeys || 'schema'}).`);
 }
-const parsedFirebaseConfig = parsedFirebaseConfigResult.data;
+const parsedFirebaseConfig = parsedFirebaseConfigResult?.data;
 
 // The Firebase Web SDK is browser-only — it touches `window`, IndexedDB and popup
 // auth flows. This module is imported eagerly by App.tsx, which is rendered on
@@ -40,7 +56,8 @@ const parsedFirebaseConfig = parsedFirebaseConfigResult.data;
 // from a `useEffect` or event handler, which never runs during SSR.
 const isBrowser = typeof window !== 'undefined';
 
-const app: FirebaseApp | undefined = isBrowser ? initializeApp(parsedFirebaseConfig) : undefined;
+const app: FirebaseApp | undefined = isBrowser && parsedFirebaseConfig ? initializeApp(parsedFirebaseConfig) : undefined;
 
-export const auth = (app ? getAuth(app) : undefined) as Auth;
-export const googleProvider = (isBrowser ? new GoogleAuthProvider() : undefined) as GoogleAuthProvider;
+export const firebaseAuthAvailable = Boolean(parsedFirebaseConfig);
+export const auth: Auth | undefined = app ? getAuth(app) : undefined;
+export const googleProvider: GoogleAuthProvider | undefined = isBrowser && parsedFirebaseConfig ? new GoogleAuthProvider() : undefined;

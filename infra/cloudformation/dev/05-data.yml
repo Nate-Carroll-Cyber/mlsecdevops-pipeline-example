@@ -26,6 +26,8 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: expiresAt
         Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       StreamSpecification:
         StreamViewType: NEW_IMAGE
 
@@ -40,6 +42,8 @@ Resources:
       KeySchema:
         - AttributeName: pk
           KeyType: HASH
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   SessionsTable:
     Type: AWS::DynamoDB::Table
@@ -55,6 +59,8 @@ Resources:
       TimeToLiveSpecification:
         AttributeName: expiresAt
         Enabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
 
   ArchiveBucket:
     Type: AWS::S3::Bucket

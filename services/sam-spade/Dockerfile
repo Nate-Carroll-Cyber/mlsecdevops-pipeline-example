@@ -33,7 +33,9 @@ COPY services/sam-spade/package.json ./services/sam-spade/package.json
 RUN npm ci --omit=dev
 COPY --from=build /app/packages/backend-shared/dist ./packages/backend-shared/dist
 COPY --from=build /app/services/sam-spade/dist ./services/sam-spade/dist
+RUN mkdir -p /app/data && chown -R node:node /app/data
 # Health endpoint for Docker/ECS health checks.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:18120/healthz || exit 1
 EXPOSE 18120
+USER node
 CMD ["node", "services/sam-spade/dist/server.js"]

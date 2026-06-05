@@ -113,7 +113,7 @@ counter-spy.ai/
 │   │   │   └── web/ssr.ts                # SSR helper (React renderToString → HTML)
 │   │   ├── test/                         # Gateway test suite (node --test)
 │   │   ├── Dockerfile                    # Gateway image (also builds Vite client+SSR)
-│   │   ├── docker-entrypoint.sh          # su-exec entrypoint
+│   │   ├── docker-entrypoint.sh          # Seed import entrypoint
 │   │   ├── tsconfig.json
 │   │   └── package.json
 │   │
@@ -144,7 +144,7 @@ counter-spy.ai/
 ├── .env.example                          # Template for required environment variables
 ├── .gitignore                            # Version control exclusion rules
 ├── components.json                       # Shadcn UI configuration
-├── firebase-applet-config.json           # Firebase project credentials
+├── firebase-applet-config.json           # Non-secret placeholder; real Firebase config comes from VITE_FIREBASE_* env vars
 ├── firebase-blueprint.json               # Firestore IR (Intermediate Representation)
 ├── firestore.rules                       # 🔒 Hardened RBAC & data validation rules
 ├── index.html                            # HTML entry point (Vite dev / client build)

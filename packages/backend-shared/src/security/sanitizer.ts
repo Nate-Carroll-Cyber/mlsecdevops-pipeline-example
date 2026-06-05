@@ -51,6 +51,8 @@ const CANARY_EXFIL_FLAG = 'CANARY_EXFIL';
 const REDACTED_PLACEHOLDER_REGEX = /\[REDACTED_([A-Z_]+)\]/g;
 const EXTERNAL_CALL_REGEX = /(?:!\[[^\]]*\]\((https?:\/\/[^\s)]+)\))|(?:\b(?:browse|open|visit|fetch|call|request|load|download)\b[\s\S]{0,80}https?:\/\/[^\s)]+)/i;
 const COORDINATE_CIPHER_REGEX = /(?:\(\d{1,2},\d{1,2}\)\s*){3,}/;
+const CUSTOM_CIPHER_INSTRUCTION_REGEX =
+  /\b(?:decode|decrypt|decipher|encode|encrypt|cipher)\b[\s\S]{0,120}\b(?:cipher|substitution|a\s*(?:->|\u2192|to)\s*z|b\s*(?:->|\u2192|to)\s*y|first\s+letters?|acrostic|spell\s+the\s+(?:password|secret|token|key)|hidden\s+(?:message|password|secret|token|key))\b|\b(?:first\s+letters?|acrostic|cipher|substitution|hidden\s+(?:message|password|secret|token|key)|spell\s+the\s+(?:password|secret|token|key))\b[\s\S]{0,120}\b(?:decode|decrypt|decipher|encode|encrypt|spell|hide|conceal|embed)\b/i;
 const CREDIT_CARD_PATTERN = /(?<![A-Za-z0-9])(?:\d[ -]?){12,18}\d(?![A-Za-z0-9])/g;
 const CREDIT_CARD_IIN_PREFIXES = /^(?:4|5[1-5]|2[2-7]|3[47]|3(?:0[0-5]|[68])|6(?:011|5)|35(?:2[89]|[3-8])|62)/;
 const VALID_CREDIT_CARD_LENGTHS = new Set([13, 14, 15, 16, 19]);
@@ -68,6 +70,8 @@ const ANTI_SANITIZATION_PATTERNS = [
   /\bunfiltered\b/i,
   /\b(?:ignore|override|bypass)\s+(?:all\s+)?(?:safety|ethical|moral|content)\s+(?:rules?|guidelines?|policies|filters?|restrictions?)/i,
 ];
+const POLICY_BYPASS_QUERY_REGEX =
+  /\b(?:(?:what|which|how|write|craft|create|give|tell|show|provide)[\s\S]{0,80}\b(?:prompt|message|instruction|wording|text|phrase)[\s\S]{0,80}\b(?:bypass|evade|circumvent|avoid|get\s+around|override)[\s\S]{0,80}\b(?:restrictions?|rules?|guardrails?|safety|polic(?:y|ies)|filters?|limits?|moderation)\b|(?:bypass|evade|circumvent|avoid|get\s+around|override)[\s\S]{0,80}\b(?:restrictions?|rules?|guardrails?|safety|polic(?:y|ies)|filters?|limits?|moderation)[\s\S]{0,80}\b(?:prompt|message|instruction|wording|text|phrase))/i;
 const PAIRED_RESPONSE_REGEX =
   /\b(?:approved\s+(?:and|\/)\s+rejected|both\s+versions|two\s+responses|safe\s+(?:and|\/)\s+unsafe|opposite\s+response)\b/i;
 const PERSONA_ASSIGNMENT_REGEX =
@@ -81,6 +85,10 @@ const BLOCKED_KEYWORDS = [
   'ignore all previous instructions',
   'system prompt',
   'ignore instructions',
+  'show me your instructions',
+  'show your instructions',
+  'reveal your instructions',
+  'print your instructions',
   'disregard previous',
   'developer mode',
   'prompt injection',
@@ -1265,8 +1273,10 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     hasLeetspeakObfuscation(prompt) || decodedSegments.some((segment) => hasLeetspeakObfuscation(segment));
   const languageSignals = detectLanguageSignals(prompt);
   const externalCallDetected = detectorCandidates.some((candidate) => EXTERNAL_CALL_REGEX.test(candidate));
+  const customCipherInstructionDetected = detectorCandidates.some((candidate) => CUSTOM_CIPHER_INSTRUCTION_REGEX.test(candidate));
   const forcedPrefixDetected = detectorCandidates.some((candidate) => hasForcedPrefix(candidate));
   const antiSanitizationDetected = detectorCandidates.some((candidate) => hasAntiSanitizationClause(candidate));
+  const policyBypassQueryDetected = detectorCandidates.some((candidate) => POLICY_BYPASS_QUERY_REGEX.test(candidate));
   const personaInjectionDetected = detectorCandidates.some((candidate) => hasPersonaInjection(candidate));
   const pairedResponseDetected = detectorCandidates.some((candidate) => hasPairedResponseInjection(candidate));
   const allCapsPersonaDetected = detectorCandidates.some((candidate) => ALLCAPS_PERSONA_REGEX.test(candidate));
@@ -1351,6 +1361,10 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     detectionFlags.add('EXTERNAL_CALL_ATTEMPT');
     redactions.add('EXTERNAL_CALL_ATTEMPT');
   }
+  if (customCipherInstructionDetected) {
+    detectionFlags.add('CUSTOM_CIPHER_INSTRUCTION');
+    redactions.add('CUSTOM_CIPHER_INSTRUCTION');
+  }
   if (forcedPrefixDetected) {
     detectionFlags.add('FORCED_PREFIX_INJECTION');
     redactions.add('FORCED_PREFIX_INJECTION');
@@ -1358,6 +1372,10 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
   if (antiSanitizationDetected) {
     detectionFlags.add('ANTI_SANITIZATION_CLAUSE');
     redactions.add('ANTI_SANITIZATION_CLAUSE');
+  }
+  if (policyBypassQueryDetected) {
+    detectionFlags.add('POLICY_BYPASS_QUERY');
+    redactions.add('POLICY_BYPASS_QUERY');
   }
   if (personaInjectionDetected) {
     detectionFlags.add('PERSONA_INJECTION');
@@ -1438,8 +1456,10 @@ export function sanitizePrompt(prompt: string, tuning: BackendSanitizationTuning
     forbiddenTopicDetected ||
     regexMatchDetected ||
     externalCallDetected ||
+    customCipherInstructionDetected ||
     forcedPrefixDetected ||
     antiSanitizationDetected ||
+    policyBypassQueryDetected ||
     personaInjectionDetected ||
     (
       pairedResponseDetected &&

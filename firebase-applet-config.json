@@ -1,10 +1,10 @@
 {
-  "projectId": "gen-lang-client-0143021059",
-  "appId": "1:29546907221:web:668be568db14ebc7e776dc",
-  "apiKey": "AIzaSyCgMXxVKLJvcMH5WeiL5k7HaKee9pUgen8",
-  "authDomain": "gen-lang-client-0143021059.firebaseapp.com",
-  "firestoreDatabaseId": "ai-studio-dae17dfb-5103-45a2-b09f-81140a145fb9",
-  "storageBucket": "gen-lang-client-0143021059.firebasestorage.app",
-  "messagingSenderId": "29546907221",
+  "projectId": "set-via-VITE_FIREBASE_PROJECT_ID",
+  "appId": "set-via-VITE_FIREBASE_APP_ID",
+  "apiKey": "set-via-VITE_FIREBASE_API_KEY",
+  "authDomain": "set-via-VITE_FIREBASE_AUTH_DOMAIN",
+  "firestoreDatabaseId": "",
+  "storageBucket": "",
+  "messagingSenderId": "",
   "measurementId": ""
 }

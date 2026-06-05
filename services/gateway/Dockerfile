@@ -21,15 +21,29 @@ ARG VITE_BACKEND_BEARER_TOKEN=""
 ARG VITE_API_BASE_URL=""
 ARG VITE_CTF_FRONTEND_URL=""
 ARG VITE_OTEL_EXPORTER_OTLP_ENDPOINT=""
+ARG VITE_FIREBASE_API_KEY=""
+ARG VITE_FIREBASE_AUTH_DOMAIN=""
+ARG VITE_FIREBASE_PROJECT_ID=""
+ARG VITE_FIREBASE_APP_ID=""
+ARG VITE_FIREBASE_STORAGE_BUCKET=""
+ARG VITE_FIREBASE_MESSAGING_SENDER_ID=""
+ARG VITE_FIREBASE_MEASUREMENT_ID=""
 ENV VITE_BACKEND_BEARER_TOKEN=$VITE_BACKEND_BEARER_TOKEN \
     VITE_API_BASE_URL=$VITE_API_BASE_URL \
     VITE_CTF_FRONTEND_URL=$VITE_CTF_FRONTEND_URL \
-    VITE_OTEL_EXPORTER_OTLP_ENDPOINT=$VITE_OTEL_EXPORTER_OTLP_ENDPOINT
+    VITE_OTEL_EXPORTER_OTLP_ENDPOINT=$VITE_OTEL_EXPORTER_OTLP_ENDPOINT \
+    VITE_FIREBASE_API_KEY=$VITE_FIREBASE_API_KEY \
+    VITE_FIREBASE_AUTH_DOMAIN=$VITE_FIREBASE_AUTH_DOMAIN \
+    VITE_FIREBASE_PROJECT_ID=$VITE_FIREBASE_PROJECT_ID \
+    VITE_FIREBASE_APP_ID=$VITE_FIREBASE_APP_ID \
+    VITE_FIREBASE_STORAGE_BUCKET=$VITE_FIREBASE_STORAGE_BUCKET \
+    VITE_FIREBASE_MESSAGING_SENDER_ID=$VITE_FIREBASE_MESSAGING_SENDER_ID \
+    VITE_FIREBASE_MEASUREMENT_ID=$VITE_FIREBASE_MEASUREMENT_ID
 # Compile the gateway TS output and build the analyst-console bundles.
 # The gateway build runs shared:build first so packages/backend-shared/dist
 # exists before tsc -p services/gateway/tsconfig.json reads its referenced
 # project.
-COPY tsconfig.json vite.config.ts index.html firebase-applet-config.json ./
+COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src
 COPY public ./public
 COPY packages ./packages
@@ -48,16 +62,17 @@ COPY package.json package-lock.json ./
 COPY packages/backend-shared/package.json ./packages/backend-shared/package.json
 COPY services/gateway/package.json ./services/gateway/package.json
 COPY services/sam-spade/package.json ./services/sam-spade/package.json
-RUN npm ci --omit=dev && apk add --no-cache su-exec
+RUN npm ci --omit=dev
 COPY --from=build /app/services/gateway/dist ./services/gateway/dist
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/packages/backend-shared/dist ./packages/backend-shared/dist
-COPY seeds ./seeds
+COPY --chown=node:node seeds ./seeds
 COPY services/gateway/docker-entrypoint.sh /usr/local/bin/counter-spy-gateway-entrypoint
-RUN chmod +x /usr/local/bin/counter-spy-gateway-entrypoint
+RUN mkdir -p /app/data && chown -R node:node /app/data && chmod +x /usr/local/bin/counter-spy-gateway-entrypoint
 # Expose a simple health endpoint for Docker/ECS style health checks.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/healthz || exit 1
 EXPOSE 8080
 # Start the compiled gateway server.
+USER node
 ENTRYPOINT ["counter-spy-gateway-entrypoint"]
 CMD ["node", "services/gateway/dist/server.js"]

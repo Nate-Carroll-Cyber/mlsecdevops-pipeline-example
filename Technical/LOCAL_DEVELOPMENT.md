@@ -57,10 +57,12 @@ The frontend stores one canonical safeguard instruction as the editable **Safegu
 Current promoted recommended effective safeguard prompt hash:
 
 ```text
-590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0
+49bcc951d8af376818acf0a2edef5411edd9bf4d06a0848a5037d19f13917881
 ```
 
-The current System Configuration safeguard prompt hash should match `590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0` when the active prompt is aligned to the recommended baseline. The default System Configuration hardcodes that prompt in `safeguardEffectivePromptOverride`; empty legacy/local values and previous app-generated baseline prompts are normalized back to the hardcoded promoted default on startup. This keeps first-open and upgraded local-review sessions aligned without requiring the user to click Reset, while preserving genuinely custom non-empty prompt overrides as drift. The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. Provider safeguard calls fail closed if direct `/v1/intercept` callers omit `safeguardEffectivePrompt`; there is no backend-authored prompt fallback.
+The current System Configuration safeguard prompt hash should match `49bcc951d8af376818acf0a2edef5411edd9bf4d06a0848a5037d19f13917881` when the active prompt is aligned to the recommended baseline. The default System Configuration hardcodes that prompt in `safeguardEffectivePromptOverride`; empty legacy/local values and previous app-generated baseline prompts are normalized back to the hardcoded promoted default on startup. This keeps first-open and upgraded local-review sessions aligned without requiring the user to click Reset, while preserving genuinely custom non-empty prompt overrides as drift. The current baseline includes an authoritative **Forbidden Phrases and Questions** section: listed entries are semantic phrase families rather than exact-string examples, including discounted items, free items, refunds, coupons/promotions, and comped products/services. The backend sends the supplied effective prompt to the safeguard judge without appending another hidden wrapper. Provider safeguard calls fail closed if direct `/v1/intercept` callers omit `safeguardEffectivePrompt`; there is no backend-authored prompt fallback.
+
+In the Docker demo stack, Local Review Mode uses the seeded `bootstrap-admin` profile and writes System Configuration saves through `/v1/system-config` into the Postgres `app_config` table when the backend is available. Browser `localStorage` is only the fallback cache. This makes demo prompt/policy changes durable across browser storage clears while keeping source-controlled baseline updates as an explicit code/documentation promotion step.
 
 ### Split Runtime Latency
 

@@ -618,6 +618,14 @@ function summarizeInstructionSimilarity(result: InstructionMonitorCompareResult 
   };
 }
 
+function hasAdversarialInstructionSimilarity(result: InstructionMonitorCompareResult | undefined): boolean {
+  return Boolean(
+    result &&
+    result.highestRisk !== 'low' &&
+    result.matches.some((match) => match.targetVerdict === 'ADVERSARIAL'),
+  );
+}
+
 function shortHash(hash: string | undefined) {
   return hash ? hash.slice(0, 16) : 'unknown';
 }
@@ -1051,10 +1059,36 @@ async function translateText(input: TranslateRequest): Promise<TranslateResponse
 
 // Basic hardening middleware:
 // - disable x-powered-by
+// - emit baseline browser security headers
 // - apply permissive-but-explicit local CORS rules for dev/demo
 // - parse bounded JSON bodies
 // - assign a request id and structured start/finish logs
 app.disable('x-powered-by');
+app.use((_req: Request, res: Response, next) => {
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'self'",
+    "base-uri 'self'",
+    "frame-ancestors 'self'",
+    "form-action 'self'",
+    "object-src 'none'",
+    "script-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "connect-src 'self' http: https:",
+  ].join('; '));
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  res.setHeader('Origin-Agent-Cluster', '?1');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
+  res.setHeader('X-Download-Options', 'noopen');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+  next();
+});
 app.use((req: Request, res: Response, next) => {
   const origin = req.header('origin');
   const allowOrigin = origin ? appEnv === 'dev' || allowedOrigins.includes(origin) : false;
@@ -1260,6 +1294,7 @@ app.post('/v1/intercept', requireBackendAuth, async (req: AuthenticatedRequest, 
   const instructionSimilarity = instructionSimilarityEvaluation?.result;
   const instructionEmbeddingDurationMs = instructionSimilarityEvaluation?.embeddingDurationMs;
   const instructionSimilarityRisk = instructionSimilarity?.highestRisk ?? 'low';
+  const adversarialInstructionSimilarity = hasAdversarialInstructionSimilarity(instructionSimilarity);
   const instructionSimilaritySummary = summarizeInstructionSimilarity(instructionSimilarity);
   const effectiveLocalVerdict = instructionSimilarityRisk === 'high' || sanitization.verdict === 'ADVERSARIAL'
     ? 'ADVERSARIAL'
@@ -1272,10 +1307,11 @@ app.post('/v1/intercept', requireBackendAuth, async (req: AuthenticatedRequest, 
         ...sanitization.detectionFlags,
         'INSTRUCTION_SIMILARITY_MATCH',
         `INSTRUCTION_SIMILARITY_${instructionSimilarityRisk.toUpperCase()}`,
+        ...(adversarialInstructionSimilarity ? ['INSTRUCTION_SIMILARITY_ADVERSARIAL_REFERENCE'] : []),
       ]));
   const instructionSimilarityReason = instructionSimilarityRisk === 'low'
     ? ''
-    : ` Similarity monitor found ${instructionSimilarityRisk}-risk overlap with stored instruction hash ${shortHash(instructionSimilarity?.matches[0]?.targetHash)}.`;
+    : ` Similarity monitor found ${instructionSimilarityRisk}-risk overlap with stored ${adversarialInstructionSimilarity ? 'adversarial ' : ''}instruction hash ${shortHash(instructionSimilarity?.matches[0]?.targetHash)}.`;
   const retryTag = tagRetry(sanitization.sanitized, gatewayStartedAt);
   const providerLlmRoutingEnabled = input.metadata?.providerLlmRoutingEnabled !== false;
   const responderLlmRoutingEnabled =

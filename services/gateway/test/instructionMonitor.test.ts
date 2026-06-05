@@ -39,7 +39,7 @@ test('attention pooled chunk evidence can classify without raw max threshold', (
   assert.equal(risk, 'medium');
 });
 
-test('semantic matches route to review rather than adversarial block', () => {
+test('semantic matches against adversarial records route to review rather than clean', () => {
   const risk = classifyInstructionRisk({
     exactMatch: false,
     looseExactMatch: false,

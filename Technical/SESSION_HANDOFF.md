@@ -347,7 +347,7 @@ Phase 3 step 4 (5/5) deleted `firestore.rules`, which means Firestore is no long
   - Gateway sets `req.auth.uid = claims.sub`; `getAuthenticatedCallerId` returns that uid.
   - The `x-counter-spy-user-id` header is **ignored** (or rejected with 400 in strict mode) — defense-in-depth.
 - **`user_profiles` table:** unchanged. `uid` PK is now the Auth0 `sub` claim (typically `auth0|<id>` or `google-oauth2|<id>`). First sign-in materializes the row via PUT `/v1/users/me` exactly like today.
-- **Local Review Mode:** unchanged. Bypasses Auth0, sets in-memory `local-review-user` profile with `role='admin'`, never calls `/v1/users/me` or `/v1/policies`. Critical for offline demos and CI smoke without an Auth0 tenant.
+- **Local Review Mode:** bypasses Auth0 and uses the seeded `bootstrap-admin` profile with `role='admin'`. On entry it prefers `/v1/system-config` from the demo Postgres store, falls back to browser storage only when the backend is unavailable, and writes System Configuration saves back through `/v1/system-config`. Critical for offline demos and CI smoke without an Auth0 tenant.
 
 ### Auth0 tenant configuration (manual, before any code lands)
 
@@ -394,7 +394,7 @@ Tenant config values get written into `.env.demo.local` (for the demo stack) and
   - Verifies signature against the cached JWKS from `https://${domain}/.well-known/jwks.json`. Uses `jose.createRemoteJWKSet({ cacheMaxAge, cooldownDuration })`.
   - Validates `iss === \`https://${domain}/\``, `aud === audience`, `exp` not expired.
   - On success: sets `req.auth = { uid: claims.sub, claims }`. On failure: 401 with structured error.
-  - If `allowLocalReview` is enabled AND the env is `dev` AND the token equals a configured `LOCAL_REVIEW_STATIC_TOKEN`, bypass verification with a synthetic `req.auth = { uid: 'local-review-user', claims: {} }` — keeps CI smoke + Local Review Mode working without an Auth0 tenant.
+  - If `allowLocalReview` is enabled AND the env is `dev` AND the token equals a configured `LOCAL_REVIEW_STATIC_TOKEN`, bypass verification with a synthetic `req.auth = { uid: 'bootstrap-admin', claims: {} }` — keeps CI smoke + Local Review Mode working without an Auth0 tenant.
 - Add `npm install --save jose` in `packages/backend-shared/`.
 
 **Backend changes (`packages/backend-shared/src/auth.ts`):**
@@ -545,7 +545,7 @@ One high + one moderate prod advisory (code injection / prototype pollution / Do
 - Similarity routing now separates fingerprint and semantic evidence: exact/loose SHA-256 or SimHash matches against stored `ADVERSARIAL` records remain adversarial blocks, while semantic whole-prompt or chunk-embedding matches are suspicious review events.
 - Protected backend execution routes now require the shared bearer token. `/v1/intercept`, `/v1/translate`, `/v1/instruction-monitor/reviewed-adversarial`, and `/v1/ctf/sam-spade/*` reject unauthenticated requests.
 - Browser callers no longer send backend runtime overrides for provider endpoints, model base URLs, backend-owned system prompts, responder, Sam Spade, or Lara translation. The Analyst Runtime Settings Safeguard API Key is the intentional exception: it is browser-memory-only and can be forwarded with Analyst Chat `/v1/intercept` requests for local LM Studio testing.
-- The promoted Safeguard Effective Prompt is hardcoded in `DEFAULT_SYSTEM_CONFIG.safeguardEffectivePromptOverride`. Startup parsing normalizes blank values and previous app-generated baseline prompts back to the promoted default, so first-open/upgraded sessions should show the recommended and current hash as `590a286e60b99b0b353222b3ddaaa131db925a1f4d6222a0c3b1b3e49d203ad0` unless an operator saved a true custom prompt.
+- The promoted Safeguard Effective Prompt is hardcoded in `DEFAULT_SYSTEM_CONFIG.safeguardEffectivePromptOverride`. Startup parsing normalizes blank values and previous app-generated baseline prompts back to the promoted default, so first-open/upgraded sessions should show the recommended and current hash as `49bcc951d8af376818acf0a2edef5411edd9bf4d06a0848a5037d19f13917881` unless an operator saved a true custom prompt.
 - Sam Spade sessions are owner-scoped by the authenticated caller id. Fetch/message/solve operations for another caller return not found or forbidden, and the frontend sends `x-counter-spy-user-id` through the shared backend API client.
 - Firestore audit-log client creates now have a narrow rules allowlist and reject backend-owned security fields such as safeguard verdicts, gateway status, review state, and responder telemetry.
 - Analyst Chat Last Execution Results now orders local verdict alert first, then backend safeguard status and Similarity Monitor detail, then `Detections` badges. Shared help/info icons are hidden while modal overlays are active except inside the open dialog content. Similarity Monitor evidence is also rendered from persisted `instructionSimilarity` data in the Prompt Details modal so it remains available after another prompt replaces the side rail. Stored hashes now include `Lookup`, backed by `/v1/instruction-monitor/records/:identifier`, and Active Guardrails includes a real Similarity Monitor toggle that sends `instructionSimilarityEnabled: false` when disabled.

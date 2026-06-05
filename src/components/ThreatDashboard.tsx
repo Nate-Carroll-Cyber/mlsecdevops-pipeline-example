@@ -135,6 +135,7 @@ function getSeverityBucket(log: any, entropyThreshold?: number): SeverityBucket 
   if (reviewedSeverity === 'Informational') return 'informational';
   if (reviewedSeverity === 'Clean') return 'clean';
 
+  if (hasAdversarialSimilarityReference(log)) return log.instructionSimilarity?.highestRisk === 'high' ? 'adversarial' : 'review';
   if (log.status === 'PENDING_REVIEW' || detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW') || getBackendGatewayStatus(log) === 'QUEUED') {
     return 'review';
   }
@@ -185,6 +186,7 @@ function getAutomatedSeverityBucket(log: any, entropyThreshold?: number): Severi
   const upperResponse = typeof log.response === 'string' ? log.response.toUpperCase() : '';
   const effectiveDetectionLevel = getEffectiveDetectionLevel(log, entropyThreshold);
 
+  if (hasAdversarialSimilarityReference(log)) return log.instructionSimilarity?.highestRisk === 'high' ? 'adversarial' : 'review';
   if (log.status === 'PENDING_REVIEW' || detectionFlags.includes('RESPONDER_QUEUE_FOR_REVIEW') || getBackendGatewayStatus(log) === 'QUEUED') {
     return 'review';
   }
@@ -229,6 +231,9 @@ function getBackendSafeguardVerdict(log: any): string | undefined {
 function reachedBackendSafeguard(log: any): boolean {
   if (log.backendReachedSafeguard === true) return true;
   if (log.backendReachedSafeguard === false) return false;
+  const gatewayStatus = getBackendGatewayStatus(log);
+  const safeguardLatencyMs = Number(log.backendSafeguardLatencyMs ?? log.safeguardLatencyMs ?? 0);
+  if ((gatewayStatus === 'INTERCEPTED' || gatewayStatus === 'QUEUED') && safeguardLatencyMs <= 0) return false;
   if (getBackendGatewayStatus(log)) return true;
   if (getBackendSafeguardVerdict(log)) return true;
   if (typeof log.responderStatus === 'string' && log.responderStatus.trim()) return true;
@@ -301,6 +306,11 @@ function hasForbiddenPhraseSignal(log: any): boolean {
   return detectionFlags.includes('FORBIDDEN_TOPIC') || detectionFlags.includes('FORBIDDEN_PHRASE');
 }
 
+function hasPolicySemanticSignal(log: any): boolean {
+  const detectionFlags = getDetectionFlags(log);
+  return detectionFlags.includes('POLICY_BYPASS_QUERY') || detectionFlags.includes('CUSTOM_CIPHER_INSTRUCTION');
+}
+
 function hasAnyObfuscationSignal(log: any): boolean {
   return getObfuscationTechniques(log).length > 0;
 }
@@ -319,6 +329,12 @@ function hasSemanticSimilaritySignal(log: any): boolean {
   );
 }
 
+function hasAdversarialSimilarityReference(log: any): boolean {
+  const highestRisk = log.instructionSimilarity?.highestRisk;
+  const targetVerdict = log.instructionSimilarity?.topMatch?.targetVerdict;
+  return (highestRisk === 'medium' || highestRisk === 'high') && targetVerdict === 'ADVERSARIAL';
+}
+
 function calculateDetectionSignalMetrics(logs: any[]) {
   return {
     piiHits: logs.filter((log) => hasAnySignal(log, PII_DETECTION_FLAGS)).length,
@@ -326,6 +342,7 @@ function calculateDetectionSignalMetrics(logs: any[]) {
     regexHits: logs.filter((log) => getDetectionFlags(log).includes('REGEX_MATCH')).length,
     keywordHits: logs.filter(hasKeywordSignal).length,
     topicHits: logs.filter(hasForbiddenPhraseSignal).length,
+    policySemanticHits: logs.filter(hasPolicySemanticSignal).length,
     obfuscatedHits: logs.filter(hasAnyObfuscationSignal).length,
     instructionSimilarityHits: logs.filter(hasInstructionSimilaritySignal).length,
     semanticSimilarityHits: logs.filter(hasSemanticSimilaritySignal).length,
@@ -421,6 +438,7 @@ function calculateLayerMetrics(logs: any[], entropyThreshold?: number) {
   const preInferenceBlockedCount = logs.filter((log) => wasPreInferenceBlocked(log, entropyThreshold)).length;
   const reachedSafeguardCount = logs.filter((log) => reachedBackendSafeguard(log)).length;
   const safeguardInterventionsCount = logs.filter((log) => reachedBackendSafeguard(log) && hasBackendSafeguardIntervention(log)).length;
+  const cleanTrafficCount = logs.filter((log) => getMetricsSeverityBucket(log, entropyThreshold) === 'clean').length;
   const likelyMaliciousLogs = logs.filter((log) => isLikelyMaliciousPrompt(log, entropyThreshold));
   const postModelEscapeCount = likelyMaliciousLogs.filter((log) =>
     !wasPreInferenceBlocked(log, entropyThreshold) &&
@@ -430,13 +448,16 @@ function calculateLayerMetrics(logs: any[], entropyThreshold?: number) {
   ).length;
 
   return {
+    totalCount: totalLogs,
     preInferenceBlockedCount,
     safeguardInterventionsCount,
     reachedSafeguardCount,
+    cleanTrafficCount,
     likelyMaliciousCount: likelyMaliciousLogs.length,
     postModelEscapeCount,
     preInferenceBlockRate: totalLogs > 0 ? parseFloat(((preInferenceBlockedCount / totalLogs) * 100).toFixed(1)) : 0,
     safeguardInterventionRate: reachedSafeguardCount > 0 ? parseFloat(((safeguardInterventionsCount / reachedSafeguardCount) * 100).toFixed(1)) : 0,
+    cleanTrafficRate: totalLogs > 0 ? parseFloat(((cleanTrafficCount / totalLogs) * 100).toFixed(1)) : 0,
     postModelEscapeRate: likelyMaliciousLogs.length > 0 ? parseFloat(((postModelEscapeCount / likelyMaliciousLogs.length) * 100).toFixed(1)) : 0,
   };
 }
@@ -1088,7 +1109,7 @@ export function ThreatDashboard({
               {/* Add a tooltip to display details on hover */}
               <Tooltip 
                 contentStyle={{ backgroundColor: '#1a1a1a', borderColor: '#333', borderRadius: '8px', fontSize: '12px' }} 
-                itemStyle={{ color: '#f97316' }}
+                itemStyle={{ color: '#ef4444' }}
                 labelFormatter={(label) => `Hour: ${label}:00`}
               />
               {/* Render the line representing the threat data */}
@@ -1096,9 +1117,9 @@ export function ThreatDashboard({
                 type="monotone" 
                 dataKey="threats" 
                 name="Threats"
-                stroke={metrics.isAnomaly ? "#ef4444" : "#f97316"} 
+                stroke="#ef4444"
                 strokeWidth={3} 
-                dot={{ r: 4, fill: metrics.isAnomaly ? "#ef4444" : "#f97316", strokeWidth: 0 }} 
+                dot={{ r: 4, fill: "#ef4444", strokeWidth: 0 }} 
                 activeDot={{ r: 6 }}
               />
             </LineChart>
@@ -1330,13 +1351,16 @@ export function ThreatDashboard({
               <div>
                 <div className="flex items-center justify-between">
                   <span className="flex items-center gap-1 text-muted-foreground">
-                    <span>Post-Model Escape Rate</span>
-                    <HelpTooltip text="Of the prompts judged likely malicious after expected-verdict labels and analyst review are considered, this is the share that bypassed both layers and still landed clean or informational." />
+                    <span>Clean Traffic Rate</span>
+                    <HelpTooltip text="Of all prompts in the current view, this is the share grouped as Clean by the same severity bucketing used in Alert (By Severity)." />
                   </span>
-                  <span className="font-semibold text-emerald-400">{operationalMetrics.layerDefense.postModelEscapeRate}%</span>
+                  <span className="font-semibold text-emerald-400">{operationalMetrics.layerDefense.cleanTrafficRate}%</span>
                 </div>
                 <div className="text-[11px] text-slate-500 text-right">
-                  {operationalMetrics.layerDefense.postModelEscapeCount} escaped both layers / {operationalMetrics.layerDefense.likelyMaliciousCount} likely malicious prompts
+                  {operationalMetrics.layerDefense.cleanTrafficCount} clean prompts / {operationalMetrics.layerDefense.totalCount} total prompts
+                  {operationalMetrics.layerDefense.likelyMaliciousCount > 0 && (
+                    <span> ({operationalMetrics.layerDefense.postModelEscapeCount} likely-malicious escapes)</span>
+                  )}
                 </div>
               </div>
             </CardContent>
@@ -1344,10 +1368,10 @@ export function ThreatDashboard({
 
           <Card className="bg-card border-border shadow-sm overflow-visible">
             <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-                <span>Detection Signals</span>
-                <HelpTooltip text="Prompt counts for the main detection flag families in the current dataset, such as PII, regex hits, forbidden phrase hits, and any recorded obfuscation technique." />
-              </CardTitle>
+	              <CardTitle className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
+	                <span>Detection Signals</span>
+	                <HelpTooltip text="Prompt counts for the main detection flag families in the current dataset, such as PII, regex hits, configured forbidden phrase hits, code-level policy semantic hits, and any recorded obfuscation technique." />
+	              </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2 text-sm">
               <div className="flex items-center justify-between">
@@ -1366,13 +1390,17 @@ export function ThreatDashboard({
                 <span className="text-muted-foreground">Keyword Hits</span>
                 <span className="font-semibold text-rose-500">{operationalMetrics.detectionSignals.keywordHits}</span>
               </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Forbidden Phrase Hits</span>
-                <span className="font-semibold text-violet-400">{operationalMetrics.detectionSignals.topicHits}</span>
-              </div>
-              <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Obfuscation Hits</span>
-                <span className="font-semibold text-fuchsia-400">{operationalMetrics.detectionSignals.obfuscatedHits}</span>
+	              <div className="flex items-center justify-between">
+	                <span className="text-muted-foreground">Forbidden Phrase Hits</span>
+	                <span className="font-semibold text-violet-400">{operationalMetrics.detectionSignals.topicHits}</span>
+	              </div>
+	              <div className="flex items-center justify-between">
+	                <span className="text-muted-foreground">Policy Semantic Hits</span>
+	                <span className="font-semibold text-pink-300">{operationalMetrics.detectionSignals.policySemanticHits}</span>
+	              </div>
+	              <div className="flex items-center justify-between">
+	                <span className="text-muted-foreground">Obfuscation Hits</span>
+	                <span className="font-semibold text-fuchsia-400">{operationalMetrics.detectionSignals.obfuscatedHits}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Similarity Matches</span>

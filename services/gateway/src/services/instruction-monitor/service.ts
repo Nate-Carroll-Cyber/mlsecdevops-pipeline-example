@@ -1,5 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
+import { extname, isAbsolute, relative, resolve } from 'node:path';
 import { Pool, type PoolClient, type PoolConfig } from 'pg';
 import pgvector from 'pgvector/pg';
 import { z } from 'zod';
@@ -46,6 +47,8 @@ type ChunkAcc = {
   weightedSum: number;
   weightSum: number;
 };
+
+const SEED_SNAPSHOT_DIRECTORY = resolve(process.cwd(), 'seeds/pgvector');
 
 const SeedChunkSchema = z.object({
   chunkIndex: z.number().int().nonnegative(),
@@ -226,7 +229,8 @@ export class PgvectorInstructionMonitor {
   }
 
   async importSeedSnapshotFromFile(path: string, options: { allowChangedSeedRecords?: boolean } = {}): Promise<InstructionSeedImportResult> {
-    const raw = await readFile(path, 'utf8');
+    const safePath = resolveSeedSnapshotPath(path);
+    const raw = await readFile(safePath, 'utf8');
     return this.importSeedSnapshot(JSON.parse(raw), options);
   }
 
@@ -385,15 +389,16 @@ export class PgvectorInstructionMonitor {
     seedSource: string;
     includeExistingSeedRecords?: boolean;
   }): Promise<InstructionSeedExportResult> {
+    const safePath = resolveSeedSnapshotPath(path);
     const snapshot = await this.exportCoreSeedSnapshot(options);
-    await writeFile(path, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
+    await writeFile(safePath, `${JSON.stringify(snapshot, null, 2)}\n`, 'utf8');
     return {
       seedPack: snapshot.seedPack,
       seedVersion: snapshot.seedVersion,
       seedSnapshotHash: snapshot.seedSnapshotHash,
       exportedRecords: snapshot.records.length,
       exportedChunks: snapshot.records.reduce((count, record) => count + record.chunks.length, 0),
-      outputPath: path,
+      outputPath: safePath,
     };
   }
 
@@ -985,6 +990,20 @@ function hmacSignaturesMatch(a: string, b: string): boolean {
   } catch {
     return false;
   }
+}
+
+function resolveSeedSnapshotPath(path: string): string {
+  const resolvedPath = resolve(path);
+  const relativePath = relative(SEED_SNAPSHOT_DIRECTORY, resolvedPath);
+  if (
+    relativePath === '' ||
+    relativePath.startsWith('..') ||
+    isAbsolute(relativePath) ||
+    extname(resolvedPath) !== '.json'
+  ) {
+    throw new Error(`Seed snapshot path must be a JSON file under ${SEED_SNAPSHOT_DIRECTORY}.`);
+  }
+  return resolvedPath;
 }
 
 function hashSeedSnapshot(snapshot: Omit<z.infer<typeof SeedSnapshotSchema>, 'seedSnapshotHash'>): string {

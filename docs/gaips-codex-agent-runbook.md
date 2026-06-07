@@ -29,7 +29,7 @@ Use the lab walkthrough guide as the primary source for lab steps. Use the facil
 
 ## Initial Repo Orientation
 
-After approval for read-only inspection:
+After approval for read-only repo inspection. Treat that approval as covering only local read-only filesystem inspection commands such as `pwd`, `rg --files`, and `ls docs`. Ask separately before runtime checks, service calls, browser actions, network access, file creation, edits, installs, or cloud-provider use:
 
 1. Identify repo root.
 2. Confirm the required course docs exist.
@@ -47,7 +47,7 @@ rg --files
 ls docs
 ```
 
-Optional checks after approval:
+Optional checks that need separate approval because they inspect local runtimes or services:
 
 ```bash
 git status --short
@@ -200,6 +200,9 @@ Primary objectives:
 Required evidence:
 
 - `evidence/day2/rag-architecture.md`
+- `evidence/day2/rag-threat-model.md`
+- `evidence/day2/weaviate-aws-review.md` if Weaviate is reviewed.
+- `evidence/day2/pinecone-review.md` if Pinecone is reviewed.
 - `evidence/day2/rag-poisoning-results.md`
 - `evidence/day2/rag-eval-results.md`
 
@@ -210,23 +213,26 @@ Steps:
 3. Create the approved document corpus.
 4. Ingest documents or guide the student through app ingestion.
 5. Identify vector database path: Chroma, Qdrant, Weaviate, Pinecone, or AWS Bedrock Knowledge Bases.
-6. If Weaviate is used, identify enabled modules, especially `text2vec-transformers` and `qna-transformers`.
-7. If Weaviate is used, identify REST and gRPC endpoints and whether gRPC on port `50051` is exposed.
-8. If Weaviate is on AWS/Kubernetes, review EFS, StorageClass, PersistentVolumes, PersistentVolumeClaims, mount targets, and distinct access points/root directories per replica.
-9. If Pinecone is used, identify index type, cloud/region, dimensions, metric, namespaces, metadata filters, deletion protection, and API-key storage.
-10. Ask baseline RAG questions.
-11. Record retrieved sources and answers.
-12. Ask approval before adding test-only malicious documents.
-13. Add the malicious test document.
-14. Rebuild index.
-15. Run retrieval poisoning tests.
-16. Add or document retrieval controls.
-17. Run RAG eval dataset.
-18. Compare before/after results.
+6. Create or update the RAG threat model.
+7. Identify whether Giskard is available for open source model/RAG testing, or whether instructor-provided Giskard fixtures will be used.
+8. If Weaviate is used, identify enabled modules, especially `text2vec-transformers` and `qna-transformers`.
+9. If Weaviate is used, identify REST and gRPC endpoints and whether gRPC on port `50051` is exposed.
+10. If Weaviate is on AWS/Kubernetes, review EFS, StorageClass, PersistentVolumes, PersistentVolumeClaims, mount targets, and distinct access points/root directories per replica.
+11. If Pinecone is used, identify index type, cloud/region, dimensions, metric, namespaces, metadata filters, deletion protection, and API-key storage.
+12. Ask baseline RAG questions.
+13. Record retrieved sources and answers.
+14. Ask approval before adding test-only malicious documents.
+15. Add the malicious test document.
+16. Rebuild index.
+17. Run retrieval poisoning tests.
+18. Add or document retrieval controls.
+19. Run RAG eval dataset.
+20. Compare before/after results.
 
 Verification:
 
 - RAG architecture identifies loader, chunker, embedding model, vector DB, retriever, and generator.
+- RAG threat model identifies trust boundaries, retrieval attack paths, and expected controls.
 - Weaviate reviews identify module configuration, field vectorization behavior, REST/gRPC exposure, schema/metadata filters, tenant isolation, and AWS EFS persistence controls when applicable.
 - Pinecone reviews identify index configuration, namespaces, metadata filters, API-key handling, deletion protection, and tenant isolation controls when applicable.
 - Poisoning test records whether malicious content was retrieved and whether it influenced output.
@@ -250,28 +256,38 @@ Required evidence:
 - `evidence/day3/agent-tool-matrix.md`
 - `evidence/day3/agent-red-team-results.md`
 - `evidence/day3/supply-chain-inventory.md`
+- `evidence/day3/hf-hub-security-review.md` if Hugging Face Hub is used.
 - `evidence/day3/sbom-summary.md`
+- `evidence/day3/sbom-format-comparison.md` if CycloneDX and SPDX outputs are compared.
 
 Steps:
 
 1. Inspect the agent implementation or starter framework.
 2. Identify available tools and side effects.
-3. Create or update tool permission matrix.
-4. Run normal agent tool-use examples.
-5. Capture traces or logs.
-6. Run adversarial prompts.
-7. Score each test: Pass, Warning, or Fail.
-8. Recommend tool controls.
-9. Ask approval before running scan tools.
-10. Run available supply-chain scans.
-11. Review prompt templates, tool schemas, provider configs, and logging.
-12. Record findings and remediation priorities.
+3. If Cline or another MCP client is used, verify it is connected only to lab-safe MCP servers and fake tools.
+4. Create or update tool permission matrix.
+5. Run normal agent tool-use examples.
+6. Capture traces or logs.
+7. Run adversarial prompts.
+8. Score each test: Pass, Warning, or Fail.
+9. Recommend tool controls.
+10. Ask approval before running scan or automated patching tools.
+11. Run Semgrep, Syft table/CycloneDX/SPDX SBOM generation, Grype, Trivy, or approved fixtures.
+12. Compare CycloneDX and SPDX SBOM outputs when generated.
+13. If Hugging Face Hub is used, review private repository status, fine-grained token scope, 2FA, SSO, Resource Groups, SSH/GPG, and malware/pickle/secrets/Protect AI/JFrog scan results.
+14. If Buttercup is used, review generated findings and proposed patches before applying any change.
+15. Review prompt templates, tool schemas, provider configs, and logging.
+16. Record findings and remediation priorities.
 
 Verification:
 
 - Tool matrix includes purpose, inputs, outputs, side effects, sensitivity, and approvals.
+- MCP-client review records Cline or equivalent client configuration when used.
 - Agent red-team results record tools requested and tools executed.
 - Supply-chain review covers AI-specific files, not only package vulnerabilities.
+- SBOM summary includes generation tool, CycloneDX output, SPDX output, and vulnerability scanner output when available.
+- Hugging Face Hub review records access controls and scanner status when Hub repositories are used.
+- Buttercup patch proposals are reviewed and approved before application when used.
 
 Reflection questions:
 
@@ -290,33 +306,51 @@ Primary objectives:
 Required evidence:
 
 - `evidence/day4/deployment-review.md`
+- `evidence/day4/weaviate-aws-review.md` if Weaviate on AWS is reviewed during deployment.
 - `evidence/day4/mlsecops-checklist.md`
+- `evidence/day4/model-signing-verification.md` if model signing or verification is used.
+- `evidence/day4/sagemaker-hf-estimator-review.md` if SageMaker Hugging Face Estimator labs are enabled.
 - `evidence/day4/model-customization-matrix.md`
+- `evidence/day4/fine-tuning-adapter-notes.md` if fine-tuning or adapter workflows are reviewed.
+- `evidence/day4/safety-regression-report.md`
+- `evidence/day4/llama-guard-3-review.md` if Llama Guard 3 is used.
 
 Steps:
 
 1. Map deployment components.
 2. Review auth, network exposure, logs, secrets, and cost controls.
 3. Document local and hosted model deployment assumptions.
-4. Review Kubernetes namespaces, services, ingress/load balancers, Secrets, NetworkPolicies, probes, resource limits, and admission/policy checks when Kubernetes is used.
-5. Review Weaviate REST/gRPC exposure, module containers, and AWS EFS-backed persistence when Weaviate is used.
-6. Identify AI lifecycle artifacts.
-7. Create MLSecOps checklist.
-8. Ask approval before running DVC, MLflow, scan, or signing commands.
-9. Define regression gates.
-10. Create model customization decision matrix.
-11. If Llama Guard 3 is used, classify a safe prompt/response set and record false positives, false negatives, policy mappings, and enforcement decisions.
-12. Compare prompt engineering, RAG, Llama Guard 3, guardrails, fine-tuning, adapters, and moderation.
-13. Document where fine-tuning is not an appropriate control.
+4. Review Hugging Face Hub access controls for private repositories, fine-grained tokens, 2FA, SSO, Resource Groups, SSH/GPG, and scanner status when Hugging Face is used.
+5. Review Kubernetes namespaces, services, ingress/load balancers, Secrets, NetworkPolicies, probes, resource limits, and admission/policy checks when Kubernetes is used.
+6. Review HashiCorp Vault or equivalent secrets manager paths, policies, audit logging, rotation, and runtime injection when used.
+7. Review Weaviate REST/gRPC exposure, module containers, and AWS EFS-backed persistence when Weaviate is used.
+8. Identify AI lifecycle artifacts.
+9. Create MLSecOps checklist.
+10. Ask approval before running DVC, MLflow, scan, or signing commands.
+11. If SageMaker Hugging Face Estimator labs are enabled, review notebook configuration, training script boundary, IAM role, S3 inputs and outputs, metrics, cost controls, and whether `fit()` was run or fixture output was used.
+12. If model signing is enabled, verify model digest, signature, signer identity or public key, and tamper-detection behavior.
+13. Define regression gates, including a SageMaker managed-training gate and a model-signature verification gate when model artifacts are used.
+14. Create model customization decision matrix.
+15. If Llama Guard 3 is used, classify a safe prompt/response set and record false positives, false negatives, policy mappings, and enforcement decisions.
+16. If fine-tuning, adapters, or PyTorch model artifact workflows are reviewed, document the workflow, security checkpoints, provenance, and rollback plan.
+17. Create the safety regression report.
+18. Compare prompt engineering, RAG, Llama Guard 3, guardrails, fine-tuning, adapters, and moderation.
+19. Document where fine-tuning is not an appropriate control.
 
 Verification:
 
 - Deployment review includes model gateway, vector DB, logs, tools, IAM/auth, network, and cost controls.
+- Hugging Face Hub review includes repository visibility, token scope, account/org controls, signed commits, and scanner status when applicable.
 - Kubernetes review includes service exposure, secrets, resource controls, network policy, and storage controls.
+- Vault review includes secret paths, policy scope, audit logging, rotation, and runtime injection when applicable.
 - Weaviate-on-AWS review includes REST/gRPC, `text2vec-transformers`, `qna-transformers`, EFS access points, mount targets, PV/PVCs, and module resource controls when applicable.
 - Pinecone review includes index type, namespaces, metadata filters, API-key handling, deletion protection, and application-level tenant authorization when applicable.
-- MLSecOps checklist includes prompts, evals, RAG docs, model config, tool schemas, and guardrails.
+- MLSecOps checklist includes prompts, evals, RAG docs, model config, model artifacts, SageMaker training notebook/script artifacts, tool schemas, and guardrails.
+- SageMaker Hugging Face Estimator review includes notebook settings, entry point, source directory, IAM role, S3 paths, hyperparameters, metrics, job status or fixture status, and cost controls when applicable.
+- Model signing verification includes digest or manifest summary, signing method, signer identity or public key, verification result, tamper-test result, and deployment gate decision when applicable.
 - Llama Guard 3 review includes classifier category mapping, input/output classification results, false-positive/false-negative analysis, and enforcement behavior when applicable.
+- Fine-tuning or adapter notes include data approval, artifact provenance, evaluation gates, storage controls, and rollback when applicable.
+- Safety regression report compares baseline and changed system behavior across unsafe outputs, unsupported claims, false refusals, and citation correctness.
 - Customization matrix explains security risks and when not to use each approach.
 
 Reflection questions:
@@ -334,7 +368,9 @@ Primary objectives:
 Required evidence:
 
 - `evidence/day5/final-threat-model.md`
+- `evidence/day5/risk-register.md`
 - `evidence/day5/final-red-team-report.md`
+- `evidence/day5/final-eval-results.md`
 - `evidence/day5/final-executive-summary.md`
 
 Steps:
@@ -342,18 +378,20 @@ Steps:
 1. Review all evidence from Days 1-4.
 2. Identify missing artifacts.
 3. Build final threat model.
-4. Map top threats to OWASP LLM Top 10, MITRE ATLAS, and NIST AI RMF.
-5. Re-run approved final tests.
-6. Create before/after comparison.
-7. Identify unresolved findings.
-8. Create executive summary.
-9. Review capstone package for completeness.
-10. Ask final reflection questions.
+4. Update the final risk register from Day 1 findings, final severity, implemented controls, and residual risk.
+5. Map top threats to OWASP LLM Top 10, MITRE ATLAS, and NIST AI RMF.
+6. Re-run approved final tests.
+7. Create before/after red-team and evaluation comparisons.
+8. Identify unresolved findings.
+9. Create executive summary.
+10. Review capstone package for completeness.
+11. Ask final reflection questions.
 
 Verification:
 
 - Final threat model has trust boundaries and source-to-sink paths.
-- Final report compares baseline and final state.
+- Final risk register records final severity, controls, residual risk, and next steps.
+- Final red-team and evaluation reports compare baseline and final state.
 - Executive summary has risk rating, key findings, controls, residual risk, and next steps.
 - Capstone package contains all required artifacts or documented gaps.
 

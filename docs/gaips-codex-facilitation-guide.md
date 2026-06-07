@@ -4,7 +4,7 @@ This guide explains how to use Codex as an interactive lab facilitator for the G
 
 ## Purpose
 
-Codex can help students work through the course by:
+After explicit approval for the relevant action, Codex can help students work through the course by:
 
 - Checking prerequisites.
 - Creating starter files.
@@ -68,7 +68,7 @@ Codex should ask before:
 - Deleting files.
 - Running vulnerability scans against anything outside the lab target.
 
-Codex may proceed after explicit approval for the exact category of action.
+Codex may proceed after explicit approval for the exact category of action. `Approve read-only repo inspection` covers only local read-only filesystem inspection such as listing files and reading course documents. Runtime checks, service calls, browser actions, network access, file creation, edits, installs, hosted model calls, and cloud-provider use require separate approval.
 
 Recommended approval language:
 
@@ -162,18 +162,33 @@ Recommended evidence files:
 ```text
 evidence/day1/model-comparison.md
 evidence/day1/baseline-red-team-results.md
+evidence/day1/system-inventory.md
 evidence/day1/risk-register.md
 evidence/day2/rag-architecture.md
+evidence/day2/rag-threat-model.md
+evidence/day2/weaviate-aws-review.md
+evidence/day2/pinecone-review.md
 evidence/day2/rag-poisoning-results.md
 evidence/day2/rag-eval-results.md
 evidence/day3/agent-tool-matrix.md
 evidence/day3/agent-red-team-results.md
+evidence/day3/supply-chain-inventory.md
+evidence/day3/hf-hub-security-review.md
 evidence/day3/sbom-summary.md
+evidence/day3/sbom-format-comparison.md
 evidence/day4/deployment-review.md
+evidence/day4/weaviate-aws-review.md
 evidence/day4/mlsecops-checklist.md
+evidence/day4/model-signing-verification.md
+evidence/day4/sagemaker-hf-estimator-review.md
 evidence/day4/model-customization-matrix.md
+evidence/day4/fine-tuning-adapter-notes.md
+evidence/day4/safety-regression-report.md
+evidence/day4/llama-guard-3-review.md
 evidence/day5/final-threat-model.md
+evidence/day5/risk-register.md
 evidence/day5/final-red-team-report.md
+evidence/day5/final-eval-results.md
 evidence/day5/final-executive-summary.md
 ```
 
@@ -254,7 +269,9 @@ Codex checklist:
 
 - Inspect or create the RAG document corpus.
 - Verify the RAG app/framework is available.
+- Verify whether Giskard is available for open source model/RAG testing, or whether instructor-provided Giskard fixtures will be used.
 - Verify whether Chroma, Qdrant, Weaviate, Pinecone, or AWS Bedrock Knowledge Bases are being used.
+- Create or update the RAG threat model before adding poisoned test documents.
 - If Weaviate is used, identify enabled modules such as `text2vec-transformers` and `qna-transformers`.
 - If Weaviate is used, identify REST and gRPC endpoints, including whether gRPC on port `50051` is exposed.
 - If Weaviate is on AWS/Kubernetes, identify EFS, StorageClass, PersistentVolumes, PersistentVolumeClaims, mount targets, and whether each replica has a distinct EFS access point/root directory.
@@ -274,6 +291,7 @@ Visual checkpoints:
 
 - Document folder structure.
 - RAG app UI.
+- RAG threat model.
 - Retrieved sources shown in the UI or logs.
 - Weaviate collection/schema view or manifest snippet.
 - Pinecone index, namespace, and metadata-filter summary.
@@ -307,13 +325,16 @@ Facilitate Day 3 of the GAIPS labs. Help me build or inspect the tool-using agen
 Codex checklist:
 
 - Review the agent code or starter agent.
+- Verify whether Cline or another MCP client is used, and confirm it is connected only to lab-safe MCP servers.
 - Create or update the tool permission matrix.
 - Run normal tool-use examples.
 - Capture traces or logs.
 - Run adversarial prompts.
 - Verify whether unauthorized tool calls occurred.
 - Add or document controls.
-- Run Semgrep, Syft, Grype, or Trivy if approved.
+- Review Hugging Face Hub private repository status, token scope, 2FA/SSO/Resource Groups, SSH/GPG, and model-artifact scan results if Hugging Face is used.
+- Run Semgrep, Syft table/CycloneDX/SPDX SBOM generation, Grype, Trivy, or Buttercup if approved.
+- Review Buttercup-generated patches before applying or merging them.
 - Update supply-chain evidence.
 
 Visual checkpoints:
@@ -322,6 +343,8 @@ Visual checkpoints:
 - Trace view or log output.
 - Tool permission matrix.
 - Scan summary.
+- Hugging Face Hub security review summary.
+- CycloneDX and SPDX SBOM comparison summary.
 
 Expected completion:
 
@@ -348,14 +371,21 @@ Codex checklist:
 - Map deployment components.
 - Review local model endpoint exposure.
 - Review managed model access pattern if available.
+- Review Hugging Face Hub private repository status, fine-grained tokens, 2FA, SSO, Resource Groups, SSH/GPG, and scan status if Hugging Face is used.
 - Review Kubernetes manifests, namespaces, services, ingress/load balancers, Secrets, NetworkPolicies, probes, and resource limits if Kubernetes is used.
+- Review HashiCorp Vault or equivalent secrets manager paths, policies, audit logging, rotation, and runtime injection if Vault is used.
 - Review Weaviate REST/gRPC exposure and EFS persistence if Weaviate is deployed on AWS.
 - Review Pinecone API-key handling, deletion protection, logging, and managed-index access if Pinecone is used.
 - Review Llama Guard 3 or comparable safety classifier behavior if guardrail labs are enabled.
 - Check logs, rate limits, secrets handling, and IAM assumptions.
+- Confirm real secrets are not copied into prompts, screenshots, traces, or evidence files.
 - Create deployment review evidence.
 - Identify versioned AI artifacts.
 - Define pipeline checks.
+- Review SageMaker Hugging Face Estimator notebook configuration, IAM role, S3 paths, training script, metrics, and cost controls if SageMaker labs are enabled.
+- Verify model artifact signing status, signer identity, and tamper-detection behavior if model-signing labs are enabled.
+- Document fine-tuning, adapter, or PyTorch model artifact workflow checkpoints if those paths are reviewed.
+- Create the safety regression report.
 - Run approved scans or evals.
 - Build the customization decision matrix.
 - Compare prompt-only, RAG, guardrail, and optional customization paths.
@@ -365,10 +395,16 @@ Visual checkpoints:
 - Deployment diagram or text map.
 - Local service health check.
 - Kubernetes service and storage summary.
+- Hugging Face Hub access-control and scanner summary.
+- HashiCorp Vault or secrets-management review summary.
 - Weaviate REST/gRPC and EFS review summary.
 - Pinecone index/namespace/API-key review summary.
 - Llama Guard 3 classifier result table.
 - Pipeline checklist.
+- SageMaker Hugging Face Estimator notebook review summary if SageMaker labs are enabled.
+- Model-signing verification and tamper-test summary if model-signing labs are enabled.
+- Fine-tuning or adapter workflow notes if reviewed.
+- Safety regression report.
 - Customization decision matrix.
 
 Expected completion:

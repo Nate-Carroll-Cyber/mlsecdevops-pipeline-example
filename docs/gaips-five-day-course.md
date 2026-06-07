@@ -17,13 +17,13 @@ By the end of the course, students will be able to:
 
 ## Core Tooling
 
-- Model platforms: AWS Bedrock, Ollama, OpenAI API, Anthropic Claude API, Hugging Face, PyTorch, Llama Guard 3, vLLM or llama.cpp, LiteLLM.
-- Application frameworks: LangGraph, OpenAI Agents SDK, LlamaIndex.
+- Model platforms: AWS Bedrock, Amazon SageMaker Python SDK with the Hugging Face Estimator, Ollama, OpenAI API, Anthropic Claude API, Hugging Face Hub/Transformers/Inference Endpoints, PyTorch, Llama Guard 3, vLLM or llama.cpp, LiteLLM.
+- Application frameworks and clients: LangGraph, OpenAI Agents SDK, Cline as an MCP client, LlamaIndex.
 - Retrieval systems: Chroma, Qdrant, Weaviate, Pinecone, Weaviate `text2vec-transformers`, Weaviate `qna-transformers`, Weaviate gRPC, AWS EFS-backed Weaviate persistence, and AWS Bedrock Knowledge Bases.
-- Red-team tools: PyRIT, garak, Promptfoo, Giskard.
+- Red-team tools: PyRIT, garak, Promptfoo, Giskard open source framework for testing models.
 - Evaluation tools: Ragas, Inspect AI, MLflow GenAI, Evidently, Llama Guard 3 classification results.
-- Pipeline and supply-chain tools: Semgrep, Syft, Grype, Trivy, Cosign, DVC.
-- Deployment tools: Docker, Kubernetes, kubectl, NetworkPolicy, admission/policy checks, and cloud IAM.
+- Pipeline and supply-chain tools: Semgrep, Syft with CycloneDX and SPDX SBOM outputs, Grype, Trivy, Hugging Face Hub malware/pickle/secrets/Protect AI/JFrog scanners, Buttercup for automated vulnerability finding and patching, Cosign, Sigstore model-transparency/model-signing, DVC.
+- Deployment tools: Docker, Kubernetes, kubectl, NetworkPolicy, admission/policy checks, HashiCorp Vault or equivalent secrets management, and cloud IAM.
 - Governance frameworks: OWASP LLM Top 10, MITRE ATLAS, NIST AI RMF, NIST GenAI Profile, Google SAIF.
 
 ## Capstone Thread
@@ -32,7 +32,8 @@ Students work on one GenAI application throughout the week. The application shou
 
 - A local model path using Ollama or another local runtime.
 - A managed model path using AWS Bedrock, OpenAI, Azure OpenAI, Vertex AI, or Anthropic.
-- A RAG workflow with document ingestion, vector search, and retrieval controls using Chroma plus a production-style vector database such as Weaviate, Qdrant, or Pinecone.
+- A RAG workflow with document ingestion, vector search, and retrieval controls using Chroma plus a production-style vector database path such as Weaviate, Qdrant, or Pinecone.
+- If Pinecone is selected as the production-style path, the capstone should include managed index configuration, namespaces, metadata filters, deletion protection, and API-key/access review.
 - A safety-classification path using Llama Guard 3 or a comparable guardrail classifier for prompt and response checks.
 - A tool-using agent with explicit permissions and traceability.
 - A Kubernetes or cloud deployment review.
@@ -209,7 +210,7 @@ Tools:
 
 Deliverable:
 
-- RAG threat model and poisoned document test results.
+- RAG threat model (`evidence/day2/rag-threat-model.md`) and poisoned document test results.
 
 ### Module 3: RAG Evaluation and Controls
 
@@ -267,11 +268,13 @@ Topics:
 Lab:
 
 - Build a simple agent that can call at least three tools.
+- Review an MCP-client workflow with Cline or an equivalent MCP client where available.
 - Add tool allowlists, scoped credentials, and approval gates.
 
 Tools:
 
 - LangGraph or OpenAI Agents SDK
+- Cline or another MCP client
 - AWS Bedrock Agents
 - LiteLLM
 
@@ -314,18 +317,23 @@ Topics:
 - Prompt templates as application logic.
 - Third-party plugins and integrations.
 - Secrets, logs, and model provider boundaries.
-- SBOMs and dependency scanning.
+- SBOMs, CycloneDX, SPDX, and dependency scanning.
+- Hugging Face Hub private repositories, fine-grained tokens, 2FA, SSO, Resource Groups, SSH/GPG workflows, and model-artifact scan results.
 
 Lab:
 
 - Review the capstone application architecture.
-- Run SAST, dependency, SBOM, and vulnerability scans.
+- Run SAST, dependency, CycloneDX/SPDX SBOM, vulnerability scans, Hugging Face Hub model-artifact scan review, and approved automated patch review.
 
 Tools:
 
 - Semgrep
 - Syft
+- CycloneDX
+- SPDX
 - Grype or Trivy
+- Hugging Face Hub security scanners
+- Buttercup
 - OWASP LLM Top 10
 
 Deliverable:
@@ -353,9 +361,12 @@ Topics:
 
 - Local model endpoints with Ollama, vLLM, or llama.cpp.
 - Managed platforms such as AWS Bedrock, Azure OpenAI, and Vertex AI.
+- Hugging Face Hub and Inference Endpoint access controls for private model, dataset, and Space repositories.
 - Kubernetes deployment patterns for AI apps, model gateways, vector databases, observability, and policy enforcement.
-- IAM, private networking, authentication, rate limits, and logging.
+- IAM, private networking, authentication, rate limits, secrets management, and logging.
 - Kubernetes Secrets, namespaces, NetworkPolicies, resource requests/limits, probes, ingress, and admission controls.
+- HashiCorp Vault policies, secret paths, audit logs, rotation, and runtime secret injection patterns.
+- Hugging Face fine-grained access tokens, 2FA, SSO, Resource Groups, Git over SSH, and GPG-signed commits.
 - Denial of wallet and quota controls.
 - Sensitive prompt and response logging risks.
 
@@ -364,14 +375,18 @@ Lab:
 - Review or deploy a model endpoint.
 - Harden it with authentication, network restrictions, logging controls, resource limits, and rate limits.
 - Review or deploy the lab stack on Kubernetes, then verify secrets, network policy, service exposure, and resource controls.
+- Review HashiCorp Vault or an equivalent secrets manager when configured for model-provider, vector-database, or tool credentials.
+- Review Hugging Face Hub repository visibility, token scopes, org controls, signed commits, and scan results when Hugging Face is used.
 
 Tools:
 
 - AWS Bedrock
+- Hugging Face Hub
 - Ollama
 - Docker
 - Kubernetes
 - kubectl
+- HashiCorp Vault
 - Open Policy Agent
 
 Deliverable:
@@ -384,6 +399,8 @@ Topics:
 
 - Data, prompt, model, and artifact lifecycle.
 - Dataset and model provenance.
+- SageMaker notebook-driven training jobs using the Hugging Face Estimator.
+- IAM role, S3 input/output, training script, dependency, metric, and cost-control review for managed training.
 - CI/CD risks.
 - Data poisoning and artifact tampering.
 - Drift and safety monitoring.
@@ -392,21 +409,25 @@ Topics:
 Lab:
 
 - Add pipeline controls to the capstone project.
-- Version data or eval sets, track evaluation runs, and scan artifacts.
+- Sign or verify a lab-safe model artifact and document whether the deployment gate should allow it.
+- Version data or eval sets, track evaluation runs, scan artifacts, and review an Amazon SageMaker Hugging Face Estimator notebook workflow.
 
 Tools:
 
 - DVC
+- Amazon SageMaker Python SDK
+- Hugging Face Estimator
 - MLflow
 - Evidently
 - Semgrep
 - Syft
 - Grype or Trivy
 - Cosign
+- Sigstore model-transparency/model-signing
 
 Deliverable:
 
-- MLSecOps pipeline diagram and CI security checklist.
+- MLSecOps pipeline diagram, CI security checklist, SageMaker Hugging Face training-job review, and model-signature verification gate when model artifacts are used.
 
 ### Module 3: Model Customization and Guardrails
 
@@ -440,7 +461,7 @@ Tools:
 
 Deliverable:
 
-- Model customization decision matrix and safety regression report.
+- Model customization decision matrix, fine-tuning or adapter notes when applicable, and safety regression report (`evidence/day4/safety-regression-report.md`).
 
 ## Day 5: Governance, Integrated Assessment, and Capstone
 
@@ -527,7 +548,7 @@ Required capstone artifacts:
 - Architecture diagram.
 - Data flow diagram.
 - Agent tool permission matrix.
-- RAG threat model and evaluation results.
+- RAG threat model (`evidence/day2/rag-threat-model.md`) and evaluation results.
 - Deployment security review.
 - SBOM and vulnerability scan summary.
 - MLOps/MLSecOps pipeline checklist.
@@ -541,15 +562,19 @@ Deliverable:
 
 ## Daily Schedule Template
 
-- 09:00-09:30: Review and objectives.
-- 09:30-10:45: Module 1 lecture and demonstration.
-- 10:45-11:00: Break.
-- 11:00-12:15: Module 1 lab.
-- 12:15-13:15: Lunch.
-- 13:15-14:30: Module 2 lecture and demonstration.
-- 14:30-15:45: Module 2 lab.
-- 15:45-16:00: Break.
-- 16:00-17:00: Capstone work, review, and daily deliverable checkpoint.
+- 09:00-09:20: Review, objectives, and prerequisite checks.
+- 09:20-10:15: Module 1 lecture and demonstration.
+- 10:15-10:30: Break.
+- 10:30-11:20: Module 1 lab.
+- 11:20-12:00: Module 2 lecture and demonstration.
+- 12:00-13:00: Lunch.
+- 13:00-13:50: Module 2 lab.
+- 13:50-14:35: Module 3 lecture and demonstration.
+- 14:35-14:50: Break.
+- 14:50-15:40: Module 3 lab or guided review.
+- 15:40-17:00: Capstone work, evidence cleanup, and daily deliverable checkpoint.
+
+For days with heavier optional labs, instructors should preselect the vector database, cloud, MCP-client, or guardrail path before class rather than attempting every optional branch.
 
 ## Pre-Course Setup
 
@@ -561,10 +586,16 @@ Students should have:
 - Node.js LTS.
 - Git.
 - Ollama installed with at least one local model.
+- Hugging Face account access, 2FA enabled, and lab-safe fine-grained token if Hugging Face Hub labs are enabled.
+- Git over SSH and GPG signing configured if signed Hub commit review is enabled.
+- Giskard available in the Python environment, or an instructor-provided container with Giskard installed.
+- Cline installed as an MCP client in the approved editor if MCP-client labs are enabled.
+- Buttercup available only in lab repositories where automated vulnerability finding and patching has been approved.
 - Access to one managed model platform such as AWS Bedrock, OpenAI, Anthropic, Azure OpenAI, or Vertex AI.
 - API keys or cloud credentials configured using least privilege.
 - A code editor.
 - kubectl configured for the lab cluster if Kubernetes labs are used.
+- HashiCorp Vault CLI or UI access to a lab-safe Vault instance if Vault labs are enabled.
 
 Recommended preloaded models:
 
@@ -584,11 +615,19 @@ Recommended repositories or lab folders:
 - Verify all local and hosted model paths.
 - Prepare fallback hosted model credentials in case a provider is unavailable.
 - Pre-stage Docker images and Python dependencies where possible.
+- Pre-stage lab-safe Hugging Face private model, dataset, or Space repositories with scan results and no real secrets.
+- Pre-stage Hugging Face org access examples for fine-grained tokens, SSO, Resource Groups, SSH, and GPG-signed commits where available.
 - Pre-stage Kubernetes manifests or Helm charts for the lab app when using Kubernetes.
+- Pre-stage a lab-safe HashiCorp Vault dev/test instance, sample policies, and fake model-provider secrets if Vault labs are enabled.
 - Pre-stage Weaviate or Qdrant vector database deployment options.
 - Pre-stage Pinecone account/index instructions or a design-review fallback if students do not have managed vector DB access.
 - Pre-stage PyTorch examples that can run on CPU for students without GPU access.
+- Pre-stage Giskard examples for model, RAG, or business-logic testing.
+- Pre-stage Cline MCP client configuration that points only to lab-safe MCP servers and tools.
+- Pre-stage Buttercup instructions or fixtures for automated vulnerability finding and patch review without touching production repositories.
 - Pre-stage Llama Guard 3 examples or classifier result fixtures for environments that cannot run the model locally.
+- Pre-stage a lab-safe signed model artifact, unsigned model artifact, tampered model artifact, or model-signing verification fixture for environments that cannot complete an interactive Sigstore or key-signing flow.
+- Pre-stage a SageMaker notebook fixture that uses the Hugging Face Estimator class, including a sanitized training script, least-privilege IAM role example, S3 input/output paths, metric definitions, and expected training-job output for environments that cannot launch AWS jobs.
 - Prepare sanitized documents for RAG labs.
 - Prepare safe adversarial prompts that do not require illegal or harmful real-world exploitation.
 - Prepare answer keys for expected failure modes and controls.

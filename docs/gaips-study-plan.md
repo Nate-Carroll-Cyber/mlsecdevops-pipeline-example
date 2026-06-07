@@ -21,7 +21,8 @@ This study plan maps the GIAC AI Platform Security (GAIPS) exam objectives to pr
 - Ollama: local model serving for low-cost labs, offline testing, local red teaming, and repeatable experiments.
 - OpenAI API and Agents SDK: hosted model workflows, agent tooling, guardrails, tracing, and evaluation.
 - Anthropic Claude API: alternate hosted model behavior for prompt, safety, and application security comparisons.
-- Hugging Face Transformers and Inference Endpoints: open-weight model loading, model cards, adapters, and deployment comparisons.
+- Amazon SageMaker Python SDK and Hugging Face Estimator: launching managed Hugging Face training jobs from Jupyter notebooks, reviewing IAM roles, S3 inputs/outputs, training scripts, metrics, and job-cost controls.
+- Hugging Face Transformers, Inference Endpoints, and Hub: open-weight model loading, model cards, adapters, private repositories, fine-grained tokens, 2FA, SSH/GPG workflows, SSO, Resource Groups, and deployment comparisons.
 - PyTorch: tensor/model fundamentals, local inference, fine-tuning mechanics, model artifact handling, and safety regression labs.
 - Llama Guard 3: Meta safety classifier for prompt and response classification, MLCommons hazard taxonomy coverage, guardrail comparison, and false-positive/false-negative analysis.
 - vLLM or llama.cpp: self-hosted inference, endpoint hardening, performance tradeoffs, and local deployment security.
@@ -33,19 +34,21 @@ This study plan maps the GIAC AI Platform Security (GAIPS) exam objectives to pr
 
 - LangGraph: stateful agents, tool routing, and controlled agent workflows.
 - OpenAI Agents SDK: agent workflows, tool use, handoffs, tracing, and guardrails.
+- Cline: MCP client for practicing model-context-protocol tool integration, approval boundaries, and agent workflow review.
 - LlamaIndex: RAG pipelines, document ingestion, retrieval, and vector DB integration.
 - Chroma: simple local vector database for quick RAG labs.
 - Qdrant: production-style vector search, metadata filtering, and retrieval security testing.
 - Weaviate: production-style vector database, schema design, hybrid search, metadata filtering, multi-tenancy, module-backed vectorization, Q&A extraction, gRPC API review, and RAG isolation testing.
 - Pinecone: managed/serverless vector database, indexes, namespaces, metadata filtering, hybrid retrieval, multitenancy design, deletion protection, API-key handling, and managed RAG security comparison.
 - Kubernetes: container orchestration for AI applications, model services, vector databases, secrets, network policy, resource controls, and observability.
+- HashiCorp Vault: secrets management for API keys, model-provider credentials, dynamic secrets, audit logging, and secret injection patterns.
 
 ### Security Testing and Red Teaming
 
 - PyRIT: automated GenAI red-team campaigns, adversarial prompt orchestration, scoring, and target abstraction.
 - garak: LLM vulnerability scanning for prompt injection, leakage, jailbreaks, hallucination, misinformation, and other failure modes.
 - Promptfoo: prompt/application evaluation, adversarial test generation, agent red teaming, and regression suites.
-- Giskard: LLM scan, RAG testing, business-logic failure testing, and continuous red-team workflows.
+- Giskard: open source framework for testing models, including LLM scans, RAG testing, business-logic failure testing, and continuous red-team workflows.
 
 ### Evaluation and Observability
 
@@ -57,9 +60,12 @@ This study plan maps the GIAC AI Platform Security (GAIPS) exam objectives to pr
 ### Pipeline, Supply Chain, and Governance
 
 - Semgrep: SAST, secrets scanning, and dependency risk checks.
-- Syft: SBOM generation for repositories, filesystems, and container images.
+- Syft: SBOM generation for repositories, filesystems, and container images, with CycloneDX and SPDX output formats for interchange and downstream vulnerability review.
 - Grype or Trivy: vulnerability scanning for SBOMs, filesystems, repositories, images, and IaC.
+- Hugging Face Hub security scanners: malware scanning, pickle import analysis, TruffleHog secrets scanning, Protect AI Guardian, and JFrog model security scanning for model and dataset repositories.
+- Buttercup: automated AI for finding and patching vulnerabilities, with generated patches reviewed before merge.
 - Cosign / Sigstore: signing and verifying container images and software artifacts.
+- Sigstore model-transparency/model-signing: signing ML model artifacts, generating verifiable model digests, producing DSSE/in-toto-backed signature bundles, verifying signer identity, and detecting post-approval model tampering.
 - DVC: data and model versioning with Git-linked reproducibility.
 - Open Policy Agent: policy-as-code for deployment, runtime, and tool authorization controls.
 - OWASP LLM Top 10: LLM application risk taxonomy.
@@ -84,6 +90,7 @@ Recommended tools:
 - LangGraph
 - OpenAI Agents SDK
 - AWS Bedrock Agents
+- Cline
 - Ollama
 - LiteLLM
 - Promptfoo
@@ -139,6 +146,7 @@ Tasks:
 - Build a minimal GenAI application with a frontend, backend, model provider, logging, and one integration.
 - Identify trust boundaries between user input, application code, prompts, tools, retrieved context, model responses, and downstream systems.
 - Run dependency, secret, SBOM, and container scans against the application.
+- Review Hugging Face Hub model, dataset, and Space repositories for private visibility, token scope, 2FA/SSO, Resource Groups, SSH/GPG usage, and model-artifact scan results.
 - Review risks from model providers, third-party plugins, prompt templates, vector stores, and API integrations.
 
 Recommended tools:
@@ -147,6 +155,7 @@ Recommended tools:
 - LangGraph
 - OpenAI Agents SDK
 - AWS Bedrock
+- Hugging Face Hub
 - Semgrep
 - Syft
 - Grype or Trivy
@@ -158,6 +167,7 @@ Deliverables:
 - Secure GenAI architecture checklist.
 - Data flow diagram.
 - Supply-chain review.
+- Hugging Face Hub security review.
 - SBOM and vulnerability scan summary.
 
 ## Objective 4: AI Infrastructure and Deployment Security
@@ -172,12 +182,15 @@ Tasks:
 - Harden model endpoints with authentication, TLS, rate limits, network restrictions, logging, and least-privilege access.
 - Apply Kubernetes controls such as namespaces, Secrets, NetworkPolicies, resource requests/limits, health checks, and admission or policy checks.
 - Review cloud IAM for model invocation, knowledge base access, log access, and deployment changes.
+- Review Hugging Face Hub access controls for private model/dataset/Space repositories, fine-grained user access tokens, 2FA, SSO, Resource Groups, Git over SSH, and GPG-signed commits.
+- Review HashiCorp Vault or an equivalent secrets manager for storage, access policy, audit logging, rotation, and runtime injection of model-provider and vector-database credentials.
 - Generate an SBOM, scan the image or filesystem, and sign the deployment artifact.
 - Evaluate abuse cases such as denial of wallet, unbounded context use, exposed model endpoints, and logging sensitive prompts.
 
 Recommended tools:
 
 - AWS Bedrock
+- Hugging Face Hub
 - Ollama
 - vLLM or llama.cpp
 - Docker
@@ -187,12 +200,14 @@ Recommended tools:
 - Grype
 - Cosign
 - Open Policy Agent
+- HashiCorp Vault
 - Cloud IAM tooling
 
 Deliverables:
 
 - Deployment security review.
 - IAM and network control checklist.
+- Hugging Face Hub access-control checklist.
 - Signed artifact or image verification record.
 - Abuse-case test results.
 
@@ -234,7 +249,7 @@ Tasks:
 
 - Diagram the lifecycle for data collection, labeling, preprocessing, training or fine-tuning, evaluation, deployment, monitoring, and rollback.
 - Version datasets, prompts, eval sets, model artifacts, and configuration.
-- Add CI checks for SAST, secrets, dependency vulnerabilities, SBOM generation, and artifact signing.
+- Add CI checks for SAST, secrets, dependency vulnerabilities, CycloneDX/SPDX SBOM generation, model training-job review, and artifact signing.
 - Track model/application evaluation runs and compare regressions across model, prompt, retrieval, and guardrail changes.
 - Monitor drift, abuse, data quality, latency, cost, and safety failures.
 - Test risks from poisoned data, insecure artifacts, exposed secrets, untrusted notebooks, and compromised CI/CD.
@@ -287,11 +302,14 @@ Recommended tools:
 - Giskard
 - MLflow GenAI retrieval scorers
 - Promptfoo
+
+Recommended reference:
+
 - OWASP LLM08: Vector and Embedding Weaknesses
 
 Deliverables:
 
-- RAG threat model.
+- RAG threat model: `evidence/day2/rag-threat-model.md`.
 - Weaviate AWS deployment and API exposure review.
 - Pinecone index, namespace, and metadata filtering review.
 - Retrieval evaluation report.
@@ -329,9 +347,9 @@ Recommended tools:
 Deliverables:
 
 - Model customization decision matrix.
-- Fine-tuning or adapter lab notes.
+- Fine-tuning or adapter lab notes: `evidence/day4/fine-tuning-adapter-notes.md`.
 - Guardrail design and test results.
-- Safety regression report.
+- Safety regression report: `evidence/day4/safety-regression-report.md`.
 
 ## Capstone Project
 
@@ -342,10 +360,11 @@ Minimum requirements:
 - One local model path using Ollama or another local runtime.
 - One managed model path using AWS Bedrock, OpenAI, Azure OpenAI, Vertex AI, or Anthropic.
 - One RAG workflow with document ingestion, vector search, retrieval controls, and citations.
-- One production-style vector database path using Weaviate or Qdrant, with schema/metadata filtering and isolation controls.
-- One managed vector database path using Pinecone, with namespaces, metadata filters, index configuration, and API-key/access review.
+- One production-style vector database path using Weaviate, Qdrant, or Pinecone, with schema or namespace design, metadata filtering, and isolation controls.
+- If Pinecone is selected, include managed index configuration, namespaces, metadata filters, deletion protection, and API-key/access review.
 - One tool-using agent with explicit permissions and traceability.
 - One Kubernetes or cloud deployment review with IAM, network, logging, rate limit, resource, and secret-handling controls.
+- If HashiCorp Vault or another secrets manager is used, review secret paths, policies, audit logs, rotation approach, and runtime injection pattern.
 - One CI or pipeline workflow with dependency scanning, SBOM generation, and evaluation checks.
 - One red-team and evaluation suite that can be rerun after changes.
 
@@ -354,7 +373,7 @@ Capstone deliverables:
 - Architecture diagram.
 - Data flow diagram.
 - Threat model.
-- SBOM.
+- CycloneDX and SPDX SBOMs.
 - Vulnerability scan summary.
 - Agent tool permission matrix.
 - RAG evaluation report.
@@ -383,12 +402,14 @@ Capstone deliverables:
 - Kubernetes: https://kubernetes.io/
 - Weaviate: https://weaviate.io/developers/weaviate
 - Pinecone: https://docs.pinecone.io/
+- Hugging Face Hub security: https://huggingface.co/docs/hub/security
 - Meta Llama Guard 3 model card: https://github.com/meta-llama/PurpleLlama/blob/main/Llama-Guard3/1B/MODEL_CARD.md
 - OWASP GenAI Security Project: https://genai.owasp.org/
 - OWASP LLM Top 10: https://genai.owasp.org/llm-top-10/
 - MITRE ATLAS: https://atlas.mitre.org/
 - NIST AI RMF: https://www.nist.gov/itl/ai-risk-management-framework
 - Google SAIF: https://saif.google/
+- HashiCorp Vault: https://developer.hashicorp.com/vault/docs
 - Microsoft PyRIT: https://github.com/microsoft/PyRIT
 - NVIDIA garak: https://github.com/NVIDIA/garak
 - Promptfoo: https://www.promptfoo.dev/docs/guides/llm-redteaming/
@@ -398,9 +419,14 @@ Capstone deliverables:
 - MLflow GenAI: https://mlflow.org/docs/latest/genai/
 - Semgrep: https://semgrep.dev/docs/
 - Syft: https://github.com/anchore/syft
+- CycloneDX: https://cyclonedx.org/
+- SPDX: https://spdx.dev/
+- Amazon SageMaker Hugging Face: https://docs.aws.amazon.com/sagemaker/latest/dg/hugging-face.html
+- SageMaker Python SDK HuggingFace Estimator: https://sagemaker.readthedocs.io/en/stable/frameworks/huggingface/sagemaker.huggingface.html
 - Grype: https://github.com/anchore/grype
 - Trivy: https://trivy.dev/
 - Cosign / Sigstore: https://docs.sigstore.dev/cosign/
+- Sigstore model-transparency: https://github.com/sigstore/model-transparency
 - DVC: https://dvc.org/doc
 - Evidently: https://docs.evidentlyai.com/
 - Open Policy Agent: https://www.openpolicyagent.org/docs/latest/

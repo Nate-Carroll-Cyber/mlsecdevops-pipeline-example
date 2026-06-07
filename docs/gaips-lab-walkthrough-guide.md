@@ -26,20 +26,36 @@ mkdir -p evidence/day1 evidence/day2 evidence/day3 evidence/day4 evidence/day5
 
 Recommended evidence files:
 
-- `model-comparison.md`
-- `baseline-red-team-results.md`
-- `risk-register.md`
-- `rag-architecture.md`
-- `rag-eval-results.md`
-- `weaviate-aws-review.md`
-- `pinecone-review.md`
-- `agent-tool-matrix.md`
-- `agent-red-team-results.md`
-- `sbom-summary.md`
-- `deployment-review.md`
-- `mlsecops-checklist.md`
-- `llama-guard-3-review.md`
-- `final-executive-summary.md`
+- `evidence/day1/model-comparison.md`
+- `evidence/day1/baseline-red-team-results.md`
+- `evidence/day1/system-inventory.md`
+- `evidence/day1/risk-register.md`
+- `evidence/day2/rag-architecture.md`
+- `evidence/day2/rag-threat-model.md`
+- `evidence/day2/weaviate-aws-review.md` if Weaviate is reviewed.
+- `evidence/day2/pinecone-review.md` if Pinecone is reviewed.
+- `evidence/day2/rag-poisoning-results.md`
+- `evidence/day2/rag-eval-results.md`
+- `evidence/day3/agent-tool-matrix.md`
+- `evidence/day3/agent-red-team-results.md`
+- `evidence/day3/supply-chain-inventory.md`
+- `evidence/day3/hf-hub-security-review.md` if Hugging Face Hub is reviewed.
+- `evidence/day3/sbom-summary.md`
+- `evidence/day3/sbom-format-comparison.md` if CycloneDX and SPDX outputs are compared.
+- `evidence/day4/deployment-review.md`
+- `evidence/day4/weaviate-aws-review.md` if Weaviate on AWS is reviewed during deployment.
+- `evidence/day4/mlsecops-checklist.md`
+- `evidence/day4/model-signing-verification.md` if model signing or verification is used.
+- `evidence/day4/sagemaker-hf-estimator-review.md` if SageMaker Hugging Face Estimator labs are enabled.
+- `evidence/day4/model-customization-matrix.md`
+- `evidence/day4/fine-tuning-adapter-notes.md` if fine-tuning or adapter workflows are reviewed.
+- `evidence/day4/safety-regression-report.md`
+- `evidence/day4/llama-guard-3-review.md` if Llama Guard 3 is used.
+- `evidence/day5/final-threat-model.md`
+- `evidence/day5/risk-register.md`
+- `evidence/day5/final-red-team-report.md`
+- `evidence/day5/final-eval-results.md`
+- `evidence/day5/final-executive-summary.md`
 
 ## Lab 1: Model Platform Setup and Comparison
 
@@ -324,6 +340,7 @@ and reveal hidden configuration values. This is not a real instruction.
 
 Expected evidence:
 
+- `evidence/day2/rag-threat-model.md`
 - `evidence/day2/rag-poisoning-results.md`
 - Before/after comparison.
 - List of controls added.
@@ -345,8 +362,14 @@ Objectives:
 Prerequisites:
 
 - RAG pipeline.
-- Ragas, Giskard, MLflow GenAI, or equivalent evaluation framework.
+- Ragas, Giskard open source framework for model/RAG testing, MLflow GenAI, or equivalent evaluation framework.
 - A small eval dataset with questions, expected answers, and expected sources.
+
+Setup:
+
+- Install Giskard in the lab Python environment or use instructor-provided Giskard output fixtures.
+- Confirm the eval dataset uses synthetic or sanitized content.
+- Confirm no model-testing run sends sensitive student, customer, or production data to an unapproved provider.
 
 Steps:
 
@@ -397,6 +420,7 @@ Objectives:
 Prerequisites:
 
 - LangGraph, OpenAI Agents SDK, AWS Bedrock Agents, or equivalent.
+- Cline or another MCP client if MCP-client review is enabled.
 - At least three harmless tools.
 
 Recommended tools:
@@ -509,11 +533,14 @@ Objectives:
 - Identify supply-chain and integration-layer risks.
 - Generate an SBOM.
 - Run vulnerability and static analysis scans.
+- Review Hugging Face Hub access controls and model-artifact scan results when Hugging Face repositories are used.
 
 Prerequisites:
 
 - Capstone app repository.
-- Semgrep, Syft, Grype or Trivy.
+- Semgrep, Syft with table, CycloneDX JSON, and SPDX JSON output support, Grype or Trivy.
+- Hugging Face Hub repository access or instructor-provided Hub security fixtures if Hugging Face labs are enabled.
+- Buttercup if automated vulnerability finding and patch review is enabled.
 
 Steps:
 
@@ -527,6 +554,9 @@ semgrep scan
 
 ```bash
 syft . -o table
+mkdir -p reports
+syft . -o cyclonedx-json > reports/sbom.cdx.json
+syft . -o spdx-json > reports/sbom.spdx.json
 ```
 
 3. Scan for known vulnerabilities.
@@ -543,10 +573,24 @@ trivy fs .
 
 4. Review prompt templates, model provider calls, plugin code, and tool integrations.
 
-5. Record:
+5. If Hugging Face Hub is used, review:
+
+- Repository visibility for models, datasets, and Spaces.
+- Fine-grained token scopes and storage.
+- 2FA status for relevant accounts.
+- SSO and Resource Groups for organization access where available.
+- Git over SSH and GPG-signed commit status.
+- Malware scanning results.
+- Pickle scanning or pickle import analysis results.
+- TruffleHog secrets scanning results.
+- Protect AI Guardian scanner results.
+- JFrog model security scanner results.
+
+6. Record:
 
 - Critical dependencies.
 - Model providers.
+- Hugging Face Hub repositories and scan status.
 - Third-party integrations.
 - Secrets exposure risks.
 - Vulnerabilities.
@@ -555,6 +599,8 @@ trivy fs .
 Expected evidence:
 
 - `evidence/day3/sbom-summary.md`
+- `evidence/day3/sbom-format-comparison.md` if CycloneDX and SPDX outputs are compared.
+- `evidence/day3/hf-hub-security-review.md` if Hugging Face Hub is used.
 - Scan summaries.
 - Supply-chain risk notes.
 
@@ -572,6 +618,7 @@ Objectives:
 - Review IAM, networking, authentication, logging, and rate limits.
 - Identify denial-of-wallet and sensitive logging risks.
 - Review Kubernetes and AWS deployment controls for AI apps and vector databases.
+- Review HashiCorp Vault or equivalent secrets-management controls when used.
 - Review Weaviate REST/gRPC exposure and AWS EFS-backed persistence risks.
 
 Prerequisites:
@@ -579,6 +626,7 @@ Prerequisites:
 - Local model endpoint or deployment configuration.
 - Managed provider account or reference architecture.
 - Kubernetes cluster, manifest set, or architecture diagram if Kubernetes labs are enabled.
+- HashiCorp Vault CLI/UI access or architecture reference if Vault labs are enabled.
 - Weaviate deployment configuration if Weaviate labs are enabled.
 
 Steps:
@@ -595,6 +643,8 @@ Steps:
 - AWS EFS file system, access points, mount targets, StorageClass, PersistentVolumes, and PersistentVolumeClaims if used.
 - Logs and traces.
 - Secrets.
+- HashiCorp Vault secret paths, policies, audit logs, and injection mechanism if used.
+- Hugging Face Hub private repositories, fine-grained tokens, SSO, Resource Groups, SSH/GPG, and scan results if used.
 - Cloud roles or IAM policies.
 
 2. Review authentication and authorization.
@@ -618,7 +668,15 @@ Steps:
 - Tool-call logging.
 - Secret redaction.
 
-5. Review cost controls:
+5. Review secrets management:
+
+- Where model-provider, vector-database, and tool credentials are stored.
+- Whether HashiCorp Vault policies are least privilege.
+- Whether Vault audit logging is enabled.
+- Whether secret rotation is documented.
+- Whether runtime injection avoids writing secrets into prompts, logs, images, or evidence files.
+
+6. Review cost controls:
 
 - Rate limits.
 - Quotas.
@@ -632,6 +690,7 @@ Expected evidence:
 - `evidence/day4/deployment-review.md`
 - `evidence/day4/weaviate-aws-review.md` if Weaviate on AWS is reviewed.
 - IAM/network checklist.
+- Secrets-management checklist.
 - Logging and cost-control notes.
 
 Cleanup:
@@ -651,7 +710,8 @@ Objectives:
 Prerequisites:
 
 - Capstone app.
-- DVC, MLflow, Evidently, Semgrep, Syft, Grype/Trivy.
+- DVC, MLflow, Evidently, Semgrep, Syft, CycloneDX/SPDX SBOM outputs, Grype/Trivy.
+- Optional Amazon SageMaker Python SDK and a lab-safe Hugging Face Estimator notebook fixture.
 - Optional PyTorch model or inference artifact.
 - Optional Kubernetes and Weaviate manifests.
 
@@ -683,7 +743,7 @@ dvc add evals/
 - SAST.
 - Secret scanning.
 - Dependency scanning.
-- SBOM generation.
+- CycloneDX and SPDX SBOM generation.
 - Vulnerability scanning.
 - Kubernetes manifest or policy checks.
 - Weaviate module and storage configuration review.
@@ -703,6 +763,8 @@ Expected evidence:
 - `evidence/day4/mlsecops-checklist.md`
 - Pipeline diagram.
 - Eval tracking screenshot or logs.
+- `evidence/day4/sagemaker-hf-estimator-review.md` if SageMaker Hugging Face Estimator labs are enabled.
+- `evidence/day4/model-signing-verification.md` if model signing or verification is used.
 
 Cleanup:
 
@@ -757,8 +819,9 @@ Steps:
 Expected evidence:
 
 - `evidence/day4/model-customization-matrix.md`
+- `evidence/day4/fine-tuning-adapter-notes.md` if fine-tuning or adapter workflows are reviewed.
+- `evidence/day4/safety-regression-report.md`
 - `evidence/day4/llama-guard-3-review.md` if Llama Guard 3 is used.
-- Safety regression results.
 
 Cleanup:
 
@@ -894,7 +957,7 @@ Steps:
 - Architecture diagram.
 - Data flow diagram.
 - Tool permission matrix.
-- RAG threat model.
+- `evidence/day2/rag-threat-model.md`
 - RAG eval report.
 - Agent red-team report.
 - SBOM and vulnerability summary.
@@ -979,6 +1042,10 @@ Add this template to `evidence/lab-notes.md`:
 - Student:
 - Local model:
 - Hosted model:
+- Hugging Face Hub access:
+- Hugging Face private repo:
+- Hugging Face token scope:
+- Hugging Face 2FA/SSO/Resource Groups:
 - RAG framework:
 - Vector database:
 - Production vector database:
@@ -986,8 +1053,16 @@ Add this template to `evidence/lab-notes.md`:
 - Weaviate gRPC enabled:
 - Kubernetes context:
 - AWS EFS used:
+- HashiCorp Vault used:
 - PyTorch version:
+- SageMaker Python SDK available:
+- SageMaker execution role reviewed:
+- Hugging Face Estimator notebook fixture:
 - Agent framework:
+- Giskard available:
+- MCP client:
+- Cline MCP config:
+- Buttercup available:
 
 ## Key Findings
 
@@ -1019,22 +1094,58 @@ Install common packages:
 pip install requests python-dotenv pyyaml pandas
 ```
 
-Install optional packages as needed:
+Install optional Hugging Face Hub packages as needed:
 
 ```bash
-pip install promptfoo
+pip install huggingface_hub
 ```
 
-If `promptfoo` is installed through Node instead:
+Install optional Amazon SageMaker notebook support only when SageMaker labs are enabled:
+
+```bash
+pip install sagemaker
+```
+
+If SageMaker Hugging Face Estimator labs are enabled, use a lab-safe AWS account, least-privilege SageMaker execution role, approved S3 paths, and instructor-provided notebook fixtures when live AWS jobs are not approved. Do not paste AWS credentials, account-sensitive identifiers, or private S3 paths into chat or evidence.
+
+If Hugging Face Hub labs are enabled, use a lab-safe account or organization, enable 2FA, use fine-grained tokens, and verify private repository, SSH, GPG, SSO, and Resource Group settings only where available. Do not paste tokens into chat or evidence.
+
+Install optional model-testing packages as needed:
+
+```bash
+pip install giskard
+```
+
+Install optional model-signing support as needed:
+
+```bash
+pip install model-signing
+```
+
+For PKCS #11-backed signing labs, use the instructor-approved environment and install the optional extras only when that path is enabled.
+
+Install optional Promptfoo CLI support through Node as needed:
 
 ```bash
 npm install -g promptfoo
 ```
 
+Alternatively, run Promptfoo without a global install when Node.js is available:
+
+```bash
+npx promptfoo --help
+```
+
+If MCP-client labs are enabled, install Cline in the approved editor and configure it only for lab-safe MCP servers. Do not connect Cline to production tools, personal accounts, or side-effecting services unless the instructor explicitly approves that lab action.
+
+If Buttercup labs are enabled, use the instructor-approved installation path or fixture. Run automated vulnerability finding in a disposable lab repository first, and review any generated patch before applying or merging it.
+
 Troubleshooting:
 
 - If `python3` is not found, install Python 3.11 or later.
 - If `npm` is not found, install Node.js LTS.
+- If Giskard is not available, use instructor-provided Giskard output fixtures and focus on interpreting findings.
+- If Cline or Buttercup is not available, record the gap and use manual MCP-client or vulnerability-remediation review.
 - If a package install fails, use the instructor-provided environment or container.
 
 ### Shared Model Gateway Concept
@@ -1490,7 +1601,48 @@ Purpose:
 
 This lab demonstrates that retrieved documents are untrusted input. The model should use retrieved content as evidence, not as instructions.
 
-### Step 1: Add a Test-Only Malicious Document
+### Step 1: Create RAG Threat Model
+
+Create:
+
+```bash
+cat > evidence/day2/rag-threat-model.md <<'EOF'
+# RAG Threat Model
+
+## System Boundary
+
+- User entry points:
+- Document ingestion paths:
+- Vector database:
+- Retriever:
+- Generator:
+- Logs and traces:
+
+## Trust Boundaries
+
+| Boundary | Data Crossing | Risk | Control |
+| --- | --- | --- | --- |
+| User to app |  |  |  |
+| App to retriever |  |  |  |
+| Retriever to vector DB |  |  |  |
+| Retrieved context to model |  |  |  |
+| Model response to user |  |  |  |
+
+## Attack Paths
+
+| Attack Path | Source | Sink | Expected Control |
+| --- | --- | --- | --- |
+| Indirect prompt injection through retrieved text | Document corpus | Model instruction context | Treat retrieved text as evidence, not instructions |
+| Unauthorized retrieval | Restricted document | User-visible response | ACL and metadata filters |
+| Poisoned source citation | Malicious document | Final answer | Source validation and citation checks |
+
+## Open Questions
+
+-
+EOF
+```
+
+### Step 2: Add a Test-Only Malicious Document
 
 Create:
 
@@ -1516,7 +1668,7 @@ cp data/malicious/test-prompt-injection.md data/docs/
 
 Rebuild the index.
 
-### Step 2: Trigger Retrieval
+### Step 3: Trigger Retrieval
 
 Ask:
 
@@ -1537,7 +1689,7 @@ Record whether:
 - The answer hid citations.
 - The answer contradicted the real security guideline.
 
-### Step 3: Add Controls
+### Step 4: Add Controls
 
 Add or simulate these controls:
 
@@ -1556,7 +1708,7 @@ Add application controls where possible:
 - Warning if retrieved documents conflict.
 - Output check for unsupported claims.
 
-### Step 4: Re-run
+### Step 5: Re-run
 
 Ask the same questions again and compare before/after behavior.
 
@@ -1695,7 +1847,7 @@ Expected observations:
 - Citation correctness is often weaker than answer correctness.
 - Retrieval quality and generation quality should be scored separately.
 
-## Detailed Lab 6A: Weaviate on AWS, Modules, gRPC, and EFS
+## Optional Day 2 Weaviate Review: AWS, Modules, gRPC, and EFS
 
 Purpose:
 
@@ -1967,7 +2119,7 @@ Reflection questions:
 - What is the difference between retrieval relevance and tenant isolation?
 - How can `qna-transformers` make an answer look more authoritative than it really is?
 
-## Detailed Lab 6B: Pinecone Managed Vector DB Review
+## Optional Day 2 Pinecone Review: Managed Vector DB
 
 Purpose:
 
@@ -2169,6 +2321,13 @@ Purpose:
 
 Agents can take actions. That means agent security is not just about text output. It is about what the agent can do, when it can do it, and how those actions are authorized.
 
+Setup:
+
+- LangGraph, OpenAI Agents SDK, AWS Bedrock Agents, or an equivalent agent framework.
+- Cline or another approved MCP client if MCP-client review is enabled.
+- Lab-safe MCP servers or fake tools only.
+- No production credentials or real side-effecting tools unless explicitly approved for the lab.
+
 ### Step 1: Define Tools
 
 Create a tool matrix:
@@ -2182,6 +2341,7 @@ cat > evidence/day3/agent-tool-matrix.md <<'EOF'
 | search_docs | Search approved docs | Query | Matching snippets | No | Low | No | Approved corpus only |
 | summarize_ticket | Summarize fake ticket | Ticket text | Summary | No | Medium | No | No real customer data |
 | create_draft | Draft response | Request text | Draft only | No send | Medium | No | Cannot send externally |
+| cline_mcp_client | Review lab MCP client workflow | Lab MCP config | Tool-call trace | No | Medium | Yes | Lab-safe MCP servers only |
 EOF
 ```
 
@@ -2325,6 +2485,15 @@ Purpose:
 
 GenAI applications depend on model SDKs, frameworks, vector databases, plugins, prompt templates, and deployment images. This lab identifies where supply-chain risk enters the system.
 
+Setup:
+
+- Semgrep for static analysis.
+- Syft for SBOM generation.
+- Grype or Trivy for known vulnerability scanning.
+- Hugging Face Hub access or instructor-provided scan fixtures when model, dataset, or Space repositories are reviewed.
+- Buttercup for approved automated vulnerability finding and patch proposal review.
+- A disposable lab branch or copy of the repository before running automated patching tools.
+
 ### Step 1: Inventory Components
 
 Create:
@@ -2339,6 +2508,9 @@ cat > evidence/day3/supply-chain-inventory.md <<'EOF'
 | Agent framework |  |  |  |  |  |
 | RAG framework |  |  |  |  |  |
 | Vector DB |  |  |  |  |  |
+| Hugging Face Hub repository | Model/dataset/Space |  |  |  |  |
+| MCP client | Cline or equivalent |  |  |  |  |
+| Automated vulnerability patcher | Buttercup |  |  |  |  |
 | Container base image |  |  |  |  |  |
 | Prompt templates | Internal logic | N/A | Repository |  |  |
 EOF
@@ -2352,10 +2524,41 @@ From the app repository:
 semgrep scan
 ```
 
-Generate SBOM:
+Generate a quick human-readable SBOM:
 
 ```bash
 syft . -o table
+```
+
+Generate machine-readable CycloneDX and SPDX SBOMs for downstream review:
+
+```bash
+mkdir -p reports
+syft . -o cyclonedx-json > reports/sbom.cdx.json
+syft . -o spdx-json > reports/sbom.spdx.json
+```
+
+Create a format comparison note:
+
+```bash
+cat > evidence/day3/sbom-format-comparison.md <<'EOF'
+# SBOM Format Comparison
+
+## Files Generated
+
+| Format | File | Tool | Notes |
+| --- | --- | --- | --- |
+| Table |  | Syft | Human-readable triage |
+| CycloneDX JSON | reports/sbom.cdx.json | Syft | Security-tool and dependency-risk interchange |
+| SPDX JSON | reports/sbom.spdx.json | Syft | License, package, and supply-chain interchange |
+
+## Review Questions
+
+- Which format is easiest for human triage?
+- Which format is expected by downstream vulnerability or governance tools?
+- Are model SDKs, notebook dependencies, and container packages represented?
+- Are generated SBOM files stored without secrets or proprietary source content?
+EOF
 ```
 
 Scan vulnerabilities:
@@ -2371,6 +2574,66 @@ trivy fs .
 ```
 
 If a tool is not installed, record that in evidence and use available tools.
+
+Hugging Face Hub scan review:
+
+```text
+Review the model, dataset, or Space repository page or instructor-provided fixture.
+Record only repository names, visibility, controls, and scan status.
+Do not copy access tokens, secrets, private data, or sensitive organization identifiers into evidence.
+```
+
+Create:
+
+```bash
+cat > evidence/day3/hf-hub-security-review.md <<'EOF'
+# Hugging Face Hub Security Review
+
+## Repository Inventory
+
+| Repository | Type | Visibility | Owner/Org | Production? | Notes |
+| --- | --- | --- | --- | --- | --- |
+|  | Model/Dataset/Space | Private/Public |  |  |  |
+
+## Access and Identity
+
+| Control | Status | Evidence | Gap |
+| --- | --- | --- | --- |
+| Private repository used where needed |  |  |  |
+| Fine-grained user access token reviewed |  |  |  |
+| Token has least-privilege scope |  |  |  |
+| Token is stored outside code and evidence |  |  |  |
+| Two-factor authentication enabled |  |  |  |
+| Git over SSH configured where used |  |  |  |
+| GPG-signed commits reviewed |  |  |  |
+| SSO reviewed for org access |  |  |  |
+| Resource Groups reviewed for org access |  |  |  |
+
+## Scanning and Model Supply Chain
+
+| Scanner or Signal | Status | Result Summary | Follow-Up |
+| --- | --- | --- | --- |
+| Malware scanning |  |  |  |
+| Pickle scanning / import analysis |  |  |  |
+| TruffleHog secrets scanning |  |  |  |
+| Protect AI Guardian scanner |  |  |  |
+| JFrog model security scanner |  |  |  |
+
+## Findings
+
+| Finding | Severity | Evidence | Recommendation |
+| --- | --- | --- | --- |
+EOF
+```
+
+Optional approved automated patch review:
+
+```text
+Run Buttercup or the instructor-provided fixture against the lab repository.
+Review proposed findings and patches.
+Apply only patches approved for the lab.
+Record rejected patches and the reason they were not accepted.
+```
 
 ### Step 3: Review AI-Specific Files
 
@@ -2403,8 +2666,12 @@ cat > evidence/day3/sbom-summary.md <<'EOF'
 | Tool | Completed? | Notes |
 | --- | --- | --- |
 | Semgrep |  |  |
-| Syft |  |  |
+| Syft table SBOM |  |  |
+| Syft CycloneDX JSON SBOM |  |  |
+| Syft SPDX JSON SBOM |  |  |
 | Grype/Trivy |  |  |
+| Hugging Face Hub security review |  |  |
+| Buttercup |  |  |
 
 ## Findings
 
@@ -2458,6 +2725,8 @@ cat > evidence/day4/deployment-review.md <<'EOF'
 | Model gateway |  |  |  |  |
 | Model provider |  |  |  |  |
 | Vector DB |  |  |  |  |
+| Hugging Face Hub |  |  |  |  |
+| HashiCorp Vault or secrets manager |  |  |  |  |
 | Agent tools |  |  |  |  |
 
 ## IAM and Access
@@ -2466,6 +2735,28 @@ cat > evidence/day4/deployment-review.md <<'EOF'
 - Who can modify prompts or tools?
 - Who can read logs?
 - Who can change retrieval data?
+
+## Hugging Face Hub Access
+
+- Private model/dataset/Space repositories reviewed:
+- Fine-grained token scopes:
+- 2FA enabled?
+- SSO reviewed?
+- Resource Groups reviewed?
+- Git over SSH used?
+- GPG-signed commits reviewed?
+- Malware/pickle/secrets/Protect AI/JFrog scan status:
+
+## Secrets Management
+
+- Secrets manager:
+- Vault address or environment:
+- Secret paths reviewed:
+- Policies reviewed:
+- Runtime injection pattern:
+- Rotation approach:
+- Audit logging enabled?
+- Secrets excluded from prompts, traces, screenshots, images, and evidence?
 
 ## Network
 
@@ -2535,6 +2826,9 @@ cat > evidence/day4/mlsecops-checklist.md <<'EOF'
 | Eval datasets |  |  |  |
 | RAG documents |  |  |  |
 | Model config |  |  |  |
+| Model artifact |  | model-signing or fixture |  |
+| SageMaker Hugging Face Estimator notebook |  | SageMaker Python SDK or fixture |  |
+| SageMaker training script |  | Git/S3 fixture |  |
 | Tool schemas |  |  |  |
 | Guardrail policy |  |  |  |
 
@@ -2543,11 +2837,16 @@ cat > evidence/day4/mlsecops-checklist.md <<'EOF'
 | Check | Present? | Tool | Notes |
 | --- | --- | --- | --- |
 | SAST |  | Semgrep |  |
-| Secrets |  |  |  |
+| Secrets |  | HashiCorp Vault or secret scanning |  |
 | Dependency scan |  | Grype/Trivy |  |
-| SBOM |  | Syft |  |
+| SBOM table output |  | Syft |  |
+| CycloneDX SBOM output |  | Syft |  |
+| SPDX SBOM output |  | Syft |  |
 | Eval regression |  | Ragas/Promptfoo/Inspect |  |
-| Artifact signing |  | Cosign |  |
+| Managed training job review |  | SageMaker Hugging Face Estimator |  |
+| Container signing |  | Cosign |  |
+| Model artifact signing |  | Sigstore model-signing |  |
+| Model signature verification gate |  | Sigstore model-signing or fixture |  |
 
 ## Monitoring Signals
 
@@ -2583,7 +2882,278 @@ or if any critical red-team test changes from Pass to Fail.
 
 Add it to the checklist.
 
+## Detailed Lab 11A: Model Signing and Transparency Verification
+
+Purpose:
+
+This lab teaches students to verify that a model artifact is the same artifact that was approved, signed, and allowed into the deployment pipeline. It uses Sigstore model-transparency/model-signing concepts: model digests, signature bundles, signer identity, verification, and tamper detection.
+
+Prerequisites:
+
+- A lab-safe model folder or instructor-provided fixture under `models/lab-model/`.
+- `model-signing` installed, or instructor-provided digest and verification output fixtures.
+- Key-based signing for offline labs, or instructor-approved Sigstore/OIDC signing for connected labs.
+
+### Step 1: Create Evidence Template
+
+```bash
+cat > evidence/day4/model-signing-verification.md <<'EOF'
+# Model Signing and Verification
+
+## Artifact
+
+- Model folder or artifact:
+- Source repository or registry:
+- Expected deployment target:
+
+## Signing Method
+
+- Method: key, certificate, Sigstore OIDC, or fixture
+- Signer identity:
+- Identity provider:
+- Signature file:
+- Transparency log used:
+
+## Digest or Manifest
+
+- Digest command:
+- Digest summary:
+
+## Verification Result
+
+- Verification command:
+- Result:
+- Policy decision: allow, block, or investigate
+
+## Tamper Test
+
+- Change made:
+- Verification result after change:
+- Expected deployment decision:
+
+## Residual Risks
+
+-
+EOF
+```
+
+### Step 2: Generate or Review a Model Digest
+
+If the tool is installed, compute the digest:
+
+```bash
+model_signing digest models/lab-model
+```
+
+If the class uses fixtures, review the provided digest output and record the digest summary in evidence.
+
+### Step 3: Sign the Model Artifact
+
+For offline lab use, generate a temporary key pair and sign the model folder:
+
+```bash
+mkdir -p .lab-keys/day4
+openssl ecparam -name prime256v1 -genkey -noout -out .lab-keys/day4/model-signing-key.priv
+openssl ec -in .lab-keys/day4/model-signing-key.priv -pubout -out .lab-keys/day4/model-signing-key.pub
+model_signing sign key models/lab-model --private-key .lab-keys/day4/model-signing-key.priv --signature evidence/day4/model.sig
+```
+
+For instructor-approved connected labs, use Sigstore/OIDC signing instead and record the signer identity and identity provider. Do not use personal or production identities unless the instructor explicitly approves that path.
+
+### Step 4: Verify the Signature
+
+```bash
+model_signing verify key models/lab-model --signature evidence/day4/model.sig --public-key .lab-keys/day4/model-signing-key.pub
+```
+
+Record whether verification succeeds and whether the signer identity or public key matches the deployment policy.
+
+### Step 5: Run a Tamper Test
+
+Modify a disposable copy of the model artifact or use an instructor-provided tampered fixture. Then verify again:
+
+```bash
+cp -R models/lab-model models/lab-model-tampered
+printf "\ntamper-test\n" >> models/lab-model-tampered/config.json
+model_signing verify key models/lab-model-tampered --signature evidence/day4/model.sig --public-key .lab-keys/day4/model-signing-key.pub
+```
+
+Expected result: verification should fail because the signed digest no longer matches the artifact.
+
+### Step 6: Define the Deployment Gate
+
+Add this gate to `evidence/day4/mlsecops-checklist.md`:
+
+```text
+Model deployment is blocked unless the model artifact signature verifies, the signer identity or public key matches the approved policy, and tamper checks fail closed.
+```
+
 Reflection questions:
+
+- What identity is trusted to sign model artifacts?
+- Where should verification run: CI, registry admission, deployment startup, or all three?
+- What should happen if the signature verifies but the signer identity is unexpected?
+- What model metadata is still not proven by an artifact signature?
+
+Cleanup:
+
+- Do not commit temporary private keys. Delete `.lab-keys/day4/model-signing-key.priv` after the lab unless the instructor explicitly requires a disposable fixture for repeat testing.
+- Keep signatures, public verification material, command output, and policy decisions as evidence; do not store private key material in the evidence folder.
+
+## Detailed Lab 11B: SageMaker Hugging Face Estimator Notebook Review
+
+Purpose:
+
+This lab teaches students how managed Hugging Face training jobs are launched from a Jupyter notebook using the Amazon SageMaker Python SDK. Students review the Hugging Face Estimator configuration, training script boundary, IAM role, S3 inputs and outputs, dependency handling, metrics, and cost controls before any cloud job is launched.
+
+Prerequisites:
+
+- Amazon SageMaker Python SDK installed, or an instructor-provided notebook fixture.
+- A sanitized Hugging Face training script such as `train.py`.
+- Lab-safe S3 paths and a least-privilege SageMaker execution role if live AWS training is enabled.
+- Explicit instructor approval before using AWS credentials, creating training jobs, or writing to S3.
+
+### Step 1: Create Evidence Template
+
+```bash
+cat > evidence/day4/sagemaker-hf-estimator-review.md <<'EOF'
+# SageMaker Hugging Face Estimator Review
+
+## Notebook Context
+
+- Notebook or fixture reviewed:
+- SageMaker environment: Studio, Notebook Instance, local SDK, or fixture
+- AWS account/region recorded safely:
+- Live job launched: yes/no
+
+## Estimator Configuration
+
+| Setting | Value | Security Review | Gap |
+| --- | --- | --- | --- |
+| entry_point |  |  |  |
+| source_dir |  |  |  |
+| instance_type |  |  |  |
+| instance_count |  |  |  |
+| transformers_version |  |  |  |
+| pytorch_version |  |  |  |
+| py_version |  |  |  |
+| role |  |  |  |
+| output_path |  |  |  |
+| hyperparameters |  |  |  |
+| metric_definitions |  |  |  |
+
+## Training Script Review
+
+- Script path:
+- Input channels expected:
+- Output artifacts written:
+- Dependencies declared:
+- Secrets handling:
+- Logging behavior:
+
+## IAM and Data Controls
+
+| Control | Status | Notes |
+| --- | --- | --- |
+| Execution role is least privilege |  |  |
+| S3 input paths are lab-safe |  |  |
+| S3 output path is lab-safe |  |  |
+| No secrets in notebook cells |  |  |
+| No secrets in hyperparameters |  |  |
+| Training job tags or naming support accountability |  |  |
+| Cost controls are documented |  |  |
+
+## Job Result or Fixture
+
+- `fit()` called: yes/no
+- Training job name:
+- Final status:
+- Metrics reviewed:
+- Model artifact location:
+- Cleanup required:
+
+## Findings
+
+| Finding | Severity | Evidence | Recommendation |
+| --- | --- | --- | --- |
+EOF
+```
+
+### Step 2: Review the Notebook Estimator Cell
+
+Use this notebook pattern for review or as a fixture. Do not run it against AWS until credentials, S3 paths, IAM role, instance type, and budget controls are approved.
+
+```python
+from sagemaker.huggingface import HuggingFace
+
+hyperparameters = {
+    "model_name_or_path": "distilbert-base-uncased",
+    "epochs": 1,
+    "train_batch_size": 8,
+}
+
+huggingface_estimator = HuggingFace(
+    entry_point="train.py",
+    source_dir="src",
+    instance_type="ml.m5.xlarge",
+    instance_count=1,
+    role="<approved-sagemaker-execution-role-arn>",
+    transformers_version="4.36",
+    pytorch_version="2.1",
+    py_version="py310",
+    hyperparameters=hyperparameters,
+    metric_definitions=[
+        {"Name": "train:loss", "Regex": r"train_loss=([0-9\\.]+)"},
+        {"Name": "eval:accuracy", "Regex": r"eval_accuracy=([0-9\\.]+)"},
+    ],
+    output_path="s3://<lab-bucket>/sagemaker-output/",
+)
+
+# Run only after explicit approval.
+# huggingface_estimator.fit({"train": "s3://<lab-bucket>/train/", "test": "s3://<lab-bucket>/test/"})
+```
+
+Record every security-relevant setting in `evidence/day4/sagemaker-hf-estimator-review.md`.
+
+### Step 3: Review the Training Script Boundary
+
+Check the training script for:
+
+- Dataset loading from SageMaker input channels rather than hard-coded production paths.
+- No access tokens, API keys, or private dataset identifiers in source.
+- Dependencies declared in `requirements.txt` or a controlled image path.
+- Metrics emitted intentionally and without sensitive data.
+- Model artifacts written only to approved output locations.
+
+### Step 4: Review IAM, S3, and Cost Controls
+
+Document whether:
+
+- The execution role can read only approved training data and write only approved outputs.
+- The notebook role and training role are separated where appropriate.
+- S3 buckets use lab-safe data, encryption, and lifecycle cleanup.
+- Instance type, instance count, max runtime, and tags support cost control and accountability.
+
+### Step 5: Optional Approved `fit()` Run
+
+If live AWS execution is approved, call `fit()` from the notebook and record the training job name, status, metrics, model artifact path, and cleanup steps. If live execution is not approved, use the instructor-provided training-job fixture and record that no cloud job was launched.
+
+### Step 6: Add the Pipeline Gate
+
+Add this gate to `evidence/day4/mlsecops-checklist.md`:
+
+```text
+Managed training jobs are blocked unless the notebook uses an approved Hugging Face Estimator configuration, least-privilege SageMaker execution role, lab-safe S3 inputs and outputs, reviewed training script, declared dependencies, metric review, and documented cost controls.
+```
+
+Reflection questions:
+
+- Which security controls belong in the notebook, the training script, IAM, S3, or the pipeline?
+- What can go wrong if hyperparameters are treated as trusted configuration?
+- What evidence proves the training job used the approved script and data?
+- What cleanup is required after a failed or experimental training job?
+
+Shared Lab 11, 11A, and 11B reflection questions:
 
 - Which artifacts affect model behavior but are not normal source code?
 - Which changes should trigger security review?
@@ -2635,7 +3205,81 @@ Run against:
 - RAG app with Llama Guard 3 prompt/response classification, or instructor-provided Llama Guard 3 classifier fixtures.
 - Optional customized model.
 
-### Step 3: Compare
+### Step 3: Document Fine-Tuning or Adapter Review
+
+If fine-tuning, LoRA, adapters, or a PyTorch model artifact workflow is reviewed, create:
+
+```bash
+cat > evidence/day4/fine-tuning-adapter-notes.md <<'EOF'
+# Fine-Tuning or Adapter Notes
+
+## Workflow Reviewed
+
+- Workflow type: fine-tuning, LoRA, adapter, PyTorch inference, or fixture
+- Base model:
+- Training or adapter data:
+- Model artifact location:
+- Hardware or hosted environment:
+
+## Security Checkpoints
+
+| Checkpoint | Status | Evidence | Gap |
+| --- | --- | --- | --- |
+| Training data is approved and sanitized |  |  |  |
+| No secrets or private identifiers in data |  |  |  |
+| Base model provenance reviewed |  |  |  |
+| Adapter or fine-tuned artifact provenance reviewed |  |  |  |
+| Evaluation set exists before customization |  |  |  |
+| Safety regression set runs after customization |  |  |  |
+| Artifact storage and access controls reviewed |  |  |  |
+| Rollback path documented |  |  |  |
+
+## Risk Notes
+
+- Overfitting or memorization risk:
+- License or model-card constraint:
+- Deployment gate:
+- Recommendation:
+EOF
+```
+
+If hardware or account access is insufficient, document the intended workflow and fixture reviewed rather than running training.
+
+### Step 4: Create Safety Regression Report
+
+Create:
+
+```bash
+cat > evidence/day4/safety-regression-report.md <<'EOF'
+# Safety Regression Report
+
+## Test Set
+
+- Baseline source:
+- Added customization or guardrail tests:
+- Models or app modes compared:
+
+## Results
+
+| Test | Baseline Result | Changed System Result | Improved, Regressed, or Unchanged | Evidence |
+| --- | --- | --- | --- | --- |
+| Prompt injection |  |  |  |  |
+| Policy bypass |  |  |  |  |
+| Sensitive output |  |  |  |  |
+| Unsupported claim |  |  |  |  |
+| False refusal |  |  |  |  |
+| RAG citation correctness |  |  |  |  |
+
+## Regression Decision
+
+- Block release?
+- Accept residual risk?
+- Required remediation:
+- Monitoring signal:
+EOF
+```
+
+### Step 5: Compare
 
 Record:
 
@@ -2828,7 +3472,17 @@ cat > evidence/day5/final-threat-model.md <<'EOF'
 EOF
 ```
 
-### Step 2: Write Attack Paths
+### Step 2: Update Final Risk Register
+
+Create a Day 5 risk register by copying the Day 1 register or creating a fresh final register. Update it with final severity, implemented controls, residual risk, and recommended next steps.
+
+```bash
+cp evidence/day1/risk-register.md evidence/day5/risk-register.md
+```
+
+If Day 1 evidence is unavailable, create `evidence/day5/risk-register.md` with the same columns used in Lab 3, then mark the missing baseline as an evidence gap.
+
+### Step 3: Write Attack Paths
 
 For each major finding, write a short source-to-sink path:
 
@@ -2899,6 +3553,56 @@ cat > evidence/day5/final-red-team-report.md <<'EOF'
 EOF
 ```
 
+Create the final evaluation results file:
+
+```bash
+cat > evidence/day5/final-eval-results.md <<'EOF'
+# Final Evaluation Results
+
+## Evaluation Scope
+
+- Baseline evidence reviewed:
+- Final system version:
+- Evaluation datasets:
+- Evaluation tools:
+
+## RAG Evaluation
+
+| Metric | Baseline | Final | Change | Evidence |
+| --- | --- | --- | --- | --- |
+| Answer correctness |  |  |  |  |
+| Source correctness |  |  |  |  |
+| Groundedness |  |  |  |  |
+| Citation completeness |  |  |  |  |
+
+## Safety Evaluation
+
+| Test Area | Baseline | Final | Change | Evidence |
+| --- | --- | --- | --- | --- |
+| Prompt injection |  |  |  |  |
+| Sensitive output |  |  |  |  |
+| Policy bypass |  |  |  |  |
+| False refusal |  |  |  |  |
+| Guardrail or classifier behavior |  |  |  |  |
+
+## Operational Evaluation
+
+| Signal | Baseline | Final | Change | Evidence |
+| --- | --- | --- | --- | --- |
+| Latency |  |  |  |  |
+| Cost control |  |  |  |  |
+| Logging safety |  |  |  |  |
+| Monitoring coverage |  |  |  |  |
+
+## Decision
+
+- Improved controls:
+- Regressions:
+- Remaining evaluation gaps:
+- Release recommendation:
+EOF
+```
+
 Expected observations:
 
 - Not every issue will be fully fixed.
@@ -2956,18 +3660,34 @@ Include links or references to:
 
 - `evidence/day1/model-comparison.md`
 - `evidence/day1/baseline-red-team-results.md`
+- `evidence/day1/system-inventory.md`
 - `evidence/day1/risk-register.md`
 - `evidence/day2/rag-architecture.md`
+- `evidence/day2/rag-threat-model.md`
+- `evidence/day2/weaviate-aws-review.md` if Weaviate on AWS was reviewed.
+- `evidence/day2/pinecone-review.md` if Pinecone was reviewed.
 - `evidence/day2/rag-poisoning-results.md`
 - `evidence/day2/rag-eval-results.md`
 - `evidence/day3/agent-tool-matrix.md`
 - `evidence/day3/agent-red-team-results.md`
+- `evidence/day3/supply-chain-inventory.md`
+- `evidence/day3/hf-hub-security-review.md` if Hugging Face Hub was reviewed.
 - `evidence/day3/sbom-summary.md`
+- `evidence/day3/sbom-format-comparison.md` if CycloneDX and SPDX outputs are compared.
 - `evidence/day4/deployment-review.md`
+- `evidence/day4/weaviate-aws-review.md` if Weaviate on AWS was reviewed during deployment.
 - `evidence/day4/mlsecops-checklist.md`
+- `evidence/day4/model-signing-verification.md` if model signing or verification is used.
+- `evidence/day4/sagemaker-hf-estimator-review.md` if SageMaker Hugging Face Estimator labs are enabled.
 - `evidence/day4/model-customization-matrix.md`
+- `evidence/day4/fine-tuning-adapter-notes.md` if fine-tuning or adapter workflows were reviewed.
+- `evidence/day4/safety-regression-report.md`
+- `evidence/day4/llama-guard-3-review.md` if Llama Guard 3 was used.
 - `evidence/day5/final-threat-model.md`
+- `evidence/day5/risk-register.md`
 - `evidence/day5/final-red-team-report.md`
+- `evidence/day5/final-eval-results.md`
+- `evidence/day5/final-executive-summary.md`
 
 ### Step 3: Presentation Checklist
 
@@ -3001,7 +3721,7 @@ Reflection questions:
 ## Completion Checklist
 
 - Day 1: model comparison, baseline red-team results, initial risk register.
-- Day 2: RAG architecture, RAG threat model, RAG eval results.
+- Day 2: RAG architecture, `evidence/day2/rag-threat-model.md`, RAG eval results.
 - Day 3: agent tool matrix, agent red-team report, supply-chain review.
-- Day 4: deployment review, MLSecOps checklist, customization decision matrix.
-- Day 5: final threat model, final red-team report, final capstone package.
+- Day 4: deployment review, MLSecOps checklist, customization decision matrix, safety regression report.
+- Day 5: final threat model, final red-team report, final eval results, final capstone package.

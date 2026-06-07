@@ -1,0 +1,23 @@
+{
+  "tool": "Buttercup",
+  "mode": "fixture",
+  "repository": "disposable-gaips-lab-repo",
+  "findings": [
+    {
+      "id": "BC-001",
+      "severity": "high",
+      "file": "app/tool_router.py",
+      "title": "Tool allowlist bypass through user-controlled tool name",
+      "proposed_patch": "Validate requested tool against static allowlist before dispatch.",
+      "review_decision": "accept concept, manually implement after tests"
+    },
+    {
+      "id": "BC-002",
+      "severity": "medium",
+      "file": "app/logging.py",
+      "title": "Prompt logs may contain secrets",
+      "proposed_patch": "Redact token-like markers before writing logs.",
+      "review_decision": "accept with expanded test cases"
+    }
+  ]
+}

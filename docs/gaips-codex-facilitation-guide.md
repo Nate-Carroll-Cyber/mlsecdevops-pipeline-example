@@ -28,6 +28,8 @@ The Codex-led workflow should use these documents together:
 - `docs/gaips-five-day-course.md`
 - `docs/gaips-lab-walkthrough-guide.md`
 - `docs/gaips-codex-facilitation-guide.md`
+- `docs/gaips-instructor-materials.md`
+- `docs/gaips-materials/README.md`
 
 ## Student Start Prompt
 
@@ -268,9 +270,9 @@ Facilitate Day 2 of the GAIPS labs. Walk me through building or using the RAG pi
 Codex checklist:
 
 - Inspect or create the RAG document corpus.
-- Verify the RAG app/framework is available.
-- Verify whether Giskard is available for open source model/RAG testing, or whether instructor-provided Giskard fixtures will be used.
-- Verify whether Chroma, Qdrant, Weaviate, Pinecone, or AWS Bedrock Knowledge Bases are being used.
+- Verify the RAG app/framework is available; if not, use `docs/gaips-materials/starter-rag-app/` after approval.
+- Verify whether Giskard is available for open source model/RAG testing; if not, use `docs/gaips-materials/fixtures/giskard-results.json`.
+- Verify whether Chroma, Qdrant, Weaviate, Pinecone, or AWS Bedrock Knowledge Bases are being used. If Bedrock Knowledge Bases is not live, use `docs/gaips-materials/bedrock-knowledge-bases/design-review.md`.
 - Create or update the RAG threat model before adding poisoned test documents.
 - If Weaviate is used, identify enabled modules such as `text2vec-transformers` and `qna-transformers`.
 - If Weaviate is used, identify REST and gRPC endpoints, including whether gRPC on port `50051` is exposed.
@@ -325,7 +327,7 @@ Facilitate Day 3 of the GAIPS labs. Help me build or inspect the tool-using agen
 Codex checklist:
 
 - Review the agent code or starter agent.
-- Verify whether Cline or another MCP client is used, and confirm it is connected only to lab-safe MCP servers.
+- Verify whether Cline or another MCP client is used, and confirm it is connected only to lab-safe MCP servers. Default fixture: `docs/gaips-materials/mcp/cline_mcp_settings.json`.
 - Create or update the tool permission matrix.
 - Run normal tool-use examples.
 - Capture traces or logs.
@@ -334,7 +336,7 @@ Codex checklist:
 - Add or document controls.
 - Review Hugging Face Hub private repository status, token scope, 2FA/SSO/Resource Groups, SSH/GPG, and model-artifact scan results if Hugging Face is used.
 - Run Semgrep, Syft table/CycloneDX/SPDX SBOM generation, Grype, Trivy, or Buttercup if approved.
-- Review Buttercup-generated patches before applying or merging them.
+- Review Buttercup-generated patches before applying or merging them. Default fixture: `docs/gaips-materials/buttercup/`.
 - Update supply-chain evidence.
 
 Visual checkpoints:

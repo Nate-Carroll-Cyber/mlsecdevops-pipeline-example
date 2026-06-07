@@ -1,0 +1,31 @@
+{
+  "tool": "Model Armor",
+  "mode": "fixture",
+  "template": "gaips-inspect-only",
+  "location": "us-central1",
+  "results": [
+    {
+      "id": "MA-001",
+      "method": "sanitizeUserPrompt",
+      "malicious_uri": false,
+      "prompt_injection": true,
+      "rai_filter": "review",
+      "decision": "block_or_review"
+    },
+    {
+      "id": "MA-002",
+      "method": "sanitizeModelResponse",
+      "sensitive_data": true,
+      "dlp_info_types": [
+        "API_KEY"
+      ],
+      "decision": "redact"
+    },
+    {
+      "id": "MA-003",
+      "method": "sanitizeDocument",
+      "prompt_injection": true,
+      "decision": "exclude_document"
+    }
+  ]
+}

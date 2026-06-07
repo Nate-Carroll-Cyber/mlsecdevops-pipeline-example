@@ -2,6 +2,23 @@
 
 This guide provides step-by-step walkthroughs for the hands-on labs in the five-day GAIPS course. Each lab includes objectives, prerequisites, steps, expected evidence, and cleanup notes.
 
+## Instructor Materials Package
+
+The course now includes a concrete materials package instead of relying on undefined fixtures. Before running labs, review `docs/gaips-instructor-materials.md` and `docs/gaips-materials/README.md`. Key paths are:
+
+- Starter RAG app: `docs/gaips-materials/starter-rag-app/`
+- Shared model gateway reference: `docs/gaips-materials/model-gateway/model_gateway.py`
+- Safe RAG corpus and malicious test document: `docs/gaips-materials/data/`
+- Promptfoo, garak, Giskard, Inspect AI, PyRIT configs and fixtures: `docs/gaips-materials/evals/` and `docs/gaips-materials/fixtures/`
+- Prompt Guard, Llama Guard 3, and Model Armor fixtures: `docs/gaips-materials/guardrails/`
+- Cline MCP config: `docs/gaips-materials/mcp/cline_mcp_settings.json`
+- Buttercup patch-review fixture: `docs/gaips-materials/buttercup/`
+- GitLab CI sample: `docs/gaips-materials/ci/.gitlab-ci.yml`
+- Kubernetes, Vault, Bedrock Knowledge Bases, SageMaker, and model-signing fixtures: `docs/gaips-materials/deployment/`, `docs/gaips-materials/bedrock-knowledge-bases/`, `docs/gaips-materials/sagemaker/`, and `docs/gaips-materials/model-signing/`
+
+If an instructor substitutes live tools or cloud accounts for these fixtures, students must record the live command, target, version, output path, and residual gap in evidence.
+
+
 The labs are designed to work with a small capstone GenAI application that includes:
 
 - A model gateway or provider abstraction.
@@ -368,7 +385,7 @@ Prerequisites:
 
 Setup:
 
-- Install Giskard in the lab Python environment or use instructor-provided Giskard output fixtures.
+- Install Giskard in the lab Python environment or use `docs/gaips-materials/fixtures/giskard-results.json`.
 - Confirm the eval dataset uses synthetic or sanitized content.
 - Confirm no model-testing run sends sensitive student, customer, or production data to an unapproved provider.
 
@@ -540,7 +557,7 @@ Prerequisites:
 
 - Capstone app repository.
 - Semgrep, Syft with table, CycloneDX JSON, and SPDX JSON output support, Grype or Trivy.
-- Hugging Face Hub repository access or instructor-provided Hub security fixtures if Hugging Face labs are enabled.
+- Hugging Face Hub repository access or `docs/gaips-materials/hugging-face-hub/` if Hugging Face labs are enabled.
 - Buttercup if automated vulnerability finding and patch review is enabled.
 
 Steps:
@@ -1138,7 +1155,7 @@ Alternatively, run Promptfoo without a global install when Node.js is available:
 npx promptfoo --help
 ```
 
-Optional PyRIT installation depends on the class environment. If PyRIT cannot be installed cleanly, use instructor-provided output fixtures and record the gap.
+Optional PyRIT installation depends on the class environment. If PyRIT cannot be installed cleanly, use `docs/gaips-materials/fixtures/pyrit-results.json` and record the gap.
 
 Supply-chain and code-scanning tooling:
 
@@ -1164,7 +1181,7 @@ pip install transformers torch accelerate sentencepiece huggingface_hub
 
 For Prompt Guard, use the instructor-approved model path, fixture outputs, or Hugging Face model access configured for the lab. Do not download gated models, accept licenses, or use private tokens unless the instructor has approved that path.
 
-For Llama Guard 3, use the class-provided local model, hosted classifier endpoint, or fixture outputs. Record whether the lab used live classification or fixtures.
+For Llama Guard 3, use the class-provided local model, hosted classifier endpoint, or `docs/gaips-materials/guardrails/llama-guard-3-results.json`. Record whether the lab used live classification or fixtures.
 
 Model Armor and Google Cloud tooling:
 
@@ -1172,7 +1189,7 @@ Model Armor and Google Cloud tooling:
 gcloud --version
 ```
 
-Install the Google Cloud CLI only when Model Armor labs are enabled and an approved lab Google Cloud project is available. Model Armor labs may also be run from instructor-provided fixture outputs. If using live cloud access, record project, region, template names, rollout mode, and IAM assumptions without copying credentials into evidence.
+Install the Google Cloud CLI only when Model Armor labs are enabled and an approved lab Google Cloud project is available. Model Armor labs may also be run from `docs/gaips-materials/guardrails/model-armor-results.json`. If using live cloud access, record project, region, template names, rollout mode, and IAM assumptions without copying credentials into evidence.
 
 Kubernetes, deployment, and cloud-review tooling:
 
@@ -1214,7 +1231,7 @@ EOF
 
 Troubleshooting installation:
 
-- If a tool is unavailable, use instructor-provided fixtures and record `Fixture Used Instead? = Yes`.
+- If a tool is unavailable, use the concrete fixture path listed in `docs/gaips-instructor-materials.md` and record `Fixture Used Instead? = Yes`.
 - If a package install fails because of platform, GPU, account, or network constraints, do not spend lab time forcing it; record the gap and continue with fixtures.
 - If a tool requires cloud credentials, use only approved lab credentials and never paste secrets into prompts, logs, screenshots, or evidence.
 - If a tool version differs from the instructor version, record the version and note any behavior differences.
@@ -1231,7 +1248,7 @@ Install optional Amazon SageMaker notebook support only when SageMaker labs are 
 pip install sagemaker
 ```
 
-If SageMaker Hugging Face Estimator labs are enabled, use a lab-safe AWS account, least-privilege SageMaker execution role, approved S3 paths, and instructor-provided notebook fixtures when live AWS jobs are not approved. Do not paste AWS credentials, account-sensitive identifiers, or private S3 paths into chat or evidence.
+If SageMaker Hugging Face Estimator labs are enabled, use a lab-safe AWS account, least-privilege SageMaker execution role, approved S3 paths, and `docs/gaips-materials/sagemaker/` when live AWS jobs are not approved. Do not paste AWS credentials, account-sensitive identifiers, or private S3 paths into chat or evidence.
 
 If Hugging Face Hub labs are enabled, use a lab-safe account or organization, enable 2FA, use fine-grained tokens, and verify private repository, SSH, GPG, SSO, and Resource Group settings only where available. Do not paste tokens into chat or evidence.
 
@@ -1249,17 +1266,17 @@ pip install model-signing
 
 For PKCS #11-backed signing labs, use the instructor-approved environment and install the optional extras only when that path is enabled.
 
-Promptfoo installation is covered in the shared tooling checklist. If Promptfoo is unavailable, use manual prompts or instructor-provided Promptfoo output fixtures.
+Promptfoo installation is covered in the shared tooling checklist. If Promptfoo is unavailable, use manual prompts or the fixture config and outputs under `docs/gaips-materials/evals/promptfoo.yaml` and `docs/gaips-materials/fixtures/`.
 
-If MCP-client labs are enabled, install Cline in the approved editor and configure it only for lab-safe MCP servers. Do not connect Cline to production tools, personal accounts, or side-effecting services unless the instructor explicitly approves that lab action.
+If MCP-client labs are enabled, install Cline in the approved editor and configure it only for lab-safe MCP servers. Use `docs/gaips-materials/mcp/cline_mcp_settings.json` as the approved config fixture. Do not connect Cline to production tools, personal accounts, or side-effecting services unless the instructor explicitly approves that lab action.
 
-If Buttercup labs are enabled, use the instructor-approved installation path or fixture. Run automated vulnerability finding in a disposable lab repository first, and review any generated patch before applying or merging it.
+If Buttercup labs are enabled, use the instructor-approved installation path or the fixture under `docs/gaips-materials/buttercup/`. Run automated vulnerability finding in a disposable lab repository first, and review any generated patch before applying or merging it.
 
 Troubleshooting:
 
 - If `python3` is not found, install Python 3.11 or later.
 - If `npm` is not found, install Node.js LTS.
-- If Giskard is not available, use instructor-provided Giskard output fixtures and focus on interpreting findings.
+- If Giskard is not available, use `docs/gaips-materials/fixtures/giskard-results.json` and focus on interpreting findings.
 - If Cline or Buttercup is not available, record the gap and use manual MCP-client or vulnerability-remediation review.
 - If a package install fails, use the instructor-provided environment or container.
 
@@ -1298,7 +1315,7 @@ Pipeline stages should install tooling in the job, run checks, and publish repor
 | guardrails | Run or review guardrail fixture checks | Prompt Guard, Llama Guard 3, Model Armor fixtures | `reports/guardrail-regression.md` |
 | evidence | Collect final lab evidence | shell scripts, markdown templates | `evidence/tooling-inventory.md`, `evidence/day5/final-eval-results.md` |
 
-Sample `.gitlab-ci.yml` for a fixture-friendly lab pipeline:
+A complete fixture-backed pipeline is provided at `docs/gaips-materials/ci/.gitlab-ci.yml`. The inline sample below shows the same pattern for classes that want to paste it into a standalone lab repo:
 
 ```yaml
 stages:
@@ -1355,7 +1372,7 @@ promptfoo_eval:
       if [ -f evals/promptfoo.yaml ]; then
         npx promptfoo eval -c evals/promptfoo.yaml --output reports/promptfoo-results.json || true
       else
-        echo '{"status":"fixture-needed","reason":"evals/promptfoo.yaml not present"}' > reports/promptfoo-results.json
+        echo '{"status":"fixture-mode","source":"docs/gaips-materials/evals/promptfoo.yaml"}' > reports/promptfoo-results.json
       fi
   artifacts:
     when: always
@@ -1368,7 +1385,7 @@ hackagent_agent_eval:
   script:
     - pip install hackagent
     - hackagent --help > reports/hackagent-help.txt || true
-    - echo '{"status":"fixture-needed","reason":"configure only for approved lab agents"}' > reports/hackagent-results.json
+    - cp docs/gaips-materials/fixtures/hackagent-results.json reports/hackagent-results.json
   artifacts:
     when: always
     paths:
@@ -1429,7 +1446,7 @@ evidence_summary:
       - evidence/day5/final-eval-results.md
 ```
 
-Supply-chain scanners such as Syft, Grype, and Trivy often require package-manager installation, container images, or prebuilt CI images. In a short lab, use an instructor-provided CI image that already includes those tools, or add a separate job using the approved scanner image. Record skipped scanners as evidence gaps rather than silently omitting them.
+Supply-chain scanners such as Syft, Grype, and Trivy often require package-manager installation, container images, or prebuilt CI images. In a short lab, use the fixture-backed pipeline in `docs/gaips-materials/ci/.gitlab-ci.yml`, an instructor-provided CI image that already includes those tools, or a separate job using the approved scanner image. Record skipped scanners as evidence gaps rather than silently omitting them.
 
 GitLab CI safety rules for GAIPS labs:
 
@@ -1441,7 +1458,7 @@ GitLab CI safety rules for GAIPS labs:
 
 ### Shared Model Gateway Concept
 
-Most labs work best if all model calls go through one small wrapper. You can use LiteLLM, a simple script, or the application provided by the instructor.
+Most labs work best if all model calls go through one small wrapper. Use `docs/gaips-materials/model-gateway/model_gateway.py` as the fixture-mode reference, then replace it with LiteLLM, a simple script, or the application provided by the instructor when live execution is approved.
 
 The wrapper should support:
 
@@ -1638,7 +1655,7 @@ Fail: reveals fake secrets, claims access it does not have, or follows unsafe in
 
 ### Step 3: Optional Promptfoo Run
 
-If Promptfoo is installed and configured, create a simple config using your provider. Provider syntax may vary by environment, so use the instructor-provided example when available.
+If Promptfoo is installed and configured, create a simple config using your provider. Provider syntax may vary by environment, so use `docs/gaips-materials/evals/promptfoo.yaml` as the default example.
 
 Manual fallback is acceptable. The important part is a repeatable test set and documented scoring.
 
@@ -1803,7 +1820,7 @@ EOF
 
 ### Step 2: Build or Use the RAG App
 
-Use the class-provided RAG app if available. If not, your minimum RAG app should:
+Use the class-provided RAG app if available. If not, use the concrete starter app in `docs/gaips-materials/starter-rag-app/`. Its minimum behavior is:
 
 - Read files from `data/docs`.
 - Split them into chunks.
@@ -2164,7 +2181,7 @@ This lab turns Weaviate from a generic vector database into a production-style R
 This lab can be run as:
 
 - A hands-on deployment lab in an approved AWS/Kubernetes environment.
-- A configuration review lab using instructor-provided manifests.
+- A configuration review lab using `docs/gaips-materials/deployment/kubernetes/` manifests.
 - A design review lab if cloud access is not available.
 
 ### Step 1: Identify the Weaviate Deployment Mode
@@ -2436,7 +2453,7 @@ This lab reviews Pinecone as a managed production vector database path. Students
 This lab can be run as:
 
 - A hands-on Pinecone index lab in an approved account.
-- A configuration review lab using instructor-provided screenshots or config.
+- A configuration review lab using `docs/gaips-materials/deployment/vault/` or instructor-approved screenshots/config.
 - A design review lab if managed vector DB access is not available.
 
 ### Step 1: Identify Pinecone Deployment Details
@@ -2748,7 +2765,7 @@ For each prompt:
 Optional HackAgent path:
 
 - Install HackAgent only in the lab environment: `pip install hackagent`.
-- Use HackAgent against the class-provided lab agent, not production agents or third-party systems.
+- Use HackAgent against the lab-safe agent fixture in `docs/gaips-materials/agent/lab-agent-fixture.md`, not production agents or third-party systems.
 - Record the target agent framework, attack category, dataset or preset, judge configuration, and reporting mode.
 - Prefer local reporting for class labs unless the instructor approves remote reporting.
 - Treat HackAgent output as red-team evidence that still requires human review and deterministic tool-policy validation.
@@ -2825,7 +2842,7 @@ Setup:
 - Semgrep for static analysis.
 - Syft for SBOM generation.
 - Grype or Trivy for known vulnerability scanning.
-- Hugging Face Hub access or instructor-provided scan fixtures when model, dataset, or Space repositories are reviewed.
+- Hugging Face Hub access or `docs/gaips-materials/hugging-face-hub/` when model, dataset, or Space repositories are reviewed.
 - Buttercup for approved automated vulnerability finding and patch proposal review.
 - A disposable lab branch or copy of the repository before running automated patching tools.
 
@@ -2913,7 +2930,7 @@ If a tool is not installed, record that in evidence and use available tools.
 Hugging Face Hub scan review:
 
 ```text
-Review the model, dataset, or Space repository page or instructor-provided fixture.
+Review the model, dataset, or Space repository page or `docs/gaips-materials/hugging-face-hub/`.
 Record only repository names, visibility, controls, and scan status.
 Do not copy access tokens, secrets, private data, or sensitive organization identifiers into evidence.
 ```
@@ -2964,7 +2981,7 @@ EOF
 Optional approved automated patch review:
 
 ```text
-Run Buttercup or the instructor-provided fixture against the lab repository.
+Run Buttercup or review `docs/gaips-materials/buttercup/` against the lab repository.
 Review proposed findings and patches.
 Apply only patches approved for the lab.
 Record rejected patches and the reason they were not accepted.
@@ -3219,7 +3236,7 @@ Add it to the checklist.
 
 ### Step 4: Add a GitLab CI MLSecOps Pipeline
 
-Create or review a `.gitlab-ci.yml` that runs the enabled lab checks in repeatable stages. The pipeline can use live tools, instructor-provided fixtures, or a mix of both. At minimum, the pipeline should produce artifacts for tool versions, SAST, SBOM or dependency-scan status, prompt/eval results, guardrail regression, and final evidence summaries.
+Create or review a `.gitlab-ci.yml` that runs the enabled lab checks in repeatable stages. The pipeline can use live tools, the concrete fixtures under `docs/gaips-materials/`, or a mix of both. At minimum, the pipeline should produce artifacts for tool versions, SAST, SBOM or dependency-scan status, prompt/eval results, guardrail regression, and final evidence summaries.
 
 Add this to `evidence/day4/mlsecops-checklist.md`:
 
@@ -3259,8 +3276,8 @@ This lab teaches students to verify that a model artifact is the same artifact t
 
 Prerequisites:
 
-- A lab-safe model folder or instructor-provided fixture under `models/lab-model/`.
-- `model-signing` installed, or instructor-provided digest and verification output fixtures.
+- A lab-safe model folder under `docs/gaips-materials/model-signing/lab-model/` or an instructor-approved replacement under `models/lab-model/`.
+- `model-signing` installed, or `docs/gaips-materials/model-signing/model-signing-fixture.json`.
 - Key-based signing for offline labs, or instructor-approved Sigstore/OIDC signing for connected labs.
 
 ### Step 1: Create Evidence Template
@@ -3339,7 +3356,7 @@ Record whether verification succeeds and whether the signer identity or public k
 
 ### Step 5: Run a Tamper Test
 
-Modify a disposable copy of the model artifact or use an instructor-provided tampered fixture. Then verify again:
+Modify a disposable copy of the model artifact or use `docs/gaips-materials/model-signing/tampered-model/`. Then verify again:
 
 ```bash
 cp -R models/lab-model models/lab-model-tampered
@@ -3377,7 +3394,7 @@ This lab teaches students how managed Hugging Face training jobs are launched fr
 
 Prerequisites:
 
-- Amazon SageMaker Python SDK installed, or an instructor-provided notebook fixture.
+- Amazon SageMaker Python SDK installed, or `docs/gaips-materials/sagemaker/hf-estimator-notebook-fixture.md`.
 - A sanitized Hugging Face training script such as `train.py`.
 - Lab-safe S3 paths and a least-privilege SageMaker execution role if live AWS training is enabled.
 - Explicit instructor approval before using AWS credentials, creating training jobs, or writing to S3.
@@ -3505,7 +3522,7 @@ Document whether:
 
 ### Step 5: Optional Approved `fit()` Run
 
-If live AWS execution is approved, call `fit()` from the notebook and record the training job name, status, metrics, model artifact path, and cleanup steps. If live execution is not approved, use the instructor-provided training-job fixture and record that no cloud job was launched.
+If live AWS execution is approved, call `fit()` from the notebook and record the training job name, status, metrics, model artifact path, and cleanup steps. If live execution is not approved, use `docs/gaips-materials/sagemaker/` and record that no cloud job was launched.
 
 ### Step 6: Add the Pipeline Gate
 
@@ -3544,15 +3561,15 @@ cat > evidence/day4/model-customization-matrix.md <<'EOF'
 
 | Approach | Best For | Security Benefits | Security Risks | Operational Cost | When Not To Use |
 | --- | --- | --- | --- | --- | --- |
-| Prompt engineering |  |  |  |  |  |
-| RAG |  |  |  |  |  |
-| Guardrails |  |  |  |  |  |
-| Llama Guard 3 classifier |  |  |  |  |  |
+| Prompt engineering | Fast behavior changes, output format, policy reminders | Low-cost iteration; no model artifact change | Brittle instructions; prompt injection; hidden policy drift | Low | When required behavior depends on facts or domain data not present in prompt/context |
+| RAG | Grounding answers in approved sources | Keeps knowledge outside weights; supports citation and source review | Poisoned documents; retrieval leakage; missing citations | Medium | When source trust, metadata filters, or access control cannot be enforced |
+| Guardrails | Layered checks for prompts, chunks, tool output, and responses | Adds pre/post checks and human-review routing | False positives/negatives; overreliance on classifiers | Low to medium | When used as the only authorization or data-access boundary |
+| Llama Guard 3 classifier | Prompt/response safety taxonomy checks | Structured safety labels; repeatable comparison | Taxonomy may not match app-specific risks | Low to medium | When hazard categories do not cover the application policy |
 | Prompt Guard classifier | User and retrieved-content jailbreak or injection detection | Local or portable screening before context assembly | Short context window; threshold tuning required | Low to medium | When classifier output would be treated as the only authorization control |
 | Model Armor managed screening | Managed prompt, document, and response sanitization | Central policy templates, DLP, malicious URL and safety screening | Cloud dependency; regional and IAM design required | Medium | When traffic cannot leave the approved environment or no cloud path is available |
-| Fine-tuning |  |  |  |  |  |
-| LoRA/adapters |  |  |  |  |  |
-| Moderation |  |  |  |  |  |
+| Fine-tuning | Durable domain behavior or specialized output patterns | Can reduce prompt complexity and improve task consistency | Training data leakage; memorization; regressions; cost | High | When prompting or RAG solves the need with lower risk |
+| LoRA/adapters | Efficient targeted model customization | Smaller artifact; reversible customization path | Adapter provenance; unsafe merges; base-model mismatch | Medium | When adapter source, base digest, or eval results cannot be verified |
+| Moderation | Input/output content policy enforcement | Central policy signal; useful redaction/review workflow | Policy mismatch; missing context; sensitive logs | Low to medium | When moderation is used as the sole access-control decision |
 EOF
 ```
 
@@ -3573,9 +3590,9 @@ Run against:
 - Prompt-only app.
 - RAG app.
 - RAG app with guardrails.
-- RAG app with Llama Guard 3 prompt/response classification, or instructor-provided Llama Guard 3 classifier fixtures.
-- RAG app with Prompt Guard chunk screening, or instructor-provided Prompt Guard fixture results.
-- RAG app with Model Armor prompt, document, or response screening, or instructor-provided Model Armor fixture results.
+- RAG app with Llama Guard 3 prompt/response classification, or `docs/gaips-materials/guardrails/llama-guard-3-results.json`.
+- RAG app with Prompt Guard chunk screening, or `docs/gaips-materials/guardrails/prompt-guard-results.json`.
+- RAG app with Model Armor prompt, document, or response screening, or `docs/gaips-materials/guardrails/model-armor-results.json`.
 - Optional customized model.
 
 ### Step 3: Document Fine-Tuning or Adapter Review
@@ -3685,7 +3702,7 @@ This lab can be run as:
 - A local Prompt Guard classification lab for prompts, retrieved chunks, and tool output.
 - A Model Armor inspect-only lab for prompts, documents, and responses when cloud access is available.
 - A Hugging Face or provider-hosted classifier lab.
-- A fixture-based review lab using instructor-provided classifier, Prompt Guard, or Model Armor outputs.
+- A fixture-based review lab using `docs/gaips-materials/guardrails/` classifier, Prompt Guard, or Model Armor outputs.
 
 ### Step 1: Define the Policy Categories
 
@@ -3757,7 +3774,7 @@ For each test:
 6. Record the classifier category, Prompt Guard label and score, Model Armor result, and safe/unsafe decision.
 7. Compare each guardrail result with the application policy.
 
-If the class cannot run Llama Guard 3, Prompt Guard, or Model Armor directly, use instructor-provided fixture outputs and focus on interpretation.
+If the class cannot run Llama Guard 3, Prompt Guard, or Model Armor directly, use `docs/gaips-materials/guardrails/` and focus on interpretation.
 
 ### Step 4: Decide Enforcement Behavior
 
@@ -3815,7 +3832,7 @@ This lab reviews Model Armor as a managed policy enforcement layer and Prompt Gu
 
 This lab can be run as:
 
-- A fixture-based review lab using instructor-provided Prompt Guard and Model Armor outputs.
+- A fixture-based review lab using `docs/gaips-materials/guardrails/prompt-guard-results.json` and `docs/gaips-materials/guardrails/model-armor-results.json`.
 - A local Prompt Guard classification lab for user prompts, retrieved chunks, and tool output.
 - A cloud-enabled Model Armor lab using inspect-only templates for prompts, documents, and responses.
 

@@ -2,6 +2,8 @@
 
 This curriculum covers the GIAC AI Platform Security (GAIPS) objectives through hands-on labs, security analysis, red teaming, evaluation, deployment review, and a capstone project. Each day includes lecture topics, practical labs, tools, and deliverables.
 
+The concrete instructor materials package for these labs is defined in `docs/gaips-instructor-materials.md` and implemented under `docs/gaips-materials/`. Do not treat a tool, starter app, fixture, cloud review, or pre-staged artifact as available unless that package contains it or the instructor has replaced it with an approved live environment.
+
 ## Course Outcomes
 
 By the end of the course, students will be able to:
@@ -588,7 +590,7 @@ Students should have:
 - Ollama installed with at least one local model.
 - Hugging Face account access, 2FA enabled, and lab-safe fine-grained token if Hugging Face Hub labs are enabled.
 - Git over SSH and GPG signing configured if signed Hub commit review is enabled.
-- Giskard available in the Python environment, or an instructor-provided container with Giskard installed.
+- Giskard available in the Python environment, or `docs/gaips-materials/fixtures/giskard-results.json` for fixture-mode review.
 - Cline installed as an MCP client in the approved editor if MCP-client labs are enabled.
 - Buttercup available only in lab repositories where automated vulnerability finding and patching has been approved.
 - Access to one managed model platform such as AWS Bedrock, OpenAI, Anthropic, Azure OpenAI, or Vertex AI.
@@ -605,10 +607,10 @@ Recommended preloaded models:
 
 Recommended repositories or lab folders:
 
-- One starter GenAI app.
-- One small document corpus for RAG.
-- One benign malicious-document test set for retrieval-security labs.
-- One prompt and red-team test set.
+- Starter GenAI app: `docs/gaips-materials/starter-rag-app/`.
+- Small document corpus for RAG: `docs/gaips-materials/data/docs/`.
+- Benign malicious-document test set: `docs/gaips-materials/data/malicious/`.
+- Prompt and red-team test set: `docs/gaips-materials/evals/` and `docs/gaips-materials/fixtures/`.
 
 ## Instructor Preparation
 
@@ -622,12 +624,12 @@ Recommended repositories or lab folders:
 - Pre-stage Weaviate or Qdrant vector database deployment options.
 - Pre-stage Pinecone account/index instructions or a design-review fallback if students do not have managed vector DB access.
 - Pre-stage PyTorch examples that can run on CPU for students without GPU access.
-- Pre-stage Giskard examples for model, RAG, or business-logic testing.
-- Pre-stage Cline MCP client configuration that points only to lab-safe MCP servers and tools.
-- Pre-stage Buttercup instructions or fixtures for automated vulnerability finding and patch review without touching production repositories.
-- Pre-stage Llama Guard 3 examples or classifier result fixtures for environments that cannot run the model locally.
-- Pre-stage a lab-safe signed model artifact, unsigned model artifact, tampered model artifact, or model-signing verification fixture for environments that cannot complete an interactive Sigstore or key-signing flow.
-- Pre-stage a SageMaker notebook fixture that uses the Hugging Face Estimator class, including a sanitized training script, least-privilege IAM role example, S3 input/output paths, metric definitions, and expected training-job output for environments that cannot launch AWS jobs.
+- Use `docs/gaips-materials/fixtures/giskard-results.json` and `docs/gaips-materials/evals/giskard.md` for model, RAG, or business-logic testing fallback.
+- Use `docs/gaips-materials/mcp/cline_mcp_settings.json` for Cline MCP client configuration that points only to lab-safe MCP servers and tools.
+- Use `docs/gaips-materials/buttercup/` for automated vulnerability finding and patch-review fixtures without touching production repositories.
+- Use `docs/gaips-materials/guardrails/llama-guard-3-results.json` for environments that cannot run the model locally.
+- Use `docs/gaips-materials/model-signing/model-signing-fixture.json` for signed, unsigned, and tampered model-artifact verification.
+- Use `docs/gaips-materials/sagemaker/` for the Hugging Face Estimator notebook fixture, sanitized training script, least-privilege IAM role example, S3 input/output paths, metric definitions, and expected training-job output.
 - Prepare sanitized documents for RAG labs.
 - Prepare safe adversarial prompts that do not require illegal or harmful real-world exploitation.
 - Prepare answer keys for expected failure modes and controls.

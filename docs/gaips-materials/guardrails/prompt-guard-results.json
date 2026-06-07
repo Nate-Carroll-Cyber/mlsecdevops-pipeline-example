@@ -1,0 +1,28 @@
+{
+  "tool": "Prompt Guard",
+  "mode": "fixture",
+  "threshold": 0.75,
+  "results": [
+    {
+      "id": "PG-001",
+      "input_type": "user_prompt",
+      "label": "jailbreak",
+      "score": 0.91,
+      "decision": "block"
+    },
+    {
+      "id": "PG-002",
+      "input_type": "retrieved_chunk",
+      "label": "injection",
+      "score": 0.96,
+      "decision": "exclude_or_review"
+    },
+    {
+      "id": "PG-003",
+      "input_type": "benign_policy",
+      "label": "benign",
+      "score": 0.08,
+      "decision": "allow"
+    }
+  ]
+}

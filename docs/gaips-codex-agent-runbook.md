@@ -24,6 +24,8 @@ Before facilitating labs, read or reference these files:
 - `docs/gaips-lab-walkthrough-guide.md`
 - `docs/gaips-codex-facilitation-guide.md`
 - `docs/gaips-codex-agent-runbook.md`
+- `docs/gaips-instructor-materials.md`
+- `docs/gaips-materials/README.md`
 
 Use the lab walkthrough guide as the primary source for lab steps. Use the facilitation guide for student interaction patterns.
 
@@ -34,7 +36,7 @@ After approval for read-only repo inspection. Treat that approval as covering on
 1. Identify repo root.
 2. Confirm the required course docs exist.
 3. Inspect available project files.
-4. Identify whether a starter app already exists.
+4. Identify whether a starter app already exists. If not, use `docs/gaips-materials/starter-rag-app/` after approval.
 5. Identify package managers and runtimes.
 6. Check whether evidence folders exist.
 7. Report readiness and missing prerequisites.
@@ -212,9 +214,9 @@ Steps:
 2. If no app exists, ask approval to create starter corpus and minimal app artifacts or use manual simulation.
 3. Create the approved document corpus.
 4. Ingest documents or guide the student through app ingestion.
-5. Identify vector database path: Chroma, Qdrant, Weaviate, Pinecone, or AWS Bedrock Knowledge Bases.
+5. Identify vector database path: Chroma, Qdrant, Weaviate, Pinecone, or AWS Bedrock Knowledge Bases. If Bedrock Knowledge Bases is not live, use `docs/gaips-materials/bedrock-knowledge-bases/design-review.md`.
 6. Create or update the RAG threat model.
-7. Identify whether Giskard is available for open source model/RAG testing, or whether instructor-provided Giskard fixtures will be used.
+7. Identify whether Giskard is available for open source model/RAG testing, or use `docs/gaips-materials/fixtures/giskard-results.json`.
 8. If Weaviate is used, identify enabled modules, especially `text2vec-transformers` and `qna-transformers`.
 9. If Weaviate is used, identify REST and gRPC endpoints and whether gRPC on port `50051` is exposed.
 10. If Weaviate is on AWS/Kubernetes, review EFS, StorageClass, PersistentVolumes, PersistentVolumeClaims, mount targets, and distinct access points/root directories per replica.
@@ -264,7 +266,7 @@ Steps:
 
 1. Inspect the agent implementation or starter framework.
 2. Identify available tools and side effects.
-3. If Cline or another MCP client is used, verify it is connected only to lab-safe MCP servers and fake tools.
+3. If Cline or another MCP client is used, verify it is connected only to lab-safe MCP servers and fake tools. Use `docs/gaips-materials/mcp/cline_mcp_settings.json` as the default approved fixture.
 4. Create or update tool permission matrix.
 5. Run normal agent tool-use examples.
 6. Capture traces or logs.
@@ -275,7 +277,7 @@ Steps:
 11. Run Semgrep, Syft table/CycloneDX/SPDX SBOM generation, Grype, Trivy, or approved fixtures.
 12. Compare CycloneDX and SPDX SBOM outputs when generated.
 13. If Hugging Face Hub is used, review private repository status, fine-grained token scope, 2FA, SSO, Resource Groups, SSH/GPG, and malware/pickle/secrets/Protect AI/JFrog scan results.
-14. If Buttercup is used, review generated findings and proposed patches before applying any change.
+14. If Buttercup is used, review generated findings and proposed patches before applying any change. Fixture path: `docs/gaips-materials/buttercup/`.
 15. Review prompt templates, tool schemas, provider configs, and logging.
 16. Record findings and remediation priorities.
 

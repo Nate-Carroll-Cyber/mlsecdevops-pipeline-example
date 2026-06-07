@@ -1,0 +1,18 @@
+{
+  "artifact": "models/lab-model",
+  "digest": "sha256:1f5cfixture9e2a0000000000000000000000000000000000000000000000000",
+  "signed": {
+    "signature": "evidence/day4/model.sig",
+    "signer": "gaips-instructor@example.invalid",
+    "verified": true
+  },
+  "unsigned": {
+    "verified": false,
+    "expected_decision": "block"
+  },
+  "tampered": {
+    "changed_file": "models/lab-model/config.json",
+    "verified": false,
+    "expected_decision": "block and investigate"
+  }
+}

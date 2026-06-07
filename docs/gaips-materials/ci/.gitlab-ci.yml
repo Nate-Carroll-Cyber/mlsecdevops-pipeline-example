@@ -1,0 +1,85 @@
+stages:
+  - setup
+  - sast
+  - evals
+  - guardrails
+  - evidence
+
+default:
+  image: python:3.11-slim
+  before_script:
+    - python --version
+    - mkdir -p reports evidence/day4 evidence/day5
+
+setup_tooling:
+  stage: setup
+  script:
+    - python --version > reports/tool-versions.txt
+    - python -m pip --version >> reports/tool-versions.txt
+  artifacts:
+    when: always
+    paths:
+      - reports/tool-versions.txt
+
+semgrep_or_fixture:
+  stage: sast
+  script:
+    - python -m pip install semgrep || true
+    - semgrep scan --config auto --json --output reports/semgrep.json || echo '{"status":"fixture-needed","reason":"semgrep unavailable or no rules matched"}' > reports/semgrep.json
+  artifacts:
+    when: always
+    paths:
+      - reports/semgrep.json
+
+fixture_evals:
+  stage: evals
+  script:
+    - python docs/gaips-materials/scripts/run_fixture_evals.py --materials docs/gaips-materials --reports reports
+  artifacts:
+    when: always
+    paths:
+      - reports/garak-results.json
+      - reports/giskard-results.json
+      - reports/inspect-ai-results.json
+      - reports/pyrit-results.json
+      - reports/hackagent-results.json
+
+guardrail_fixtures:
+  stage: guardrails
+  script:
+    - cp docs/gaips-materials/guardrails/prompt-guard-results.json reports/prompt-guard-results.json
+    - cp docs/gaips-materials/guardrails/llama-guard-3-results.json reports/llama-guard-3-results.json
+    - cp docs/gaips-materials/guardrails/model-armor-results.json reports/model-armor-results.json
+    - cp docs/gaips-materials/guardrails/guardrail-regression.md reports/guardrail-regression.md
+  artifacts:
+    when: always
+    paths:
+      - reports/prompt-guard-results.json
+      - reports/llama-guard-3-results.json
+      - reports/model-armor-results.json
+      - reports/guardrail-regression.md
+
+evidence_summary:
+  stage: evidence
+  script:
+    - |
+      cat > evidence/day5/final-eval-results.md <<'EOF'
+      # Final Evaluation Results
+
+      ## CI Artifacts
+
+      - garak: reports/garak-results.json
+      - Giskard: reports/giskard-results.json
+      - Inspect AI: reports/inspect-ai-results.json
+      - PyRIT: reports/pyrit-results.json
+      - HackAgent: reports/hackagent-results.json
+      - Prompt Guard: reports/prompt-guard-results.json
+      - Llama Guard 3: reports/llama-guard-3-results.json
+      - Model Armor: reports/model-armor-results.json
+      - Guardrail regression: reports/guardrail-regression.md
+      EOF
+  artifacts:
+    when: always
+    paths:
+      - reports/
+      - evidence/day5/final-eval-results.md

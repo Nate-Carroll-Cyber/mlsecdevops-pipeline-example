@@ -2,6 +2,8 @@
 
 This study plan maps the GIAC AI Platform Security (GAIPS) exam objectives to practical learning tasks, tools, labs, and capstone deliverables. The goal is to build hands-on evidence that covers AI/LLM fundamentals, agentic systems, RAG, infrastructure, MLOps, risk management, and model customization.
 
+Hands-on labs are backed by `docs/gaips-instructor-materials.md` and `docs/gaips-materials/`. Tool-stack entries that require cloud access, gated models, or unavailable installs must either use those fixtures or be explicitly marked as design-review-only by the instructor.
+
 ## Exam Objectives
 
 1. Agentic Systems and AI Integrations
@@ -27,8 +29,8 @@ This study plan maps the GIAC AI Platform Security (GAIPS) exam objectives to pr
 - Llama Guard 3: Meta safety classifier for prompt and response classification, MLCommons hazard taxonomy coverage, guardrail comparison, and false-positive/false-negative analysis.
 - vLLM or llama.cpp: self-hosted inference, endpoint hardening, performance tradeoffs, and local deployment security.
 - LiteLLM: model gateway, provider abstraction, usage logging, budget controls, routing, and policy enforcement.
-- Azure AI Foundry / Azure OpenAI: enterprise model hosting, identity, private endpoints, logging, and policy controls.
-- Google Vertex AI: managed GenAI deployment, grounding, evaluation, and cloud IAM practice.
+- Azure AI Foundry / Azure OpenAI: enterprise model hosting, identity, private endpoints, logging, and policy controls. In the default course this is a managed-provider comparison/design-review path unless the instructor supplies approved Azure lab access.
+- Google Vertex AI: managed GenAI deployment, grounding, evaluation, and cloud IAM practice. In the default course this is covered through Model Armor fixtures under `docs/gaips-materials/guardrails/` unless the instructor supplies approved Google Cloud lab access.
 
 ### Build Tools
 
@@ -292,7 +294,7 @@ Tasks:
 Recommended tools:
 
 - LlamaIndex
-- AWS Bedrock Knowledge Bases
+- AWS Bedrock Knowledge Bases using the design-review fixture in `docs/gaips-materials/bedrock-knowledge-bases/` unless approved AWS lab access is available
 - Chroma
 - Qdrant
 - Weaviate

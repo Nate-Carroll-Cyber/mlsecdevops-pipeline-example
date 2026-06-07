@@ -1289,171 +1289,47 @@ Minimum lab repository layout for the pipeline:
 ```text
 gaips-labs/
   .gitlab-ci.yml
-  app/
-  data/
-  evals/
+  requirements.txt
+  models/
+  promptfooconfig.yaml
+  guardrails/baseline.json
   evidence/
   reports/
-  scripts/
+  sbom/
+  scripts/rag_smoke_eval.py
+  scripts/pyrit_scan.py
+  scripts/guardrail_regression.py
+  scripts/evidence_summary.py
 ```
 
-Create a placeholder reports directory so CI artifacts have a stable destination:
+Create placeholder artifact directories so CI artifacts have stable destinations:
 
 ```bash
-mkdir -p reports evidence/day4 evidence/day5
+mkdir -p reports evidence sbom models guardrails scripts
 touch reports/.gitkeep
 ```
 
-Pipeline stages should install tooling in the job, run checks, and publish reports as artifacts. Recommended stages:
+Pipeline stages install tooling in the job, run checks, and publish reports as artifacts. The provided pipeline uses this sequence:
 
 | Stage | Purpose | Example Tools | Artifacts |
 | --- | --- | --- | --- |
-| setup | Verify runtime and install lab dependencies | Python, Node.js, pip, npm | `reports/tool-versions.txt` |
-| supply_chain | Generate SBOM and scan dependencies | Syft, Grype, Trivy | `reports/sbom.cdx.json`, `reports/grype.json`, `reports/trivy.json` |
-| sast | Static code and prompt/template review | Semgrep | `reports/semgrep.json` |
-| evals | Run prompt, RAG, and safety regression fixtures | Promptfoo, garak, HackAgent, Inspect AI, scripts | `reports/promptfoo-results.json`, `reports/garak-results.json`, `reports/hackagent-results.json` |
-| guardrails | Run or review guardrail fixture checks | Prompt Guard, Llama Guard 3, Model Armor fixtures | `reports/guardrail-regression.md` |
-| evidence | Collect final lab evidence | shell scripts, markdown templates | `evidence/tooling-inventory.md`, `evidence/day5/final-eval-results.md` |
+| setup | Install lab dependencies and record pipeline identity | Python, pip | `evidence/pipeline.env` |
+| sast | Static analysis, dependency audit, package integrity, and optional conda verification | Semgrep, pip-audit, pip-tools, conda | `reports/semgrep.json`, `reports/pip-audit.json`, `reports/pip-audit-cyclonedx.json`, `reports/pkg-integrity-manifest.json`, `reports/conda/` |
+| sbom | Generate machine-readable SBOMs | Syft | `sbom/sbom.cyclonedx.json`, `sbom/sbom.cyclonedx.xml`, `sbom/sbom.spdx.json`, `sbom/sbom.spdx` |
+| vuln-scan | Scan SBOM, filesystem, and container image when available | Grype, Trivy | `reports/grype.json`, `reports/trivy-fs.json`, `reports/trivy-image.json` |
+| model-integrity | Gate model artifacts before evals | model-signing, sigstore, ModelScan, Hugging Face Hub scanner | `evidence/model-digests.txt`, `evidence/integrity.env`, `reports/modelscan.json`, `reports/hf-scan/summary.json` |
+| ai-eval | Run model and app evaluation jobs after model-integrity gate | RAG smoke eval, Promptfoo, garak, Giskard, Inspect AI, PyRIT | `reports/rag-smoke.json`, `reports/promptfoo.json`, `reports/garak.log`, `reports/garak*.json`, `reports/giskard/`, `reports/inspect-summary.json`, `reports/pyrit.json` |
+| guardrail | Compare eval outputs against the approved guardrail baseline | Project guardrail regression script | `reports/guardrail-regression.json` |
+| evidence | Collect final machine-readable evidence and sign model evidence when available | Jinja2, model-signing, sigstore, cosign | `evidence/evidence-summary.json`, `evidence/model-signing-evidence.json`, `evidence/model-signing-evidence.sig`, `evidence/model-signing-evidence.pem` |
 
-A complete fixture-backed pipeline is provided at `docs/gaips-materials/ci/.gitlab-ci.yml`. The inline sample below shows the same pattern for classes that want to paste it into a standalone lab repo:
-
-```yaml
-stages:
-  - setup
-  - supply_chain
-  - sast
-  - evals
-  - guardrails
-  - evidence
-
-default:
-  image: python:3.11-slim
-  before_script:
-    - python --version
-    - python -m pip install --upgrade pip
-    - mkdir -p reports evidence/day4 evidence/day5
-
-variables:
-  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
-
-cache:
-  paths:
-    - .cache/pip
-
-setup_tooling:
-  stage: setup
-  script:
-    - pip install requests python-dotenv pyyaml pandas semgrep garak giskard inspect-ai hackagent
-    - python --version > reports/tool-versions.txt
-    - pip freeze >> reports/tool-versions.txt
-  artifacts:
-    when: always
-    paths:
-      - reports/tool-versions.txt
-
-semgrep_scan:
-  stage: sast
-  script:
-    - pip install semgrep
-    - semgrep scan --config auto --json --output reports/semgrep.json || true
-  artifacts:
-    when: always
-    paths:
-      - reports/semgrep.json
-
-promptfoo_eval:
-  stage: evals
-  image: node:20-bullseye
-  before_script:
-    - mkdir -p reports evidence/day5
-  script:
-    - npx promptfoo --version > reports/promptfoo-version.txt
-    - |
-      if [ -f evals/promptfoo.yaml ]; then
-        npx promptfoo eval -c evals/promptfoo.yaml --output reports/promptfoo-results.json || true
-      else
-        echo '{"status":"fixture-mode","source":"docs/gaips-materials/evals/promptfoo.yaml"}' > reports/promptfoo-results.json
-      fi
-  artifacts:
-    when: always
-    paths:
-      - reports/promptfoo-version.txt
-      - reports/promptfoo-results.json
-
-hackagent_agent_eval:
-  stage: evals
-  script:
-    - pip install hackagent
-    - hackagent --help > reports/hackagent-help.txt || true
-    - cp docs/gaips-materials/fixtures/hackagent-results.json reports/hackagent-results.json
-  artifacts:
-    when: always
-    paths:
-      - reports/hackagent-help.txt
-      - reports/hackagent-results.json
-
-guardrail_fixture_review:
-  stage: guardrails
-  script:
-    - |
-      cat > reports/guardrail-regression.md <<'EOF'
-      # Guardrail Regression
-
-      | Flow | Tool | Result | Decision | Notes |
-      | --- | --- | --- | --- | --- |
-      | User prompt | Prompt Guard fixture |  | Allow / Review / Block |  |
-      | RAG context | Prompt Guard / Model Armor fixture |  | Include / Exclude / Review |  |
-      | Model response | Model Armor DLP fixture |  | Allow / Redact / Block |  |
-      | Tool action | Deterministic policy fixture |  | Allow / Deny / Human approval |  |
-      EOF
-  artifacts:
-    when: always
-    paths:
-      - reports/guardrail-regression.md
-
-evidence_summary:
-  stage: evidence
-  script:
-    - |
-      cat > evidence/tooling-inventory.md <<'EOF'
-      # Tooling Inventory
-
-      | Tool | Required For | Installed? | Version | Install Source | Fixture Used Instead? | Notes |
-      | --- | --- | --- | --- | --- | --- | --- |
-      | GitLab CI | Pipeline labs | Yes |  | GitLab runner | No |  |
-      | Python | Shared labs | Yes |  | python:3.11-slim | No |  |
-      | Promptfoo | Eval labs | Yes |  | npx / node:20-bullseye | No |  |
-      | Prompt Guard | Guardrail labs |  |  | Fixture or approved model |  |  |
-      | Model Armor | Managed screening labs |  |  | Fixture or approved GCP project |  |  |
-      EOF
-    - |
-      cat > evidence/day5/final-eval-results.md <<'EOF'
-      # Final Evaluation Results
-
-      ## Pipeline Artifacts
-
-      - Tool versions: reports/tool-versions.txt
-      - Semgrep: reports/semgrep.json
-      - Promptfoo: reports/promptfoo-results.json
-      - HackAgent: reports/hackagent-results.json
-      - Guardrail regression: reports/guardrail-regression.md
-      EOF
-  artifacts:
-    when: always
-    paths:
-      - reports/
-      - evidence/tooling-inventory.md
-      - evidence/day5/final-eval-results.md
-```
-
-Supply-chain scanners such as Syft, Grype, and Trivy often require package-manager installation, container images, or prebuilt CI images. In a short lab, use the fixture-backed pipeline in `docs/gaips-materials/ci/.gitlab-ci.yml`, an instructor-provided CI image that already includes those tools, or a separate job using the approved scanner image. Record skipped scanners as evidence gaps rather than silently omitting them.
+A complete AI/ML security pipeline is provided at `docs/gaips-materials/ci/.gitlab-ci.yml`. It expects a lab repository with project-level scripts and model artifacts, not just copied GAIPS fixture outputs. Configure `MODEL_ENDPOINT`, `MODEL_BASE_URL`, `MODEL_API_KEY`, `MODEL_SIGNING_CERT`, `SIGSTORE_OIDC_ISSUER`, `HF_MODEL_IDS`, and `HF_TOKEN` through project CI/CD variables as needed. Record skipped model scans, unavailable endpoints, unsigned evidence bundles, or missing optional credentials as evidence gaps rather than silently omitting them.
 
 GitLab CI safety rules for GAIPS labs:
 
 - Run pipelines only on lab repositories and lab branches.
 - Store cloud credentials only in protected GitLab CI variables for approved lab projects.
 - Do not print tokens, API keys, retrieved private documents, or model responses containing sensitive data.
-- Prefer fixture outputs for Model Armor, Prompt Guard, Llama Guard 3, and cloud services when live accounts are not approved.
+- When live accounts, model endpoints, or signing identities are not approved, record the unavailable check as an evidence gap and use the relevant offline fixture only for classroom interpretation.
 - Publish reports as artifacts so students can include them in Day 4 and Day 5 evidence.
 
 ### Shared Model Gateway Concept
@@ -3236,21 +3112,23 @@ Add it to the checklist.
 
 ### Step 4: Add a GitLab CI MLSecOps Pipeline
 
-Create or review a `.gitlab-ci.yml` that runs the enabled lab checks in repeatable stages. The pipeline can use live tools, the concrete fixtures under `docs/gaips-materials/`, or a mix of both. At minimum, the pipeline should produce artifacts for tool versions, SAST, SBOM or dependency-scan status, prompt/eval results, guardrail regression, and final evidence summaries.
+Create or review a `.gitlab-ci.yml` that runs the enabled lab checks in repeatable stages. The pipeline should produce SAST, dependency-audit, package-integrity, SBOM, vulnerability-scan, model-integrity, AI-eval, guardrail-regression, and evidence artifacts. When a live endpoint, signing identity, or scanner credential is unavailable, record the missing check as an evidence gap rather than presenting a fixture as live CI output.
 
 Add this to `evidence/day4/mlsecops-checklist.md`:
 
 ```markdown
 ## GitLab CI Pipeline Review
 
-| Pipeline Stage | Purpose | Tool or Fixture | Artifact | Pass/Fail | Notes |
+| Pipeline Stage | Purpose | Tool or Check | Artifact | Pass/Fail | Notes |
 | --- | --- | --- | --- | --- | --- |
-| setup | Install and verify lab tooling | Python, pip, npm | reports/tool-versions.txt |  |  |
-| supply_chain | SBOM and vulnerability review | Syft, Grype, Trivy, or fixture | reports/ |  |  |
-| sast | Static analysis | Semgrep | reports/semgrep.json |  |  |
-| evals | Prompt, RAG, and agent red-team regression | Promptfoo, garak, HackAgent, Inspect AI, or fixture | reports/ |  |  |
-| guardrails | Llama Guard 3, Prompt Guard, Model Armor checks | Live tool or fixture | reports/guardrail-regression.md |  |  |
-| evidence | Collect final markdown evidence | CI artifact collection | evidence/ |  |  |
+| setup | Install dependencies and record pipeline identity | Python, pip | evidence/pipeline.env |  |  |
+| sast | Static analysis, dependency audit, package integrity, optional conda verification | Semgrep, pip-audit, pip-tools, conda | reports/semgrep.json, reports/pip-audit.json, reports/pkg-integrity-manifest.json, reports/conda/ |  |  |
+| sbom | Generate CycloneDX and SPDX SBOMs | Syft | sbom/sbom.cyclonedx.json, sbom/sbom.cyclonedx.xml, sbom/sbom.spdx.json, sbom/sbom.spdx |  |  |
+| vuln-scan | Scan SBOM, filesystem, and image when available | Grype, Trivy | reports/grype.json, reports/trivy-fs.json, reports/trivy-image.json |  |  |
+| model-integrity | Gate model artifacts before evals | model-signing, ModelScan, Hugging Face artifact scan, tamper check | evidence/model-digests.txt, evidence/integrity.env, reports/modelscan.json, reports/hf-scan/summary.json |  |  |
+| ai-eval | Prompt, RAG, and model red-team regression | RAG smoke eval, Promptfoo, garak, Giskard, Inspect AI, PyRIT | reports/rag-smoke.json, reports/promptfoo.json, reports/garak.log, reports/giskard/, reports/inspect-summary.json, reports/pyrit.json |  |  |
+| guardrail | Compare eval outputs against baseline | Project guardrail regression script | reports/guardrail-regression.json |  |  |
+| evidence | Collect and optionally sign final evidence | evidence summary, model-signing evidence, cosign | evidence/evidence-summary.json, evidence/model-signing-evidence.json, evidence/model-signing-evidence.sig |  |  |
 
 ## Pipeline Gate
 

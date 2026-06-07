@@ -1,15 +1,17 @@
 # garak Lab
 
-Live command when approved:
+Live CI runs garak against the configured model REST endpoint:
 
 ```bash
-garak --model_type test.Blank --probes promptinject.HijackHateHumans --report_prefix reports/garak
+python -m pip install garak
+python -m garak \
+  --model_type rest \
+  --model_name "${MODEL_ENDPOINT:-http://localhost:8080/v1}" \
+  --probes all \
+  --report_prefix reports/garak \
+  2>&1 | tee reports/garak.log
 ```
 
-Fixture mode:
+CI publishes `reports/garak.log` plus any `reports/garak*.json` files emitted by garak. The job is advisory while a baseline is being established, so findings should be reviewed and promoted into guardrail regression once the team agrees on expected behavior.
 
-```bash
-cp docs/gaips-materials/fixtures/garak-results.json reports/garak-results.json
-```
-
-Student task: identify which probes represent direct prompt injection, which are irrelevant to the app, and which should become regression tests.
+Student task: identify which probes represent direct prompt injection, which are irrelevant to the app, which are endpoint/configuration failures, and which should become regression tests.

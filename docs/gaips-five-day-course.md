@@ -24,7 +24,7 @@ By the end of the course, students will be able to:
 - Retrieval systems: Chroma, Qdrant, Weaviate, Pinecone, Weaviate `text2vec-transformers`, Weaviate `qna-transformers`, Weaviate gRPC, AWS EFS-backed Weaviate persistence, and AWS Bedrock Knowledge Bases.
 - Red-team tools: PyRIT, garak, Promptfoo, Giskard open source framework for testing models.
 - Evaluation tools: Ragas, Inspect AI, MLflow GenAI, Evidently, Llama Guard 3 classification results.
-- Pipeline and supply-chain tools: Semgrep, Syft with CycloneDX and SPDX SBOM outputs, Grype, Trivy, Hugging Face Hub malware/pickle/secrets/Protect AI/JFrog scanners, Buttercup for automated vulnerability finding and patching, Cosign, Sigstore model-transparency/model-signing, DVC.
+- Pipeline and supply-chain tools: Semgrep, pip-audit, package-integrity checks, Syft with CycloneDX and SPDX SBOM outputs, Grype, Trivy, ModelScan, Hugging Face artifact scanning, Buttercup for automated vulnerability finding and patching, Cosign, Sigstore model-transparency/model-signing, model digest/signature/tamper gates, evidence bundle signing, and DVC.
 - Deployment tools: Docker, Kubernetes, kubectl, NetworkPolicy, admission/policy checks, HashiCorp Vault or equivalent secrets management, and cloud IAM.
 - Governance frameworks: OWASP LLM Top 10, MITRE ATLAS, NIST AI RMF, NIST GenAI Profile, Google SAIF.
 
@@ -325,15 +325,18 @@ Topics:
 Lab:
 
 - Review the capstone application architecture.
-- Run SAST, dependency, CycloneDX/SPDX SBOM, vulnerability scans, Hugging Face Hub model-artifact scan review, and approved automated patch review.
+- Run SAST, dependency audit, package-integrity checks, CycloneDX/SPDX SBOM generation, vulnerability scans, ModelScan, Hugging Face artifact scan review, model digest/signature/tamper verification, evidence bundle signing where available, and approved automated patch review.
 
 Tools:
 
 - Semgrep
+- pip-audit
 - Syft
 - CycloneDX
 - SPDX
 - Grype or Trivy
+- ModelScan
+- Hugging Face artifact scanning
 - Hugging Face Hub security scanners
 - Buttercup
 - OWASP LLM Top 10
@@ -429,7 +432,7 @@ Tools:
 
 Deliverable:
 
-- MLSecOps pipeline diagram, CI security checklist, SageMaker Hugging Face training-job review, and model-signature verification gate when model artifacts are used.
+- MLSecOps pipeline diagram, CI security checklist, SBOM and vulnerability evidence, ModelScan or Hugging Face artifact scan evidence, SageMaker Hugging Face training-job review, model digest/signature/tamper verification gate, and signed evidence bundle when `cosign` is available.
 
 ### Module 3: Model Customization and Guardrails
 
@@ -624,11 +627,11 @@ Recommended repositories or lab folders:
 - Pre-stage Weaviate or Qdrant vector database deployment options.
 - Pre-stage Pinecone account/index instructions or a design-review fallback if students do not have managed vector DB access.
 - Pre-stage PyTorch examples that can run on CPU for students without GPU access.
-- Use `docs/gaips-materials/fixtures/giskard-results.json` and `docs/gaips-materials/evals/giskard.md` for model, RAG, or business-logic testing fallback.
+- Use `docs/gaips-materials/evals/giskard.md` for the live CI Giskard endpoint scan. Use `docs/gaips-materials/fixtures/giskard-results.json` only as an offline interpretation fixture when the class cannot run the live scan.
 - Use `docs/gaips-materials/mcp/cline_mcp_settings.json` for Cline MCP client configuration that points only to lab-safe MCP servers and tools.
 - Use `docs/gaips-materials/buttercup/` for automated vulnerability finding and patch-review fixtures without touching production repositories.
 - Use `docs/gaips-materials/guardrails/llama-guard-3-results.json` for environments that cannot run the model locally.
-- Use `docs/gaips-materials/model-signing/model-signing-fixture.json` for signed, unsigned, and tampered model-artifact verification.
+- Use the CI model-integrity stage for digest, signature, tamper, ModelScan, and Hugging Face artifact checks when available. Use `docs/gaips-materials/model-signing/model-signing-fixture.json` only as an offline interpretation fixture.
 - Use `docs/gaips-materials/sagemaker/` for the Hugging Face Estimator notebook fixture, sanitized training script, least-privilege IAM role example, S3 input/output paths, metric definitions, and expected training-job output.
 - Prepare sanitized documents for RAG labs.
 - Prepare safe adversarial prompts that do not require illegal or harmful real-world exploitation.

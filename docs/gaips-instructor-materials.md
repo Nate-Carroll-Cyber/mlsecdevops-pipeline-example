@@ -34,8 +34,8 @@ Do not describe a fixture as available unless the corresponding file is listed b
 | Cline MCP safe config | `docs/gaips-materials/mcp/cline_mcp_settings.json` | MCP-client review without production tools |
 | Lab-safe agent fixture | `docs/gaips-materials/agent/lab-agent-fixture.md` | Agent and HackAgent labs without production tools |
 | Buttercup findings fixture | `docs/gaips-materials/buttercup/` | Automated vulnerability finding and patch review |
-| GitLab CI sample | `docs/gaips-materials/ci/.gitlab-ci.yml` | Repeatable MLSecOps pipeline |
-| Fixture eval runner | `docs/gaips-materials/scripts/run_fixture_evals.py` | CI fixture artifacts when live tools are unavailable |
+| GitLab CI sample | `docs/gaips-materials/ci/.gitlab-ci.yml` | AI/ML security pipeline with SAST, SBOM, vulnerability scanning, model-integrity gates, AI evals, guardrail regression, and evidence artifacts |
+| Explicit fixture eval runner | `docs/gaips-materials/scripts/run_fixture_evals.py --allow-fixtures` | Fixture-only class sessions; not used by live CI jobs |
 | Hugging Face Hub review fixture | `docs/gaips-materials/hugging-face-hub/` | Hub security review without lab account access |
 | Kubernetes manifests | `docs/gaips-materials/deployment/kubernetes/` | Deployment review lab |
 | Vault dev policy fixture | `docs/gaips-materials/deployment/vault/` | Secrets-management review lab |
@@ -54,7 +54,15 @@ Before class, verify these checks:
 | Starter app path present | `docs/gaips-materials/starter-rag-app/app.py` exists. |
 | Gateway path present | `docs/gaips-materials/model-gateway/model_gateway.py` exists. |
 | Fixtures present | `fixtures/*.json` and `guardrails/*.json` exist. |
-| CI sample present | `docs/gaips-materials/ci/.gitlab-ci.yml` exists and references fixture files. |
+| CI sample present | `docs/gaips-materials/ci/.gitlab-ci.yml` exists and defines setup, sast, sbom, vuln-scan, model-integrity, ai-eval, guardrail, and evidence stages. |
 | Optional cloud labs bounded | Bedrock, Vertex/Model Armor, Azure, SageMaker, Kubernetes, and Vault have design-review or fixture alternatives. |
 
 If a live tool is substituted for a fixture, students must record the tool version, command, target, and output artifact path in `evidence/tooling-inventory.md`.
+
+### CI Gate Requirement
+
+The GitLab CI material is an AI/ML security pipeline, not a fixture-copy pipeline. It runs the stages `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, and `evidence`.
+
+The supply-chain and package-integrity path includes Semgrep, `pip-audit`, package hash/integrity checks, optional conda environment verification, Syft CycloneDX/SPDX SBOM generation, Grype, and Trivy. The model-integrity path includes model digest generation, signature verification, tamper verification, ModelScan, Hugging Face artifact scanning, and an artifact-signing gate before AI evaluation jobs run. The AI evaluation path includes RAG smoke evaluation, Promptfoo, garak, Giskard, Inspect AI, and PyRIT. The evidence path writes summary evidence and a model-signing evidence bundle, with bundle signing when `cosign` is available.
+
+Before using the CI sample in a student repository, instructors must verify that required project files exist, including `requirements.txt`, `models/`, `promptfooconfig.yaml`, `guardrails/baseline.json`, and the project scripts referenced by CI: `scripts/rag_smoke_eval.py`, `scripts/pyrit_scan.py`, `scripts/guardrail_regression.py`, and `scripts/evidence_summary.py`.

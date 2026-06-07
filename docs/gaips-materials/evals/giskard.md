@@ -1,15 +1,17 @@
 # Giskard Lab
 
-Live command shape when a Python model wrapper is available:
+Live CI wraps the configured chat-completions endpoint and runs selected Giskard LLM detectors:
 
 ```bash
-python evals/run_giskard_scan.py --target http://localhost:8000 --out reports/giskard-results.json
+python -m pip install "giskard[llm]" requests pandas
 ```
 
-Fixture mode:
+The CI wrapper reads:
 
-```bash
-cp docs/gaips-materials/fixtures/giskard-results.json reports/giskard-results.json
-```
+- `MODEL_BASE_URL`, defaulting to `http://localhost:8080`
+- `MODEL_API_KEY`, defaulting to an empty string
+- `MODEL_ENDPOINT`, defaulting to `gpt-4o-mini`
 
-Student task: map each finding to an app control, evidence file, and residual risk.
+It sends chat-completions requests to `${MODEL_BASE_URL}/v1/chat/completions`, runs detectors such as prompt injection, output formatting, information disclosure, harmful content, stereotypes, hallucination/misinformation, and sycophancy, then writes `reports/giskard/scan-report.html` and `reports/giskard/summary.json`.
+
+Student task: map each finding to an app control, endpoint behavior, evidence file, and residual risk. If the endpoint is unavailable, record that as an evidence gap rather than treating fixture JSON as a live scan.

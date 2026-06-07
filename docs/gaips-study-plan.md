@@ -251,7 +251,7 @@ Tasks:
 
 - Diagram the lifecycle for data collection, labeling, preprocessing, training or fine-tuning, evaluation, deployment, monitoring, and rollback.
 - Version datasets, prompts, eval sets, model artifacts, and configuration.
-- Add CI checks for SAST, secrets, dependency vulnerabilities, CycloneDX/SPDX SBOM generation, model training-job review, and artifact signing.
+- Add CI checks for SAST, dependency vulnerabilities with `pip-audit`, package integrity, CycloneDX/SPDX SBOM generation, Grype/Trivy vulnerability scanning, ModelScan, Hugging Face artifact scanning, model digest/signature/tamper verification, model training-job review, and evidence bundle signing where `cosign` is available.
 - Track model/application evaluation runs and compare regressions across model, prompt, retrieval, and guardrail changes.
 - Monitor drift, abuse, data quality, latency, cost, and safety failures.
 - Test risks from poisoned data, insecure artifacts, exposed secrets, untrusted notebooks, and compromised CI/CD.
@@ -262,8 +262,11 @@ Recommended tools:
 - MLflow
 - Evidently
 - Semgrep
+- pip-audit
 - Syft
 - Grype or Trivy
+- ModelScan
+- Hugging Face artifact scanning
 - Cosign
 - Ragas
 - Inspect AI
@@ -367,7 +370,7 @@ Minimum requirements:
 - One tool-using agent with explicit permissions and traceability.
 - One Kubernetes or cloud deployment review with IAM, network, logging, rate limit, resource, and secret-handling controls.
 - If HashiCorp Vault or another secrets manager is used, review secret paths, policies, audit logs, rotation approach, and runtime injection pattern.
-- One CI or pipeline workflow with dependency scanning, SBOM generation, and evaluation checks.
+- One CI or pipeline workflow with dependency scanning, package integrity, SBOM generation, vulnerability scanning, model-artifact scanning, model-integrity gates, and evaluation checks.
 - One red-team and evaluation suite that can be rerun after changes.
 
 Capstone deliverables:
@@ -377,6 +380,9 @@ Capstone deliverables:
 - Threat model.
 - CycloneDX and SPDX SBOMs.
 - Vulnerability scan summary.
+- `pip-audit`, ModelScan, and Hugging Face artifact scan summaries where applicable.
+- Model digest/signature/tamper verification evidence.
+- Signed evidence bundle when `cosign` is available.
 - Agent tool permission matrix.
 - RAG evaluation report.
 - Red-team report.

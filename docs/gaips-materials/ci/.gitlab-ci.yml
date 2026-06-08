@@ -14,8 +14,8 @@ variables:
   PIP_TRUSTED_HOST: "pypi.org files.pythonhosted.org"
   # Anaconda: strict channel priority forces all packages to come from conda-forge
   CONDA_CHANNEL: "conda-forge"
-  # Override in project CI/CD settings:
-  # MODEL_ENDPOINT, MODEL_SIGNING_CERT, SIGSTORE_OIDC_ISSUER
+  # Override in project CI/CD settings (or fetch from Vault via vault-secrets job):
+  # MODEL_ENDPOINT, MODEL_SIGNING_IDENTITY, SIGSTORE_OIDC_ISSUER
   HF_MODEL_IDS: ""    # comma-separated HF repo IDs to scan, e.g. "org/model-a,org/model-b"
   HF_TOKEN: ""        # HuggingFace token for gated/private repos (mask in CI settings)
 
@@ -83,6 +83,65 @@ setup:
       - "${EVIDENCE_DIR}/pipeline.env"
     expire_in: 1 day
 
+vault-secrets:
+  stage: setup
+  needs: []
+  allow_failure: true
+  # id_tokens issues a per-job OIDC JWT (GitLab 15.7+).
+  # CI_JOB_JWT_V2 is the fallback for older instances (deprecated GitLab 16.x).
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: "${CI_SERVER_URL}"
+  script:
+    - touch .vault-env    # artifact must exist even when Vault is unreachable
+    - |
+      if [ -z "${VAULT_ADDR}" ]; then
+        echo "VAULT_ADDR not configured — Vault fetch skipped; pipeline uses CI/CD variables"
+        exit 0
+      fi
+    - pip install --quiet hvac
+    - |
+      python3 - <<'PYEOF'
+      import hvac, os, pathlib, sys
+
+      client = hvac.Client(url=os.environ["VAULT_ADDR"])
+      jwt = os.environ.get("VAULT_ID_TOKEN") or os.environ.get("CI_JOB_JWT_V2", "")
+      if not jwt:
+          print("ERROR: no JWT available (VAULT_ID_TOKEN and CI_JOB_JWT_V2 both unset)")
+          sys.exit(1)
+
+      client.auth.jwt.jwt_login(role="gaips-ci", jwt=jwt)
+
+      # KV v2 paths (mount=secret); maps to CI variable names
+      PATHS = {
+          "gaips/ci/model-endpoint":       "MODEL_ENDPOINT",
+          "gaips/ci/model-signing-identity": "MODEL_SIGNING_IDENTITY",
+          "gaips/ci/sigstore-oidc-issuer": "SIGSTORE_OIDC_ISSUER",
+          "gaips/ci/hf-token":             "HF_TOKEN",
+          "gaips/ci/gemini-api-key":       "GEMINI_API_KEY",
+          "gaips/ci/registry-token":       "CI_REGISTRY_TOKEN",
+      }
+
+      lines = []
+      for kv_path, var_name in PATHS.items():
+          try:
+              resp = client.secrets.kv.v2.read_secret_version(
+                  mount_point="secret", path=kv_path, raise_on_deleted_version=True
+              )
+              value = resp["data"]["data"].get("value", "")
+              lines.append(f"{var_name}={value}")
+              print(f"  fetched → {var_name}")
+          except Exception as exc:
+              print(f"  WARN: {kv_path}: {exc}")
+
+      pathlib.Path(".vault-env").write_text("\n".join(lines) + "\n")
+      print(f"Vault: {len(lines)}/{len(PATHS)} secret(s) written to .vault-env")
+      PYEOF
+  artifacts:
+    reports:
+      dotenv: .vault-env    # injected as env vars into all later-stage jobs
+    expire_in: 30 min
+
 # ─── SAST ────────────────────────────────────────────────────────────────────
 
 semgrep-sast:
@@ -120,19 +179,17 @@ pip-audit:
         --format cyclonedx-json \
         --output "${REPORTS_DIR}/pip-audit-cyclonedx.json" \
         --progress-spinner off || true
-      # Surface the count; let CRITICAL findings fail the job
+      # Surface the count; non-zero exit from pip-audit already surfaces findings
       python3 - <<'PYEOF'
       import json, sys, os
       data = json.load(open(os.environ["REPORTS_DIR"] + "/pip-audit.json"))
-      vulns = data.get("dependencies", [])
-      total = sum(len(d.get("vulns", [])) for d in vulns)
-      critical = sum(
-          1 for d in vulns for v in d.get("vulns", [])
-          if any(s.get("type") == "CVSS" and float(s.get("score", 0)) >= 9.0
-                 for s in v.get("fix_versions", [{}]))
-      )
-      print(f"pip-audit: {total} vulnerability/ies across {len(vulns)} package(s)")
-      # Non-zero exit from pip-audit already surfaces findings; don't double-fail
+      # pip-audit JSON schema: {"dependencies": [{"name":..., "vulns": [{"id":..., "fix_versions": ["1.2.3"], ...}]}]}
+      # fix_versions is a list of version strings — no CVSS scores in this format.
+      # Use the cyclonedx output (pip-audit-cyclonedx.json) for CVSS score analysis.
+      deps  = data.get("dependencies", [])
+      total = sum(len(d.get("vulns", [])) for d in deps)
+      pkgs_affected = sum(1 for d in deps if d.get("vulns"))
+      print(f"pip-audit: {total} vulnerability/ies across {pkgs_affected} package(s)")
       PYEOF
   artifacts:
     paths:
@@ -294,7 +351,7 @@ trivy-scan:
   stage: vuln-scan
   image: aquasec/trivy:latest
   before_script: []          # trivy image has no Python
-  needs: ["setup"]
+  needs: ["setup", "vault-secrets"]
   allow_failure: true
   script:
     - mkdir -p "${REPORTS_DIR}"
@@ -324,7 +381,14 @@ model-signing-install:
   script:
     - pip install model-signing sigstore
     - python -c "import model_signing; print('model-signing', model_signing.__version__)"
-    - cosign version 2>/dev/null || pip install cosign 2>/dev/null || echo "cosign not found — bundle signing will be skipped"
+    # cosign is a Go binary — not available on PyPI
+    - |
+      COSIGN_VERSION="v2.4.1"
+      curl -sSfL \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+        -o /usr/local/bin/cosign
+      chmod +x /usr/local/bin/cosign
+      cosign version
   artifacts:
     paths:
       - .pip-cache/
@@ -358,23 +422,25 @@ model-digest:
 
 signature-verification:
   stage: model-integrity
-  needs: ["model-digest"]
+  needs: ["model-digest", "vault-secrets"]
   script:
     - pip install model-signing sigstore
     - |
       SIG_COUNT=0
-      for sig in $(find "${MODEL_DIR}" -name "*.sig" -o -name "*.sigstore" 2>/dev/null); do
+      # Convention: each signed model dir contains a model.sig Sigstore bundle.
+      # Produced with: python -m model_signing sign sigstore <dir> --signature <dir>/model.sig
+      # --identity and --identity_provider are required by `verify sigstore`.
+      while IFS= read -r -d '' sig_file; do
+        model_dir=$(dirname "${sig_file}")
         SIG_COUNT=$((SIG_COUNT + 1))
-        model="${sig%.sig}"
-        model="${model%.sigstore}"
-        echo "Verifying: ${model}"
-        python -m model_signing verify \
-          --model-path "${model}" \
-          --signature "${sig}" \
-          ${MODEL_SIGNING_CERT:+--cert "${MODEL_SIGNING_CERT}"}
-      done
+        echo "Verifying: ${model_dir}"
+        python -m model_signing verify sigstore "${model_dir}" \
+          --signature "${sig_file}" \
+          --identity "${MODEL_SIGNING_IDENTITY}" \
+          --identity_provider "${SIGSTORE_OIDC_ISSUER}"
+      done < <(find "${MODEL_DIR}" -name "model.sig" -print0 2>/dev/null)
       if [ "${SIG_COUNT}" -eq 0 ]; then
-        echo "No .sig/.sigstore files found — signature verification skipped"
+        echo "No model.sig files found — signature verification skipped"
       fi
   allow_failure: true
 
@@ -382,27 +448,90 @@ tamper-verification:
   stage: model-integrity
   needs: ["model-digest"]
   allow_failure: true
+  # Each Vault-authenticating job needs its own id_token — JWTs are per-job.
+  id_tokens:
+    VAULT_ID_TOKEN:
+      aud: "${CI_SERVER_URL}"
   script:
     - mkdir -p "${EVIDENCE_DIR}"
+    - pip install --quiet hvac
     - |
-      BASELINE="${EVIDENCE_DIR}/model-digests-baseline.txt"
-      CURRENT="${EVIDENCE_DIR}/model-digests.txt"
-      if [ -f "${BASELINE}" ]; then
-        echo "Comparing digests against baseline..."
-        if ! diff "${BASELINE}" "${CURRENT}"; then
-          echo "TAMPER DETECTED: digest mismatch vs baseline"
-          exit 1
-        fi
-        echo "Tamper check PASSED — digests match baseline"
-      else
-        echo "No baseline present — recording current digests as baseline"
-        cp "${CURRENT}" "${BASELINE}"
-      fi
-    - echo "tamper_check_passed=true" > "${EVIDENCE_DIR}/integrity.env"
+      python3 - <<'PYEOF'
+      import hvac, os, pathlib, sys
+
+      evidence_dir  = pathlib.Path(os.environ["EVIDENCE_DIR"])
+      current_file  = evidence_dir / "model-digests.txt"
+      baseline_file = evidence_dir / "model-digests-baseline.txt"
+      project_slug  = os.environ.get("CI_PROJECT_PATH_SLUG", "unknown")
+      vault_addr    = os.environ.get("VAULT_ADDR", "")
+
+      current = current_file.read_text() if current_file.exists() else ""
+
+      # ── Vault-backed baseline (preferred) ───────────────────────────────────
+      if vault_addr:
+          client = hvac.Client(url=vault_addr)
+          jwt = os.environ.get("VAULT_ID_TOKEN") or os.environ.get("CI_JOB_JWT_V2", "")
+          try:
+              client.auth.jwt.jwt_login(role="gaips-ci", jwt=jwt)
+          except Exception as exc:
+              print(f"WARN: Vault auth failed ({exc}) — falling back to file baseline")
+              vault_addr = ""
+
+      if vault_addr:
+          kv_path  = f"gaips/tamper-baseline/{project_slug}"
+          baseline = None
+
+          try:
+              resp = client.secrets.kv.v2.read_secret_version(
+                  mount_point="secret", path=kv_path, raise_on_deleted_version=True
+              )
+              baseline = resp["data"]["data"].get("digests", "")
+              print(f"Loaded tamper baseline from Vault ({kv_path})")
+          except hvac.exceptions.InvalidPath:
+              print(f"No baseline in Vault at {kv_path} — seeding on first run")
+          except Exception as exc:
+              print(f"WARN: Vault baseline read failed ({exc}) — falling back to file baseline")
+
+          if baseline is None:
+              try:
+                  client.secrets.kv.v2.create_or_update_secret(
+                      mount_point="secret", path=kv_path,
+                      secret={"digests": current}
+                  )
+                  print("Baseline seeded in Vault — permanent storage, no expiry")
+              except Exception as exc:
+                  print(f"WARN: Vault baseline write failed ({exc})")
+              baseline = current
+
+      # ── File-based fallback (no Vault) ──────────────────────────────────────
+      else:
+          print("VAULT_ADDR not set — using file baseline (90-day artifact expiry applies)")
+          baseline = baseline_file.read_text() if baseline_file.exists() else None
+          if baseline is None:
+              print("No file baseline — seeding from current digests")
+              baseline = current
+
+      # Always write the file copy (fallback + local diff evidence)
+      baseline_file.write_text(baseline or "")
+
+      # ── Comparison ──────────────────────────────────────────────────────────
+      if baseline and current and baseline.strip() != current.strip():
+          import difflib
+          diff = "".join(difflib.unified_diff(
+              baseline.splitlines(keepends=True),
+              current.splitlines(keepends=True),
+              fromfile="baseline", tofile="current",
+          ))
+          print("TAMPER DETECTED — digest mismatch:\n" + diff)
+          sys.exit(1)
+
+      print("Tamper check PASSED — digests match baseline")
+      (evidence_dir / "integrity.env").write_text("tamper_check_passed=true\n")
+      PYEOF
   artifacts:
     paths:
       - "${EVIDENCE_DIR}/integrity.env"
-      - "${EVIDENCE_DIR}/model-digests-baseline.txt"
+      - "${EVIDENCE_DIR}/model-digests-baseline.txt"  # file fallback; Vault is authoritative when VAULT_ADDR is set
     expire_in: 90 days
 
 modelscan:
@@ -442,7 +571,7 @@ modelscan:
 
 hf-artifact-scan:
   stage: model-integrity
-  needs: ["model-signing-install"]
+  needs: ["model-signing-install", "vault-secrets"]
   script:
     - pip install huggingface_hub modelscan
     - mkdir -p "${REPORTS_DIR}/hf-scan" "${CI_PROJECT_DIR}/.hf-cache"
@@ -573,7 +702,7 @@ promptfoo-eval:
 
 garak-scan:
   stage: ai-eval
-  needs: ["artifact-signing-gate"]
+  needs: ["artifact-signing-gate", "vault-secrets"]
   script:
     - pip install garak
     - mkdir -p "${REPORTS_DIR}"
@@ -612,7 +741,7 @@ giskard-scan:
 
 inspect-ai-eval:
   stage: ai-eval
-  needs: ["artifact-signing-gate"]
+  needs: ["artifact-signing-gate", "vault-secrets"]
   allow_failure: true
   script:
     - pip install "inspect-ai" "inspect-evals"
@@ -645,10 +774,12 @@ inspect-ai-eval:
       # Fall back to built-in evals when no project tasks are present
       if [ "${TASK_COUNT}" -eq 0 ]; then
         echo "No project tasks found — running built-in safety evals"
-        run_eval "inspect_evals/mmlu"             "mmlu (knowledge)"         25
-        run_eval "inspect_evals/truthfulqa"       "truthfulqa (honesty)"     25
-        run_eval "inspect_evals/wmdp"             "wmdp (hazard refusal)"    25
-        run_eval "inspect_evals/agentic/gdm_capabilities" "gdm (agent safety)" 10
+        run_eval "inspect_evals/mmlu_0_shot"   "mmlu (knowledge, 0-shot)"  25
+        run_eval "inspect_evals/truthfulqa"    "truthfulqa (honesty)"      25
+        run_eval "inspect_evals/wmdp_bio"      "wmdp bio (hazard refusal)" 25
+        run_eval "inspect_evals/wmdp_chem"     "wmdp chem (hazard refusal)" 25
+        run_eval "inspect_evals/wmdp_cyber"    "wmdp cyber (hazard refusal)" 25
+        run_eval "inspect_evals/gdm_in_house_ctf" "gdm ctf (agent safety)" 10
       fi
     - |
       python - <<'PYEOF'
@@ -799,6 +930,11 @@ model-signing-evidence:
     - artifact-signing-gate
     - model-digest
     - evidence-summary
+  # SIGSTORE_ID_TOKEN is the standard env var cosign reads for keyless signing.
+  # aud must be "sigstore" — Fulcio validates this claim.
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: "sigstore"
   script:
     - pip install model-signing sigstore
     - mkdir -p "${EVIDENCE_DIR}"
@@ -821,16 +957,23 @@ model-signing-evidence:
       print(json.dumps(bundle, indent=2))
       PYEOF
     - |
-      # Sign the evidence bundle via sigstore keyless (OIDC in CI)
+      # Install cosign binary (not available via pip; each job gets a fresh container)
+      COSIGN_VERSION="v2.4.1"
+      curl -sSfL \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+        -o /usr/local/bin/cosign
+      chmod +x /usr/local/bin/cosign
+    - |
       BUNDLE="${EVIDENCE_DIR}/model-signing-evidence.json"
-      if command -v cosign &>/dev/null; then
+      if [ -n "${SIGSTORE_ID_TOKEN}" ]; then
+        # SIGSTORE_ID_TOKEN is set by id_tokens above; cosign reads it automatically
         cosign sign-blob \
           --output-signature "${EVIDENCE_DIR}/model-signing-evidence.sig" \
           --output-certificate "${EVIDENCE_DIR}/model-signing-evidence.pem" \
           "${BUNDLE}"
-        echo "Evidence bundle signed with cosign"
+        echo "Evidence bundle signed via Sigstore keyless"
       else
-        echo "cosign not available — evidence bundle unsigned (install cosign to enable)"
+        echo "SIGSTORE_ID_TOKEN not available — evidence bundle unsigned (id_tokens requires GitLab 15.7+)"
       fi
   artifacts:
     paths:

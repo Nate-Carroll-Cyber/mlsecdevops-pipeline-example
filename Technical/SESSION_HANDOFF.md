@@ -533,9 +533,9 @@ One high + one moderate prod advisory (code injection / prototype pollution / Do
 
 ---
 
-## GAIPS Materials CI Pipeline — WIRED, NOT YET RUNNABLE
+## GAIPS Materials CI Pipeline — RUNNABLE (blockers resolved 2026-06-08)
 
-The full GitLab CI security pipeline for the GAIPS course materials lives at `docs/gaips-materials/ci/.gitlab-ci.yml` (909 lines). It is structurally complete and the evidence gate is correctly wired, but four hard blockers will prevent it from running end-to-end until they are fixed.
+The full GitLab CI security pipeline for the GAIPS course materials lives at `docs/gaips-materials/ci/.gitlab-ci.yml`. Blockers documented in prior sessions were resolved in commit `3f8abb3`.
 
 ### What is built and verified
 
@@ -572,35 +572,223 @@ The full GitLab CI security pipeline for the GAIPS course materials lives at `do
 
 All CI script calls now go through `${GAIPS_MATERIALS_DIR}/scripts/...` (variable set at line 9). Guardrail fixture files (`prompt-guard-results.json`, `llama-guard-3-results.json`, `model-armor-results.json`) are present under `docs/gaips-materials/guardrails/`.
 
-### Hard blockers — fix before first run
+### Resolved in commit `3f8abb3` (2026-06-08)
 
-| Blocker | Affected jobs | Fix |
-| :--- | :--- | :--- |
-| `requirements.txt` does not exist at project root | `setup`, `pip-audit`, `pkg-integrity`, `rag-smoke-eval`, `guardrail-regression` | Create a minimal `requirements.txt` |
-| Python inside `<<'PYEOF'` heredocs uses `${REPORTS_DIR}` as shell variable — single-quoted heredocs suppress expansion; Python receives the literal string | `pip-audit` (line 124), `pkg-integrity` (line 176), `conda-pkg-verify` (line 225), `modelscan` (line 417) | Replace `"${REPORTS_DIR}/..."` with `os.environ["REPORTS_DIR"] + "/..."` in those four inline scripts |
-| `models/` directory does not exist — `modelscan` scans `${MODEL_DIR}` unconditionally | `modelscan` | Add `mkdir -p "${MODEL_DIR}"` guard or skip when dir is absent |
-| `pip install cosign` installs a Python stub, not the Go binary — `cosign sign-blob` will fail | `model-signing-evidence` | Install the official cosign binary (via distro package or the official install script) instead of pip |
+| Was | Fix applied |
+| :--- | :--- |
+| `requirements.txt` missing | Created at project root (`pandas`, `requests`, `jinja2`) |
+| Four `<<'PYEOF'` heredocs referenced `${REPORTS_DIR}` as shell var (single-quote suppresses expansion) | Replaced with `os.environ["REPORTS_DIR"] + "/..."` in `pip-audit`, `pkg-integrity`, `conda-pkg-verify`, `modelscan` |
+| `modelscan` scanned `${MODEL_DIR}` unconditionally — directory never existed | `mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"` added to `modelscan` script |
+| `inspect_evals` (underscore) is not a valid PyPI package | Fixed to `inspect-evals` |
+| `giskard-scan allow_failure: false` + no live endpoint = hard failure | All ai-eval and guardrail jobs flipped to `allow_failure: true` |
+| `garak-scan` + `giskard-scan` in `guardrail-regression needs:` — script reads only fixture files, not their outputs | Removed; `guardrail-regression` now needs only `promptfoo-eval` + `pyrit-scan` |
+| `.venv/` cached alongside `--clear` venv creation — cache wasted | Removed `.venv/` from cache; only `.pip-cache/` retained |
+| Every job `allow_failure: false` — pipeline is enumeration/demo | All jobs advisory except `evidence-summary` + `model-signing-evidence` |
 
-### Will fail on first meaningful run (secondary blockers)
+### Remaining design issue (not yet fixed)
 
-- `python -m model_signing verify --model-path --signature --cert` — flag names do not match the published `model-signing` package CLI; audit the actual CLI of whichever version is pinned.
-- `pip install "inspect_evals"` — PyPI package is `inspect-evals`; task paths `inspect_evals/mmlu` etc. depend on this resolving to the right module layout.
-- `giskard-scan` is `allow_failure: false` but calls a live `MODEL_BASE_URL`; no endpoint configured = hard pipeline failure. Set `allow_failure: true` until a model endpoint is confirmed.
+- **Tamper baseline `expire_in: 90 days`** — after expiry the baseline silently resets, defeating tamper detection. Proper fix: persist the baseline outside CI artifacts (GitLab protected variable, S3, or Vault KV). Defer until the Vault integration below lands — the Vault path is the right home for it.
 
-### Design issues (silent misbehavior)
+### `model_signing verify` CLI flags (not yet validated)
 
-- Tamper baseline stored as a job artifact with `expire_in: 90 days` — after expiry the baseline silently resets, defeating tamper detection. Move to a GitLab cache key or a persistent store.
-- Venv created without `--clear` + cached in `.venv/` — stale cached venv can carry conflicting packages into a new job.
+`signature-verification` calls `python -m model_signing verify --model-path --signature --cert`. These flag names are unverified against the published package CLI. The job only executes when `.sig`/`.sigstore` files exist under `${MODEL_DIR}` — a fresh run with no model files skips it. Audit when real model files are added.
 
 ### Key file locations
 
 | File | Purpose |
 | :--- | :--- |
-| `docs/gaips-materials/ci/.gitlab-ci.yml` | Full pipeline definition (909 lines) |
-| `docs/gaips-materials/scripts/` | All Python script runners (8 files) |
-| `docs/gaips-materials/evals/` | Eval configs and guidance docs (promptfoo.yaml, garak.md, giskard.md, inspect_eval.py, markllm.md, pyrit.md) |
+| `docs/gaips-materials/ci/.gitlab-ci.yml` | Full pipeline definition |
+| `docs/gaips-materials/scripts/` | All Python script runners (11 files) |
+| `docs/gaips-materials/evals/` | Eval configs and guidance docs |
 | `docs/gaips-materials/guardrails/` | Guardrail fixture JSONs consumed by `run_guardrail_regression.py` |
-| `docs/gaips-materials/README.md` | Directory map including `evals/markllm.md` row |
+| `docs/gaips-materials/deployment/vault/gaips-policy.hcl` | Vault policy fixture (course material) |
+| `docs/gaips-materials/deployment/vault/sample-secret-map.md` | Vault secret path map (fixture) |
+
+---
+
+## GAIPS CI Pipeline — Vault Integration — PLANNED
+
+### Current state
+
+Vault exists in the repo only as course-material fixtures under `docs/gaips-materials/deployment/vault/`:
+- `gaips-policy.hcl` — HCL policy granting read on `secret/data/gaips/model-providers/*` and deny on `secret/data/gaips/admin/*`
+- `sample-secret-map.md` — two placeholder secret paths with fixture values
+
+The CI pipeline currently reads all secrets from manually-set GitLab project CI/CD variables (`HF_TOKEN`, `MODEL_SIGNING_CERT`, `SIGSTORE_OIDC_ISSUER`). These are undocumented, unreproducible, and not rotation-friendly.
+
+### Target shape
+
+GitLab CI authenticates to Vault via **JWT (OIDC)** — GitLab injects `CI_JOB_JWT_V2` per job; Vault verifies it against GitLab's JWKS endpoint without storing any long-lived credential. The pipeline's `default.before_script` fetches secrets from Vault at job start and exports them as env vars. All Vault configuration (auth backend, role, policy, KV mounts) is managed by Terraform.
+
+### Files to create
+
+| File | Purpose |
+| :--- | :--- |
+| `docs/gaips-materials/deployment/vault/jwt-auth-config.hcl` | Reference HCL for the JWT auth backend + `gaips-ci` role (not applied by Terraform — docs artifact for the course) |
+| `infra/vault/main.tf` | Terraform: `vault_auth_backend`, `vault_jwt_auth_backend_role`, `vault_policy`, `vault_mount` (KV v2) |
+| `infra/vault/variables.tf` | `vault_addr`, `gitlab_project_path`, `vault_audience` |
+| `infra/vault/outputs.tf` | Role name + mount path (consumed by other Terraform modules) |
+
+### Vault JWT auth config (what `infra/vault/main.tf` provisions)
+
+```hcl
+# JWT auth backend — trusts GitLab's JWKS endpoint
+resource "vault_auth_backend" "jwt" {
+  type = "jwt"
+}
+
+resource "vault_jwt_auth_backend_config" "gitlab" {  # via vault_jwt_auth_backend
+  backend    = vault_auth_backend.jwt.path
+  jwks_url   = "https://gitlab.com/-/jwks"
+  bound_issuer = "https://gitlab.com"
+}
+
+# Role scoped to this project's main branch
+resource "vault_jwt_auth_backend_role" "gaips_ci" {
+  backend        = vault_auth_backend.jwt.path
+  role_name      = "gaips-ci"
+  role_type      = "jwt"
+  bound_audiences = [var.vault_audience]   # e.g. "https://vault.example.com"
+  user_claim     = "sub"
+  bound_claims_type = "glob"
+  bound_claims = {
+    project_path = var.gitlab_project_path  # "Nate-Carroll-Cyber/Counter-Spy.ai"
+    ref_type     = "branch"
+    ref          = "main"
+  }
+  token_policies = ["gaips-policy"]
+  token_ttl      = 900   # 15 min — enough for one job, not reusable
+}
+```
+
+### Expanded Vault policy (`gaips-policy.hcl`)
+
+The current policy only covers `model-providers/*`. Expand to all CI secrets before wiring the pipeline:
+
+```hcl
+# Model provider tokens (HuggingFace, etc.)
+path "secret/data/gaips/model-providers/*" {
+  capabilities = ["read"]
+}
+
+# Signing credentials
+path "secret/data/gaips/signing/*" {
+  capabilities = ["read"]
+}
+
+# CI runtime config (non-secret but Vault-managed for consistency)
+path "secret/data/gaips/ci/*" {
+  capabilities = ["read"]
+}
+
+# Auth0 (post-Auth0-migration)
+path "secret/data/gaips/auth0/*" {
+  capabilities = ["read"]
+}
+
+# Admin paths — always deny from CI role
+path "secret/data/gaips/admin/*" {
+  capabilities = []
+}
+```
+
+### Secret paths to populate
+
+| CI variable today | Vault path | Field |
+| :--- | :--- | :--- |
+| `HF_TOKEN` | `secret/data/gaips/model-providers/huggingface` | `token` |
+| `MODEL_SIGNING_CERT` | `secret/data/gaips/signing/cert` | `cert` |
+| `SIGSTORE_OIDC_ISSUER` | `secret/data/gaips/signing/oidc-issuer` | `issuer` |
+| `MODEL_ENDPOINT` | `secret/data/gaips/ci/model-endpoint` | `url` |
+| *(future)* `AUTH0_DOMAIN` | `secret/data/gaips/auth0/domain` | `domain` |
+| *(future)* `AUTH0_AUDIENCE` | `secret/data/gaips/auth0/audience` | `audience` |
+| *(tamper baseline)* | `secret/data/gaips/ci/model-digest-baseline` | `digest` | — replaces the 90-day artifact |
+
+### `.gitlab-ci.yml` changes
+
+Add a Vault fetch block to `default.before_script`, after the pip setup, guarded by `VAULT_ADDR` so the pipeline degrades gracefully when Vault is not configured:
+
+```yaml
+default:
+  before_script:
+    - !reference [.python-secure, before_script]
+    - |
+      if [ -n "${VAULT_ADDR}" ] && [ -n "${CI_JOB_JWT_V2}" ]; then
+        pip install --quiet hvac 2>/dev/null || apt-get install -y -q vault 2>/dev/null || true
+        VAULT_TOKEN=$(vault write -field=token auth/jwt/login \
+          role=gaips-ci jwt="${CI_JOB_JWT_V2}" 2>/dev/null) || true
+        if [ -n "${VAULT_TOKEN}" ]; then
+          export VAULT_TOKEN
+          export HF_TOKEN=$(vault kv get -field=token \
+            secret/gaips/model-providers/huggingface 2>/dev/null || echo "${HF_TOKEN}")
+          export MODEL_SIGNING_CERT=$(vault kv get -field=cert \
+            secret/gaips/signing/cert 2>/dev/null || echo "${MODEL_SIGNING_CERT}")
+          export SIGSTORE_OIDC_ISSUER=$(vault kv get -field=issuer \
+            secret/gaips/signing/oidc-issuer 2>/dev/null || echo "${SIGSTORE_OIDC_ISSUER}")
+          export MODEL_ENDPOINT=$(vault kv get -field=url \
+            secret/gaips/ci/model-endpoint 2>/dev/null || echo "${MODEL_ENDPOINT}")
+          echo "Vault: secrets injected"
+        else
+          echo "Vault: JWT login failed — falling back to CI variables"
+        fi
+      else
+        echo "Vault: VAULT_ADDR not set — using CI variables"
+      fi
+```
+
+Add `VAULT_ADDR` and `VAULT_NAMESPACE` (if using HCP Vault) to the `variables:` block at the top of the CI file:
+
+```yaml
+variables:
+  VAULT_ADDR: ""          # set in GitLab project CI/CD settings; empty = skip Vault
+  VAULT_NAMESPACE: ""     # HCP Vault only; leave empty for OSS
+```
+
+Also update `tamper-verification` to read/write the baseline from Vault KV instead of a job artifact when Vault is configured:
+
+```yaml
+tamper-verification:
+  script:
+    - |
+      CURRENT="${EVIDENCE_DIR}/model-digests.txt"
+      if [ -n "${VAULT_TOKEN}" ]; then
+        BASELINE=$(vault kv get -field=digest secret/gaips/ci/model-digest-baseline 2>/dev/null || echo "")
+        if [ -n "${BASELINE}" ]; then
+          echo "${BASELINE}" > /tmp/baseline.txt
+          if ! diff /tmp/baseline.txt "${CURRENT}"; then
+            echo "TAMPER DETECTED"; exit 1
+          fi
+          echo "Tamper check PASSED"
+        else
+          vault kv put secret/gaips/ci/model-digest-baseline \
+            digest="$(cat "${CURRENT}")"
+          echo "Baseline seeded in Vault"
+        fi
+      else
+        # fallback: artifact-based baseline (90-day expiry caveat applies)
+        ...existing artifact logic...
+      fi
+```
+
+### Commit order
+
+1. **Expand `gaips-policy.hcl`** — add `signing/*`, `ci/*`, `auth0/*` paths. Update `sample-secret-map.md` with all CI secret paths. No code change.
+2. **Add `infra/vault/`** — `main.tf`, `variables.tf`, `outputs.tf`. Provisions auth backend + role + policy + KV mount. Does not write secret values (those are operator-populated out of band).
+3. **Wire `.gitlab-ci.yml`** — add `VAULT_ADDR`/`VAULT_NAMESPACE` variables block entries, Vault fetch block in `default.before_script`, Vault-backed tamper baseline in `tamper-verification`.
+4. **Add `jwt-auth-config.hcl`** — reference doc artifact for the course lab.
+5. **Populate secrets** — out of band (`vault kv put ...`), not committed. Document the commands in `Technical/LOCAL_DEVELOPMENT.md`.
+
+### Validation per commit
+
+- Commits 1–2: `terraform validate && terraform plan` against a dev Vault instance (local `vault server -dev` is sufficient for config validation).
+- Commit 3: trigger a CI run with `VAULT_ADDR` set to the dev instance. Confirm `"Vault: secrets injected"` appears in job logs; confirm secrets reach the jobs that need them (`HF_TOKEN` available in `hf-artifact-scan`, etc.). Run without `VAULT_ADDR` set and confirm graceful fallback.
+- Commit 4: no validation needed (docs only).
+
+### Risks / open questions
+
+- `CI_JOB_JWT_V2` is available on GitLab.com and self-hosted GitLab ≥ 15.7. Verify runner version before wiring.
+- The `vault` CLI binary must be available in the job's image. The `python:3.11-slim` base image does not include it. Options: (a) install via `apt` in `before_script` (slow), (b) add a `hashicorp/vault`-based pre-step job that exports the token as a dotenv artifact, (c) use the `hvac` Python library instead of the CLI. Option (c) is cleanest for the Python-heavy pipeline — avoids binary install entirely.
+- HCP Vault Free tier has rate limits on JWKS fetches. Cache the JWKS response or use a self-hosted Vault for high-frequency CI runs.
 
 ---
 

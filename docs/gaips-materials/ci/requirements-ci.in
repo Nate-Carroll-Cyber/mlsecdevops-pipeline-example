@@ -1,0 +1,45 @@
+# GAIPS CI Pipeline — Python dependency source file
+#
+# This file lists every package the pipeline installs across all jobs.
+# Run the following on a Python 3.11-slim Linux container to generate
+# a pinned, hash-verified requirements-ci.txt:
+#
+#   pip install pip-tools
+#   pip-compile --generate-hashes --output-file requirements-ci.txt requirements-ci.in
+#
+# Commit the resulting requirements-ci.txt and update CI jobs to use:
+#   pip install -r ci/requirements-ci.txt
+#
+# Regenerate whenever a package needs to be updated.
+
+# ── Vault / secrets ──────────────────────────────────────────────────────────
+hvac
+
+# ── Package auditing ─────────────────────────────────────────────────────────
+pip-audit
+pip-tools
+
+# ── Model signing / integrity ────────────────────────────────────────────────
+model-signing
+sigstore
+
+# ── Model scanning ───────────────────────────────────────────────────────────
+modelscan
+huggingface_hub
+
+# ── AI red-teaming and evaluation ────────────────────────────────────────────
+garak
+giskard[llm]
+requests
+pandas
+inspect-ai
+inspect-evals
+pyrit
+
+# ── Watermark evaluation (heavy — audited separately by markllm-deps-audit) ──
+markllm
+torch
+transformers
+
+# ── Evidence reporting ───────────────────────────────────────────────────────
+jinja2

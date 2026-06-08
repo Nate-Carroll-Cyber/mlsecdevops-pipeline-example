@@ -18,6 +18,15 @@ variables:
   # MODEL_ENDPOINT, MODEL_SIGNING_IDENTITY, SIGSTORE_OIDC_ISSUER
   HF_MODEL_IDS: ""    # comma-separated HF repo IDs to scan, e.g. "org/model-a,org/model-b"
   HF_TOKEN: ""        # HuggingFace token for gated/private repos (mask in CI settings)
+  # ── Pinned tool versions — update here to roll the whole pipeline ─────────────
+  # Find current releases at each tool's GitHub releases page before bumping.
+  COSIGN_VERSION: "v2.4.1"
+  IMAGE_SEMGREP: "semgrep/semgrep:v1.165.0"
+  IMAGE_MINICONDA: "continuumio/miniconda3:26.3.2"
+  IMAGE_SYFT: "anchore/syft:v1.45.1"
+  IMAGE_GRYPE: "anchore/grype:v0.114.0"
+  IMAGE_TRIVY: "aquasec/trivy:v0.71.0"
+  PROMPTFOO_VERSION: "0.121.15"
 
 # ── Shared secure-install template (extend in Python jobs) ───────────────────
 # Applied by default to the python:3.11-slim image; override before_script in
@@ -146,7 +155,7 @@ vault-secrets:
 
 semgrep-sast:
   stage: sast
-  image: semgrep/semgrep:latest
+  image: "${IMAGE_SEMGREP}"
   needs: ["setup"]
   before_script: []          # semgrep image has no Python — skip .python-secure
   script:
@@ -253,7 +262,7 @@ pkg-integrity:
 
 conda-pkg-verify:
   stage: sast
-  image: continuumio/miniconda3:latest
+  image: "${IMAGE_MINICONDA}"
   needs: ["setup"]
   before_script: []          # conda image manages its own Python env
   script:
@@ -295,7 +304,7 @@ conda-pkg-verify:
 syft-cyclonedx:
   stage: sbom
   image:
-    name: anchore/syft:latest
+    name: "${IMAGE_SYFT}"
     entrypoint: [""]
   before_script: []          # syft image has no Python
   needs: ["setup"]
@@ -313,7 +322,7 @@ syft-cyclonedx:
 syft-spdx:
   stage: sbom
   image:
-    name: anchore/syft:latest
+    name: "${IMAGE_SYFT}"
     entrypoint: [""]
   before_script: []          # syft image has no Python
   needs: ["setup"]
@@ -333,7 +342,7 @@ syft-spdx:
 grype-scan:
   stage: vuln-scan
   image:
-    name: anchore/grype:latest
+    name: "${IMAGE_GRYPE}"
     entrypoint: [""]
   before_script: []          # grype image has no Python
   needs: ["syft-cyclonedx"]
@@ -349,7 +358,7 @@ grype-scan:
 
 trivy-scan:
   stage: vuln-scan
-  image: aquasec/trivy:latest
+  image: "${IMAGE_TRIVY}"
   before_script: []          # trivy image has no Python
   needs: ["setup", "vault-secrets"]
   allow_failure: true
@@ -383,11 +392,16 @@ model-signing-install:
     - python -c "import model_signing; print('model-signing', model_signing.__version__)"
     # cosign is a Go binary — not available on PyPI
     - |
-      COSIGN_VERSION="v2.4.1"
+      COSIGN_VERSION="${COSIGN_VERSION}"
       curl -sSfL \
         "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
-        -o /usr/local/bin/cosign
-      chmod +x /usr/local/bin/cosign
+        -o /tmp/cosign-linux-amd64
+      curl -sSfL \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" \
+        -o /tmp/cosign_checksums.txt
+      grep -E "^[0-9a-f]{64}  cosign-linux-amd64$" /tmp/cosign_checksums.txt \
+        | (cd /tmp && sha256sum --check --strict)
+      install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
       cosign version
   artifacts:
     paths:
@@ -420,16 +434,39 @@ model-digest:
       - "${EVIDENCE_DIR}/model-digests.txt"
     expire_in: 30 days
 
-signature-verification:
+model-sign:
   stage: model-integrity
   needs: ["model-digest", "vault-secrets"]
+  # id_tokens issues a per-job OIDC JWT; aud "sigstore" is required by Fulcio for keyless signing.
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: "sigstore"
   script:
     - pip install model-signing sigstore
     - |
       SIG_COUNT=0
-      # Convention: each signed model dir contains a model.sig Sigstore bundle.
-      # Produced with: python -m model_signing sign sigstore <dir> --signature <dir>/model.sig
-      # --identity and --identity_provider are required by `verify sigstore`.
+      while IFS= read -r -d '' model_dir; do
+        SIG_COUNT=$((SIG_COUNT + 1))
+        echo "Signing: ${model_dir}"
+        python -m model_signing sign sigstore "${model_dir}" \
+          --signature "${model_dir}/model.sig"
+      done < <(find "${MODEL_DIR}" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
+      if [ "${SIG_COUNT}" -eq 0 ]; then
+        echo "No model directories found under ${MODEL_DIR} — signing skipped"
+      fi
+  artifacts:
+    paths:
+      - "${MODEL_DIR}/**/model.sig"
+    expire_in: 30 days
+  allow_failure: true  # skips gracefully when MODEL_DIR is empty; remove once models are present
+
+signature-verification:
+  stage: model-integrity
+  needs: ["model-sign", "vault-secrets"]
+  script:
+    - pip install model-signing sigstore
+    - |
+      SIG_COUNT=0
       while IFS= read -r -d '' sig_file; do
         model_dir=$(dirname "${sig_file}")
         SIG_COUNT=$((SIG_COUNT + 1))
@@ -442,7 +479,6 @@ signature-verification:
       if [ "${SIG_COUNT}" -eq 0 ]; then
         echo "No model.sig files found — signature verification skipped"
       fi
-  allow_failure: true
 
 tamper-verification:
   stage: model-integrity
@@ -691,7 +727,7 @@ promptfoo-eval:
   needs: ["artifact-signing-gate"]
   allow_failure: true
   before_script:
-    - npm install -g promptfoo
+    - npm install -g "promptfoo@${PROMPTFOO_VERSION}"
   script:
     - mkdir -p "${REPORTS_DIR}"
     - promptfoo eval --config "${GAIPS_MATERIALS_DIR}/evals/promptfoo.yaml" --output "${REPORTS_DIR}/promptfoo-results.json" --no-cache
@@ -833,6 +869,37 @@ inspect-ai-eval:
       - "${REPORTS_DIR}/inspect-ai-results.json"
     expire_in: 7 days
 
+markllm-deps-audit:
+  stage: ai-eval
+  image: python:3.10-slim
+  needs: ["artifact-signing-gate"]
+  allow_failure: true
+  script:
+    - pip install --quiet --upgrade pip pip-audit
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      pip-audit \
+        --requirement <(echo -e "torch\ntransformers\nmarkllm") \
+        --format json \
+        --output "${REPORTS_DIR}/markllm-deps-audit.json" \
+        --progress-spinner off || true
+    - |
+      python3 - <<'PYEOF'
+      import json, os
+      data = json.load(open(os.environ["REPORTS_DIR"] + "/markllm-deps-audit.json"))
+      deps  = data.get("dependencies", [])
+      total = sum(len(d.get("vulns", [])) for d in deps)
+      pkgs  = sum(1 for d in deps if d.get("vulns"))
+      print(f"markllm-deps-audit: {total} vulnerability/ies across {pkgs} package(s)")
+      for d in deps:
+        for v in d.get("vulns", []):
+          print(f"  {d['name']} — {v['id']}: fix_versions={v.get('fix_versions')}")
+      PYEOF
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/markllm-deps-audit.json"
+    expire_in: 7 days
+
 markllm-watermark-eval:
   stage: ai-eval
   image: python:3.10-slim
@@ -958,11 +1025,16 @@ model-signing-evidence:
       PYEOF
     - |
       # Install cosign binary (not available via pip; each job gets a fresh container)
-      COSIGN_VERSION="v2.4.1"
+      COSIGN_VERSION="${COSIGN_VERSION}"
       curl -sSfL \
         "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
-        -o /usr/local/bin/cosign
-      chmod +x /usr/local/bin/cosign
+        -o /tmp/cosign-linux-amd64
+      curl -sSfL \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" \
+        -o /tmp/cosign_checksums.txt
+      grep -E "^[0-9a-f]{64}  cosign-linux-amd64$" /tmp/cosign_checksums.txt \
+        | (cd /tmp && sha256sum --check --strict)
+      install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
     - |
       BUNDLE="${EVIDENCE_DIR}/model-signing-evidence.json"
       if [ -n "${SIGSTORE_ID_TOKEN}" ]; then

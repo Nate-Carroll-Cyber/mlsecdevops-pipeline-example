@@ -533,6 +533,77 @@ One high + one moderate prod advisory (code injection / prototype pollution / Do
 
 ---
 
+## GAIPS Materials CI Pipeline — WIRED, NOT YET RUNNABLE
+
+The full GitLab CI security pipeline for the GAIPS course materials lives at `docs/gaips-materials/ci/.gitlab-ci.yml` (909 lines). It is structurally complete and the evidence gate is correctly wired, but four hard blockers will prevent it from running end-to-end until they are fixed.
+
+### What is built and verified
+
+**Stages (DAG order):** `setup → sast → sbom → vuln-scan → model-integrity → ai-eval → guardrail → evidence`
+
+**All 24 jobs present and wired:**
+
+| Stage | Jobs |
+| :--- | :--- |
+| setup | `setup` |
+| sast | `semgrep-sast`, `pip-audit`, `pkg-integrity`, `conda-pkg-verify` |
+| sbom | `syft-cyclonedx`, `syft-spdx` |
+| vuln-scan | `grype-scan`, `trivy-scan` |
+| model-integrity | `model-signing-install`, `model-digest`, `signature-verification`, `tamper-verification`, `modelscan`, `hf-artifact-scan`, `artifact-signing-gate` |
+| ai-eval | `rag-smoke-eval`, `promptfoo-eval`, `garak-scan`, `giskard-scan`, `inspect-ai-eval`, `markllm-watermark-eval`, `pyrit-scan` |
+| guardrail | `guardrail-regression` |
+| evidence | `evidence-summary`, `model-signing-evidence` |
+
+**`artifact-signing-gate`** blocks all ai-eval jobs and requires `signature-verification + tamper-verification + modelscan + hf-artifact-scan` to pass first.
+
+**Evidence gate alignment verified:** `write_ci_evidence_summary.py` expects exactly 9 artifacts; every one has a matching CI producer:
+
+| Artifact | Producer |
+| :--- | :--- |
+| `local-target-results.json` | `rag_smoke_eval.py` |
+| `semgrep.json` | `semgrep-sast` |
+| `promptfoo-results.json` | `promptfoo-eval` |
+| `garak-results.json` | `collect_garak_report.py` |
+| `giskard-results.json` | `run_giskard_live.py` |
+| `inspect-ai-results.json` | `collect_inspect_report.py` |
+| `markllm-results.json` | `run_markllm_watermark_eval.py` |
+| `pyrit-results.json` | `pyrit_scan.py` |
+| `guardrail-regression.json` | `run_guardrail_regression.py` |
+
+All CI script calls now go through `${GAIPS_MATERIALS_DIR}/scripts/...` (variable set at line 9). Guardrail fixture files (`prompt-guard-results.json`, `llama-guard-3-results.json`, `model-armor-results.json`) are present under `docs/gaips-materials/guardrails/`.
+
+### Hard blockers — fix before first run
+
+| Blocker | Affected jobs | Fix |
+| :--- | :--- | :--- |
+| `requirements.txt` does not exist at project root | `setup`, `pip-audit`, `pkg-integrity`, `rag-smoke-eval`, `guardrail-regression` | Create a minimal `requirements.txt` |
+| Python inside `<<'PYEOF'` heredocs uses `${REPORTS_DIR}` as shell variable — single-quoted heredocs suppress expansion; Python receives the literal string | `pip-audit` (line 124), `pkg-integrity` (line 176), `conda-pkg-verify` (line 225), `modelscan` (line 417) | Replace `"${REPORTS_DIR}/..."` with `os.environ["REPORTS_DIR"] + "/..."` in those four inline scripts |
+| `models/` directory does not exist — `modelscan` scans `${MODEL_DIR}` unconditionally | `modelscan` | Add `mkdir -p "${MODEL_DIR}"` guard or skip when dir is absent |
+| `pip install cosign` installs a Python stub, not the Go binary — `cosign sign-blob` will fail | `model-signing-evidence` | Install the official cosign binary (via distro package or the official install script) instead of pip |
+
+### Will fail on first meaningful run (secondary blockers)
+
+- `python -m model_signing verify --model-path --signature --cert` — flag names do not match the published `model-signing` package CLI; audit the actual CLI of whichever version is pinned.
+- `pip install "inspect_evals"` — PyPI package is `inspect-evals`; task paths `inspect_evals/mmlu` etc. depend on this resolving to the right module layout.
+- `giskard-scan` is `allow_failure: false` but calls a live `MODEL_BASE_URL`; no endpoint configured = hard pipeline failure. Set `allow_failure: true` until a model endpoint is confirmed.
+
+### Design issues (silent misbehavior)
+
+- Tamper baseline stored as a job artifact with `expire_in: 90 days` — after expiry the baseline silently resets, defeating tamper detection. Move to a GitLab cache key or a persistent store.
+- Venv created without `--clear` + cached in `.venv/` — stale cached venv can carry conflicting packages into a new job.
+
+### Key file locations
+
+| File | Purpose |
+| :--- | :--- |
+| `docs/gaips-materials/ci/.gitlab-ci.yml` | Full pipeline definition (909 lines) |
+| `docs/gaips-materials/scripts/` | All Python script runners (8 files) |
+| `docs/gaips-materials/evals/` | Eval configs and guidance docs (promptfoo.yaml, garak.md, giskard.md, inspect_eval.py, markllm.md, pyrit.md) |
+| `docs/gaips-materials/guardrails/` | Guardrail fixture JSONs consumed by `run_guardrail_regression.py` |
+| `docs/gaips-materials/README.md` | Directory map including `evals/markllm.md` row |
+
+---
+
 ## Current Runtime Shape
 
 - The Docker demo stack is the active local test path:

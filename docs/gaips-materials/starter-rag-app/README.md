@@ -1,6 +1,6 @@
 # Starter RAG App
 
-This is the minimum capstone RAG app referenced by the GAIPS labs. It is deliberately small and fixture-friendly.
+This is the minimum capstone RAG app referenced by the GAIPS labs. It is deliberately small and suitable for live local CI smoke tests without hosted model credentials.
 
 ## Run In Fixture Mode
 

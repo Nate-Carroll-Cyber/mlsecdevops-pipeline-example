@@ -9,7 +9,8 @@ This directory contains the concrete starter artifacts and fixtures used by the 
 | `starter-rag-app/` | Minimal capstone RAG app used when no class app exists. |
 | `model-gateway/` | Reference provider wrapper and model-call evidence logging contract. |
 | `data/` | Approved documents plus a benign malicious test document. |
-| `evals/` | Promptfoo, garak, Giskard, Inspect AI, and PyRIT lab instructions/config. |
+| `evals/` | Promptfoo, garak, Giskard, Inspect AI, MarkLLM, and PyRIT lab instructions/config. |
+| `evals/markllm.md` | MarkLLM watermark-readiness lab guidance for CI evidence and model-output provenance review. |
 | `fixtures/` | Static red-team and eval outputs for fixture-mode labs. |
 | `guardrails/` | Prompt Guard, Llama Guard 3, Model Armor, and regression fixtures. |
 | `mcp/` | Lab-safe Cline MCP configuration. |
@@ -43,6 +44,6 @@ Students should still explain each result. Fixture mode replaces unavailable exe
 
 `ci/.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, prompt/eval config, and guardrail baselines.
 
-The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, and `evidence`. It produces Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, ModelScan, Hugging Face artifact scan, model digest/signature/tamper, Promptfoo, garak, Giskard, Inspect AI, PyRIT, guardrail-regression, and evidence artifacts.
+The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, and `evidence`. It produces Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, ModelScan, Hugging Face artifact scan, model digest/signature/tamper, Promptfoo, garak, Giskard, Inspect AI, MarkLLM watermark-readiness, PyRIT, guardrail-regression, and evidence artifacts.
 
 Before copying this CI file into a student lab repository, add or adapt `requirements.txt`, `models/`, `promptfooconfig.yaml`, `guardrails/baseline.json`, `scripts/rag_smoke_eval.py`, `scripts/pyrit_scan.py`, `scripts/guardrail_regression.py`, and `scripts/evidence_summary.py`. Configure endpoint, signing, and Hugging Face variables in GitLab CI/CD settings. Fixture files under `docs/gaips-materials/fixtures/` remain offline interpretation aids, not automatic CI pass-throughs.

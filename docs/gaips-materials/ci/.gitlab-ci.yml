@@ -44,6 +44,20 @@ variables:
   DATASET_PACKAGE_VERSION: "latest" # package version tag
   DATASET_FILENAME: ""              # filename to download; blank = skip
   DATASET_EXPECTED_SHA256: ""       # optional — pipeline fails on hash mismatch
+  # ── Dependency-Track — continuous BOM analysis backend ────────────────────────
+  # The pipeline already emits CycloneDX SBOMs + a CycloneDX 1.6 AI BOM; DT ingests
+  # them and re-analyses against new CVEs + policy conditions over time. Set both
+  # in CI/CD Variables (or fetch from Vault). Blank = dependency-track-upload skips
+  # cleanly, so the pipeline runs unchanged until an instance is wired in.
+  # DT_API_KEY MUST be a masked variable.
+  DT_API_URL: ""                    # e.g. https://dtrack.example.com (no trailing /api)
+  DT_API_KEY: ""                    # masked; needs BOM_UPLOAD + VIEW perms
+  DT_FAIL_ON: "FAIL"                # violationState(s) that fail the gate (comma list)
+  # ── DVC — data/model version lineage (optional) ───────────────────────────────
+  # Set DVC_REMOTE_URL (s3://, gs://, azure://, ssh://…) to enable `dvc pull` in
+  # dvc-verify. Without it, the job reports tracked-vs-workspace status only; with
+  # no .dvc/ directory it skips entirely.
+  DVC_REMOTE_URL: ""
 
 # ── Shared secure-install template (extend in Python jobs) ───────────────────
 # Applied by default to the python:3.11-slim image; override before_script in
@@ -76,6 +90,23 @@ variables:
       . "${VENV_DIR}/bin/activate"
       pip install --quiet --upgrade pip setuptools wheel
 
+# ── Requirements resolver (reference, then `pip install -r "${REQ_FILE}"`) ────
+# Jobs must not hard-depend on a root requirements.txt that the materials don't
+# ship. Resolve in order: committed root file → compiled CI lockfile → shipped
+# .in source. Sets REQ_FILE (empty if none found, so installs skip cleanly).
+.resolve-reqs:
+  script:
+    - |
+      REQ_FILE="requirements.txt"
+      [ -f "${REQ_FILE}" ] || REQ_FILE="${GAIPS_MATERIALS_DIR}/ci/requirements-ci.txt"
+      [ -f "${REQ_FILE}" ] || REQ_FILE="${GAIPS_MATERIALS_DIR}/ci/requirements-ci.in"
+      if [ -f "${REQ_FILE}" ]; then
+        echo "Using requirements: ${REQ_FILE}"
+      else
+        echo "No requirements file found (root requirements.txt or ci/requirements-ci.*) — installs will skip"
+        REQ_FILE=""
+      fi
+
 default:
   image: python:3.11-slim
   before_script:
@@ -102,7 +133,8 @@ setup:
   stage: setup
   allow_failure: true
   script:
-    - pip install -r requirements.txt
+    - !reference [.resolve-reqs, script]
+    - '[ -n "${REQ_FILE}" ] && pip install -r "${REQ_FILE}" || echo "No requirements file — skipping install"'
     - mkdir -p "${SBOM_DIR}" "${EVIDENCE_DIR}" "${REPORTS_DIR}"
     - echo "Pipeline ${CI_PIPELINE_ID} @ ${CI_COMMIT_SHORT_SHA}" | tee "${EVIDENCE_DIR}/pipeline.env"
     - |
@@ -154,6 +186,8 @@ vault-secrets:
           "gaips/ci/hf-token":             "HF_TOKEN",
           "gaips/ci/gemini-api-key":       "GEMINI_API_KEY",
           "gaips/ci/registry-token":       "CI_REGISTRY_TOKEN",
+          "gaips/ci/dt-api-url":           "DT_API_URL",
+          "gaips/ci/dt-api-key":           "DT_API_KEY",
       }
 
       lines = []
@@ -172,6 +206,11 @@ vault-secrets:
       print(f"Vault: {len(lines)}/{len(PATHS)} secret(s) written to .vault-env")
       PYEOF
   artifacts:
+    # SECURITY: dotenv values are injected as CI variables into later jobs but are
+    # stored unencrypted and are retrievable by anyone with job/artifact access —
+    # they are NOT masked in logs. Short expiry limits the window; for production,
+    # prefer GitLab's native `secrets:` + Vault integration (per-job, no artifact)
+    # over this central broker so secrets never persist as an artifact at all.
     reports:
       dotenv: .vault-env    # injected as env vars into all later-stage jobs
     expire_in: 30 min
@@ -185,7 +224,9 @@ semgrep-sast:
   before_script: []          # semgrep image has no Python — skip .python-secure
   script:
     - mkdir -p "${REPORTS_DIR}"
-    - semgrep ci --config=auto --json --output "${REPORTS_DIR}/semgrep.json"
+    # `semgrep scan` runs a tokenless rules-based scan; `semgrep ci` expects a
+    # SEMGREP_APP_TOKEN and the managed-scan workflow.
+    - semgrep scan --config=auto --json --output "${REPORTS_DIR}/semgrep.json"
   artifacts:
     reports:
       sast: "${REPORTS_DIR}/semgrep.json"
@@ -282,16 +323,23 @@ pip-audit:
   script:
     - pip install pip-audit
     - mkdir -p "${REPORTS_DIR}"
-    - pip install -r requirements.txt
+    - !reference [.resolve-reqs, script]
+    - |
+      if [ -z "${REQ_FILE}" ]; then
+        echo "No requirements file to audit — skipping pip-audit"
+        echo '{"dependencies":[]}' > "${REPORTS_DIR}/pip-audit.json"
+        exit 0
+      fi
+      pip install -r "${REQ_FILE}"
     - |
       # Audit installed packages against OSV, PyPI advisory DB, and GitHub Advisory DB
       pip-audit \
-        --requirement requirements.txt \
+        --requirement "${REQ_FILE}" \
         --format json \
         --output "${REPORTS_DIR}/pip-audit.json" \
         --progress-spinner off || AUDIT_EXIT=$?
       pip-audit \
-        --requirement requirements.txt \
+        --requirement "${REQ_FILE}" \
         --format cyclonedx-json \
         --output "${REPORTS_DIR}/pip-audit-cyclonedx.json" \
         --progress-spinner off || true
@@ -320,17 +368,24 @@ pkg-integrity:
   script:
     - pip install pip-tools
     - mkdir -p "${REPORTS_DIR}"
+    - !reference [.resolve-reqs, script]
+    - |
+      if [ -z "${REQ_FILE}" ]; then
+        echo "No requirements file present — skipping package integrity verification"
+        echo "hash_mode=skipped" > "${REPORTS_DIR}/pkg-integrity.env"
+        exit 0
+      fi
     - |
       # ── Hash verification (PEP 476 / secure install) ──────────────────────
-      if grep -q " --hash=" requirements.txt 2>/dev/null; then
+      if grep -q " --hash=" "${REQ_FILE}" 2>/dev/null; then
         echo "Hash-pinned requirements detected — installing with --require-hashes"
-        pip install --require-hashes -r requirements.txt
+        pip install --require-hashes -r "${REQ_FILE}"
         echo "hash_mode=enforced" > "${REPORTS_DIR}/pkg-integrity.env"
       else
-        echo "WARNING: requirements.txt lacks hashes — generating hashed lockfile"
-        # Compile from .in if present, otherwise hash-pin the existing requirements.txt
+        echo "WARNING: ${REQ_FILE} lacks hashes — generating hashed lockfile"
+        # Prefer a .in source if one exists alongside; else hash-pin REQ_FILE itself.
         SRC="requirements.in"
-        [ -f "${SRC}" ] || SRC="requirements.txt"
+        [ -f "${SRC}" ] || SRC="${REQ_FILE}"
         pip-compile --generate-hashes "${SRC}" \
           --output-file requirements.hashed.txt \
           --quiet
@@ -342,7 +397,7 @@ pkg-integrity:
       # Install into a throw-away venv to confirm no hidden dependency conflicts.
       python3 -m venv /tmp/verify-venv
       . /tmp/verify-venv/bin/activate
-      pip install --quiet --index-url "${PIP_INDEX_URL}" -r requirements.txt
+      pip install --quiet --index-url "${PIP_INDEX_URL}" -r "${REQ_FILE}"
       pip check    # fails if any installed package has broken/missing deps
       deactivate
     - |
@@ -443,6 +498,44 @@ syft-spdx:
       - "${SBOM_DIR}/sbom.spdx.json"
       - "${SBOM_DIR}/sbom.spdx"
     expire_in: 30 days
+
+# DVC — data/model version lineage. The pipeline already records digests +
+# signatures + version-info for provenance; DVC adds restorable, pinned versions
+# of large datasets/models from a remote store. This job verifies the workspace
+# matches the pinned versions (and pulls them when a remote is configured). It
+# skips cleanly when the repo has no .dvc/ directory, so it is opt-in.
+dvc-verify:
+  stage: sbom
+  needs: ["setup"]
+  allow_failure: true   # advisory until DVC is initialized + a remote is configured
+  script:
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      if [ ! -d .dvc ]; then
+        echo "No .dvc/ directory — DVC not initialized; skipping."
+        echo "  To enable: 'dvc init', 'dvc add <dataset/model>', set DVC_REMOTE_URL."
+        echo '{"skipped":true,"reason":"dvc not initialized"}' > "${REPORTS_DIR}/dvc-status.json"
+        exit 0
+      fi
+    - pip install "dvc[all]"
+    - dvc version
+    - |
+      if [ -n "${DVC_REMOTE_URL}" ]; then
+        dvc remote add -d --force ci-remote "${DVC_REMOTE_URL}"
+        dvc pull --quiet || echo "WARNING: dvc pull failed (remote/credentials?) — reporting status only"
+      else
+        echo "DVC_REMOTE_URL not set — skipping pull; reporting tracked-vs-workspace status only"
+      fi
+    - |
+      # Record which DVC-tracked artifacts differ from their pinned versions.
+      dvc data status --granular --json > "${REPORTS_DIR}/dvc-status.json" 2>/dev/null \
+        || dvc status --json > "${REPORTS_DIR}/dvc-status.json" 2>/dev/null \
+        || echo '{"note":"dvc status produced no machine-readable output"}' > "${REPORTS_DIR}/dvc-status.json"
+      cat "${REPORTS_DIR}/dvc-status.json"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/dvc-status.json"
+    expire_in: 7 days
 
 # ─── VULNERABILITY SCAN ──────────────────────────────────────────────────────
 
@@ -581,7 +674,7 @@ signature-verification:
         python -m model_signing verify sigstore "${model_dir}" \
           --signature "${sig_file}" \
           --identity "${MODEL_SIGNING_IDENTITY}" \
-          --identity_provider "${SIGSTORE_OIDC_ISSUER}"
+          --identity-provider "${SIGSTORE_OIDC_ISSUER}"
       done < <(find "${MODEL_DIR}" -name "model.sig" -print0 2>/dev/null)
       if [ "${SIG_COUNT}" -eq 0 ]; then
         echo "No model.sig files found — signature verification skipped"
@@ -591,6 +684,15 @@ tamper-verification:
   stage: model-integrity
   needs: ["model-digest"]
   allow_failure: true
+  # Persist the file-mode baseline across pipelines (best-effort; Vault is the
+  # durable path). Fixed key (not ref-slug) so every run shares one baseline.
+  cache:
+    - key: pip-${CI_COMMIT_REF_SLUG}
+      paths:
+        - .pip-cache/
+    - key: tamper-baseline-${CI_PROJECT_PATH_SLUG}
+      paths:
+        - evidence/model-digests-baseline.txt
   # Each Vault-authenticating job needs its own id_token — JWTs are per-job.
   id_tokens:
     VAULT_ID_TOKEN:
@@ -647,8 +749,12 @@ tamper-verification:
               baseline = current
 
       # ── File-based fallback (no Vault) ──────────────────────────────────────
+      # The baseline persists across pipelines ONLY via the best-effort job cache
+      # below (single-runner / shared-cache setups). For durable, runner-independent
+      # cross-pipeline tamper detection, set VAULT_ADDR — Vault is authoritative.
       else:
-          print("VAULT_ADDR not set — using file baseline (90-day artifact expiry applies)")
+          print("VAULT_ADDR not set — using cached file baseline "
+                "(best-effort; set VAULT_ADDR for durable cross-pipeline detection)")
           baseline = baseline_file.read_text() if baseline_file.exists() else None
           if baseline is None:
               print("No file baseline — seeding from current digests")
@@ -1121,6 +1227,65 @@ eval-dataset-validate:
       - "${REPORTS_DIR}/eval-dataset-validation.json"
     expire_in: 7 days
 
+# Content-quality gate, one rung above eval-dataset-validate's STRUCTURE gate:
+# null rates, value ranges, uniqueness, cardinality — expressed as a Great
+# Expectations checkpoint whose pass/fail gates the run, with Data Docs as a
+# human-readable evidence artifact. Runs on the redacted, on-contract data.
+great-expectations-validate:
+  stage: model-integrity
+  needs: ["eval-dataset-validate", "dataset-redact"]
+  allow_failure: true   # soft gate — flip to false once expectations are tuned (mixed-strictness rollout)
+  script:
+    - pip install great-expectations pandas
+    - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/great-expectations"
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+      if [ -z "${DATASET_FILE}" ]; then
+        echo "No dataset present — GX content gate skipped (evals run on fixtures)"
+        echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/great-expectations.json"
+        exit 0
+      fi
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/run_great_expectations.py" \
+        --dataset "${DATASET_FILE}" \
+        --suite "${GAIPS_MATERIALS_DIR}/evals/great-expectations-suite.json" \
+        --report "${REPORTS_DIR}/great-expectations.json" \
+        --docs-dir "${EVIDENCE_DIR}/great-expectations/data-docs" \
+        --gx-root "${CI_PROJECT_DIR}/.gx"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/great-expectations.json"
+      - "${EVIDENCE_DIR}/great-expectations/"   # Data Docs site
+    expire_in: 30 days
+
+# Advisory auto-profile of the dataset (types, distributions, null counts,
+# cardinality, alerts). Pairs with the GX gate: profile → read alerts → refine
+# the expectation suite. Never gates — artifact only.
+ydata-profile:
+  stage: model-integrity
+  needs: ["dataset-redact"]
+  allow_failure: true   # advisory profiling — never blocks
+  script:
+    - pip install ydata-profiling pandas
+    - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/ydata-profile"
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+      if [ -z "${DATASET_FILE}" ]; then
+        echo "No dataset present — profiling skipped (evals run on fixtures)"
+        echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/ydata-profile.json"
+        exit 0
+      fi
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/run_ydata_profile.py" \
+        --dataset "${DATASET_FILE}" \
+        --html "${EVIDENCE_DIR}/ydata-profile/profile.html" \
+        --json "${REPORTS_DIR}/ydata-profile.json"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/ydata-profile.json"
+      - "${EVIDENCE_DIR}/ydata-profile/"
+    expire_in: 30 days
+
 dataset-sign:
   stage: model-integrity
   # Sign only AFTER scan + redaction + schema validation — attest clean, redacted,
@@ -1174,10 +1339,19 @@ dataset-sign:
 artifact-signing-gate:
   stage: model-integrity
   needs: ["signature-verification", "tamper-verification", "modelscan", "modelfile-audit", "clamav-scan", "hf-artifact-scan", "dataset-scan", "eval-dataset-validate"]
-  allow_failure: true
+  # Enforcing chokepoint: no eval job runs unless model integrity passed. The
+  # tamper job is allow_failure so it stays green and THIS gate makes the call —
+  # but on a real tamper it never writes integrity.env, so a missing file here
+  # fails closed. (Do NOT set allow_failure:true — that would make the gate a no-op.)
+  allow_failure: false
+  before_script: []          # stdlib only; skip the venv bootstrap
   script:
-    - source "${EVIDENCE_DIR}/integrity.env"
     - |
+      if [ ! -f "${EVIDENCE_DIR}/integrity.env" ]; then
+        echo "GATE FAILED: integrity evidence missing — tamper-verification did not pass"
+        exit 1
+      fi
+      source "${EVIDENCE_DIR}/integrity.env"
       if [ "${tamper_check_passed}" != "true" ]; then
         echo "GATE FAILED: integrity check did not pass"
         exit 1
@@ -1191,7 +1365,8 @@ rag-smoke-eval:
   needs: ["artifact-signing-gate"]
   allow_failure: true
   script:
-    - pip install -r requirements.txt
+    - !reference [.resolve-reqs, script]
+    - '[ -n "${REQ_FILE}" ] && pip install -r "${REQ_FILE}" || echo "No requirements file — skipping install"'
     - mkdir -p "${REPORTS_DIR}"
     - |
       python "${GAIPS_MATERIALS_DIR}/scripts/rag_smoke_eval.py" \
@@ -1224,9 +1399,47 @@ garak-scan:
     - pip install garak
     - mkdir -p "${REPORTS_DIR}"
     - |
+      # Skip cleanly rather than "scanning" an endpoint that isn't configured —
+      # the old default of http://localhost:8080/v1 has nothing listening in CI.
+      if [ -z "${MODEL_ENDPOINT}" ]; then
+        echo "MODEL_ENDPOINT not set — skipping garak live scan"
+        echo '{"tool":"garak","skipped":true,"reason":"MODEL_ENDPOINT not set"}' \
+          > "${REPORTS_DIR}/garak-results.json"
+        exit 0
+      fi
+    - |
+      # garak's REST generator is configured via a JSON options file (-G), NOT via
+      # --model_name (which is only a display label for model_type rest). Build a
+      # config for an OpenAI-compatible chat-completions endpoint; the auth header
+      # is added only when REST_API_KEY is present. Adjust uri / req_template /
+      # response_json_field to match your target API.
+      python3 - <<'PYEOF'
+      import json, os
+      base = os.environ["MODEL_ENDPOINT"].rstrip("/")
+      uri = base if base.endswith("/chat/completions") else base + "/chat/completions"
+      headers = {"Content-Type": "application/json"}
+      if os.environ.get("REST_API_KEY"):
+          headers["Authorization"] = "Bearer $KEY"   # $KEY ← REST_API_KEY (garak default)
+      cfg = {"rest": {"RestGenerator": {
+          "name": "gaips-target",
+          "uri": uri,
+          "method": "post",
+          "headers": headers,
+          "req_template_json_object": {
+              "model": os.environ.get("GARAK_REST_MODEL", "gaips"),
+              "messages": [{"role": "user", "content": "$INPUT"}],
+          },
+          "response_json": True,
+          "response_json_field": "$.choices[0].message.content",
+      }}}
+      with open("garak-rest-config.json", "w") as f:
+          json.dump(cfg, f, indent=2)
+      print("garak rest config →\n" + json.dumps(cfg, indent=2))
+      PYEOF
+    - |
       python -m garak \
         --model_type rest \
-        --model_name "${MODEL_ENDPOINT:-http://localhost:8080/v1}" \
+        -G garak-rest-config.json \
         --probes all \
         --report_prefix "${REPORTS_DIR}/garak-live" \
         2>&1 | tee "${REPORTS_DIR}/garak.log" || true
@@ -1273,6 +1486,7 @@ inspect-ai-eval:
         inspect eval "${TASK}" \
           --model "${MODEL}" \
           --log-dir "${LOG_DIR}" \
+          --log-format json \
           --limit "${LIMIT}" \
           2>&1 | tee -a "${REPORTS_DIR}/inspect-ai.log" || \
           echo "WARN: ${LABEL} eval returned non-zero (logged, not failing)"
@@ -1423,7 +1637,8 @@ guardrail-regression:
     - pyrit-scan
   allow_failure: true
   script:
-    - pip install -r requirements.txt
+    - !reference [.resolve-reqs, script]
+    - '[ -n "${REQ_FILE}" ] && pip install -r "${REQ_FILE}" || echo "No requirements file — skipping install"'
     - mkdir -p "${REPORTS_DIR}"
     - |
       python "${GAIPS_MATERIALS_DIR}/scripts/run_guardrail_regression.py" \
@@ -1511,6 +1726,43 @@ model-baseline-commit:
         "HEAD:${CI_DEFAULT_BRANCH}"
       echo "Committed eval-baseline.json → ${CI_DEFAULT_BRANCH} (drift detection now active)"
 
+# Data/feature drift on the INPUT side — complements model-drift-detection (which
+# watches eval METRICS). Evidently's DataDriftPreset (PSI) compares a committed
+# reference snapshot of the dataset (evals/dataset-reference.jsonl) to the current
+# one; TextEvals adds LLM-relevant text descriptors over the prompt columns. On
+# first run it seeds the reference for the maintainer to commit.
+evidently-drift:
+  stage: guardrail
+  needs: ["dataset-redact", "eval-dataset-validate"]
+  allow_failure: true   # soft gate — flip to false once a reference is committed + tuned
+  script:
+    - pip install evidently pandas
+    - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/evidently"
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+      if [ -z "${DATASET_FILE}" ]; then
+        echo "No dataset present — Evidently data-drift skipped (evals run on fixtures)"
+        echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/evidently-drift.json"
+        exit 0
+      fi
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/run_evidently_report.py" \
+        --current "${DATASET_FILE}" \
+        --reference "${GAIPS_MATERIALS_DIR}/evals/dataset-reference.jsonl" \
+        --report "${REPORTS_DIR}/evidently-drift.json" \
+        --html "${EVIDENCE_DIR}/evidently/drift-report.html" \
+        --seed-out "${REPORTS_DIR}/dataset-reference.seed.jsonl"
+    - |
+      if [ -f "${REPORTS_DIR}/dataset-reference.seed.jsonl" ]; then
+        echo "Reference seeded — commit ${REPORTS_DIR}/dataset-reference.seed.jsonl to evals/dataset-reference.jsonl"
+      fi
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/evidently-drift.json"
+      - "${REPORTS_DIR}/dataset-reference.seed.jsonl"
+      - "${EVIDENCE_DIR}/evidently/"
+    expire_in: 30 days
+
 # ─── EVIDENCE ────────────────────────────────────────────────────────────────
 
 evidence-summary:
@@ -1533,7 +1785,14 @@ evidence-summary:
     - model-digest
     - dataset-download
     - dataset-scan
+    - dataset-redact
+    - eval-dataset-validate
+    - great-expectations-validate
+    - ydata-profile
+    - dvc-verify
+    - evidently-drift
     - tamper-verification
+    - model-drift-detection
     - rag-smoke-eval
     - promptfoo-eval
     - garak-scan
@@ -1642,6 +1901,10 @@ ai-bom-assemble:
     - dataset-scan
     - dataset-redact
     - eval-dataset-validate
+    - great-expectations-validate
+    - ydata-profile
+    - dvc-verify
+    - evidently-drift
     - dataset-sign
     - garak-scan
     - giskard-scan
@@ -1683,7 +1946,9 @@ ai-bom-validate:
   script:
     - |
       # Hard-validate the AI BOM against the CycloneDX 1.6 JSON schema.
-      cyclonedx validate \
+      # Binary lives at /cyclonedx in the image; PATH may not include / once the
+      # entrypoint is cleared, so call it by absolute path.
+      /cyclonedx validate \
         --input-file "${SBOM_DIR}/aibom.cyclonedx.json" \
         --input-format json \
         --input-version v1_6 \
@@ -1691,7 +1956,7 @@ ai-bom-validate:
     - |
       # Emit an XML rendering — this is what ai-bom-sign signs (the CLI's
       # enveloped signature is an XML Digital Signature embedded in the BOM).
-      cyclonedx convert \
+      /cyclonedx convert \
         --input-file "${SBOM_DIR}/aibom.cyclonedx.json" \
         --output-file "${SBOM_DIR}/aibom.cyclonedx.xml" \
         --output-format xml \
@@ -1728,19 +1993,19 @@ ai-bom-sign:
         echo "Using configured CYCLONEDX_SIGNING_KEY (stable signer identity)"
       else
         echo "CYCLONEDX_SIGNING_KEY not set — generating EPHEMERAL keypair (intra-run verification only)"
-        cyclonedx keygen \
+        /cyclonedx keygen \
           --private-key-file "${SBOM_DIR}/aibom-signing.key" \
           --public-key-file "${SBOM_DIR}/aibom-signing.pub"
       fi
     - |
       # Native CycloneDX enveloped signature — embedded directly in the BOM,
       # verifies as-is with `cyclonedx verify all` (no canonical reconstruction).
-      cyclonedx sign bom "${SBOM_DIR}/aibom.cyclonedx.xml" \
+      /cyclonedx sign bom "${SBOM_DIR}/aibom.cyclonedx.xml" \
         --key-file "${SBOM_DIR}/aibom-signing.key"
     - |
       # Prove the embedded signature round-trips before publishing.
       if [ -f "${SBOM_DIR}/aibom-signing.pub" ]; then
-        cyclonedx verify all "${SBOM_DIR}/aibom.cyclonedx.xml" \
+        /cyclonedx verify all "${SBOM_DIR}/aibom.cyclonedx.xml" \
           --key-file "${SBOM_DIR}/aibom-signing.pub"
         echo "AI BOM enveloped signature verified"
       else
@@ -1779,3 +2044,33 @@ drift-gate:
           sys.exit(1)
       print("Drift gate PASSED — eval metrics within threshold of baseline")
       PYEOF
+
+# Ingest the signed BOMs into Dependency-Track for CONTINUOUS analysis — the SBOM
+# and the AI BOM (nested under the app project) are re-scanned against new CVEs +
+# policy conditions over time, turning the point-in-time grype/trivy scan into
+# ongoing monitoring. Hard policy gate (fails on a blocking violationState), but
+# skips cleanly when DT_API_URL/DT_API_KEY are unset — same pattern as dataset-scan.
+# NOTE: DT's vuln matching targets software components; the AI BOM's model/data
+# components ride along as inventory + POLICY targets (which DO gate), not CVE matches.
+dependency-track-upload:
+  stage: ai-bom
+  needs: ["syft-cyclonedx", "ai-bom-assemble", "vault-secrets"]
+  allow_failure: false   # hard gate on blocking policy violations (skips cleanly when DT unconfigured)
+  variables:
+    DT_PROJECT_NAME: "${CI_PROJECT_NAME}"
+  script:
+    - pip install requests
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/dependency_track_upload.py" \
+        --bom "${SBOM_DIR}/sbom.cyclonedx.json" \
+        --aibom "${SBOM_DIR}/aibom.cyclonedx.json" \
+        --project-name "${DT_PROJECT_NAME}" \
+        --project-version "${CI_COMMIT_REF_NAME}" \
+        --aibom-name "${DT_PROJECT_NAME}-aibom" \
+        --report "${REPORTS_DIR}/dependency-track.json" \
+        --fail-on "${DT_FAIL_ON}"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/dependency-track.json"
+    expire_in: 30 days

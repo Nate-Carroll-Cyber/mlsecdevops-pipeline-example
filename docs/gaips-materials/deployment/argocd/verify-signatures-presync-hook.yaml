@@ -1,0 +1,113 @@
+# Argo CD PreSync hook — verifies the artifact signatures this pipeline produces
+# BEFORE the new revision is rolled out. Runs as a Job in the gaips namespace; a
+# non-zero exit aborts the sync, so an unsigned or tampered model / dataset /
+# AI BOM never reaches the cluster. This is the deploy-time half of the
+# sign→verify loop (the CI half is model-sign / dataset-sign / ai-bom-sign).
+#
+# It verifies, using the SAME trust anchors the pipeline signed with:
+#   • the CycloneDX AI BOM enveloped signature  (cyclonedx verify all, public key)
+#   • the model + dataset cosign blob signatures (cosign verify-blob, keyless ID)
+#
+# Configure via the gaips-verify-config ConfigMap (identity/issuer/artifact URLs)
+# and gaips-verify-keys Secret (the CycloneDX public key). Artifacts are pulled
+# from ARTIFACT_BASE_URL — point it at your GitLab generic package registry,
+# release assets, or an OCI/artifact store holding the signed BOM + signatures.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: gaips-verify-signatures
+  namespace: gaips
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    # Clean the Job up once it succeeds; a failed Job is retained for debugging.
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: gaips-verify-signatures
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: verify
+          # debian-slim has curl + a shell; cosign and cyclonedx-cli are pinned
+          # and checksum-installed at runtime, matching the CI trust model.
+          image: debian:12-slim
+          env:
+            - name: COSIGN_VERSION
+              value: "v2.4.1"
+            - name: CYCLONEDX_CLI_VERSION
+              value: "v0.32.0"
+          envFrom:
+            - configMapRef:
+                name: gaips-verify-config
+          volumeMounts:
+            - name: verify-keys
+              mountPath: /keys
+              readOnly: true
+          command: ["/bin/bash", "-euo", "pipefail", "-c"]
+          args:
+            - |
+              apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
+
+              # ── Install cosign (checksum-verified) ───────────────────────────
+              curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /tmp/cosign
+              curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" -o /tmp/cosign_sums.txt
+              grep -E "^[0-9a-f]{64}  cosign-linux-amd64$" /tmp/cosign_sums.txt | sed 's#cosign-linux-amd64#/tmp/cosign#' | sha256sum --check --strict
+              install -m 0755 /tmp/cosign /usr/local/bin/cosign
+
+              # ── Install cyclonedx-cli ────────────────────────────────────────
+              curl -sSfL "https://github.com/CycloneDX/cyclonedx-cli/releases/download/${CYCLONEDX_CLI_VERSION}/cyclonedx-linux-x64" -o /usr/local/bin/cyclonedx
+              chmod 0755 /usr/local/bin/cyclonedx
+
+              cd "$(mktemp -d)"
+              echo "Fetching signed artifacts from ${ARTIFACT_BASE_URL}"
+              curl -sSfL "${ARTIFACT_BASE_URL}/aibom.cyclonedx.xml" -o aibom.cyclonedx.xml
+
+              # ── 1) AI BOM enveloped signature (CycloneDX) ────────────────────
+              cyclonedx verify all aibom.cyclonedx.xml --key-file /keys/aibom-signing.pub
+              echo "AI BOM signature verified"
+
+              # ── 2) Model + dataset cosign blob signatures (keyless) ──────────
+              # MODEL_SIGNING_IDENTITY / SIGSTORE_OIDC_ISSUER must match the CI
+              # signer (same values the pipeline verified with). Each entry is
+              # "<artifact>|<sig>|<cert>" under ARTIFACT_BASE_URL.
+              for spec in ${BLOB_ARTIFACTS:-}; do
+                IFS='|' read -r blob sig cert <<< "${spec}"
+                curl -sSfL "${ARTIFACT_BASE_URL}/${blob}" -o "$(basename "${blob}")"
+                curl -sSfL "${ARTIFACT_BASE_URL}/${sig}"  -o "$(basename "${sig}")"
+                curl -sSfL "${ARTIFACT_BASE_URL}/${cert}" -o "$(basename "${cert}")"
+                cosign verify-blob \
+                  --certificate "$(basename "${cert}")" \
+                  --signature "$(basename "${sig}")" \
+                  --certificate-identity "${MODEL_SIGNING_IDENTITY}" \
+                  --certificate-oidc-issuer "${SIGSTORE_OIDC_ISSUER}" \
+                  "$(basename "${blob}")"
+                echo "verified blob signature: ${blob}"
+              done
+
+              echo "All artifact signatures verified — sync may proceed"
+      volumes:
+        - name: verify-keys
+          secret:
+            secretName: gaips-verify-keys
+---
+# Trust anchors + artifact locations for the PreSync verifier. Replace the lab
+# values with your real signer identity, issuer, and artifact store URL.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gaips-verify-config
+  namespace: gaips
+data:
+  ARTIFACT_BASE_URL: "https://gitlab.example.com/api/v4/projects/<id>/packages/generic/gaips-evidence/latest"
+  MODEL_SIGNING_IDENTITY: "ci-signer@example.invalid"
+  SIGSTORE_OIDC_ISSUER: "https://oauth2.sigstore.dev/auth"
+  # Space-separated "<blob>|<sig>|<cert>" triples to cosign verify-blob.
+  BLOB_ARTIFACTS: "model.bin|model.sig|model.pem dataset.jsonl|dataset.sig|dataset.pem"
+# The CycloneDX public key (CYCLONEDX_SIGNING_PUB) goes in the gaips-verify-keys
+# Secret as aibom-signing.pub:
+#   kubectl -n gaips create secret generic gaips-verify-keys \
+#     --from-file=aibom-signing.pub=sbom/aibom-signing.pub

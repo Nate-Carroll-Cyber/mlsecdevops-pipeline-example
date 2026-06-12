@@ -16,6 +16,8 @@ variables via a `reports: dotenv` artifact.
 | `secret/data/gaips/ci/hf-token` | `HF_TOKEN` | `fixture-hf-token-not-real` | Read by CI role |
 | `secret/data/gaips/ci/gemini-api-key` | `GEMINI_API_KEY` | `fixture-gemini-key-not-real` | Read by CI role |
 | `secret/data/gaips/ci/registry-token` | `CI_REGISTRY_TOKEN` | `fixture-registry-token-not-real` | Read by CI role |
+| `secret/data/gaips/ci/dt-api-url` | `DT_API_URL` | `https://dtrack.example.invalid` | Read by CI role |
+| `secret/data/gaips/ci/dt-api-key` | `DT_API_KEY` | `fixture-dt-key-not-real` | Read by CI role |
 
 ## Model Provider Tokens — `secret/data/gaips/model-providers/*`
 

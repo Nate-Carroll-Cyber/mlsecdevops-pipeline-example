@@ -294,6 +294,65 @@ def _eval_evidence(reports_dir: Path) -> tuple[list[dict], list[dict]]:
     return props, refs
 
 
+def _data_quality_evidence(reports_dir: Path) -> tuple[list[dict], list[dict]]:
+    """Fold the data-quality / input-drift verdicts into the BOM root component.
+
+    These run before the ai-bom stage: Great Expectations (content gate),
+    Evidently (input-side data drift), YData (profile), DVC (version lineage).
+    Dependency-Track is intentionally absent — it INGESTS this BOM downstream,
+    so its verdict cannot be part of the document it analyses.
+    """
+    props: list[dict] = []
+    refs: list[dict] = []
+
+    ge = _load_json(reports_dir / "great-expectations.json")
+    if isinstance(ge, dict) and not ge.get("skipped"):
+        props.append(_prop("data_quality.great_expectations.success",
+                           "true" if ge.get("success") else "false"))
+        props.append(_prop("data_quality.great_expectations.expectations",
+                           ge.get("expectations_evaluated", 0)))
+        refs.append({
+            "type": "other",
+            "url": "file://reports/great-expectations.json",
+            "comment": "Great Expectations content-quality validation",
+        })
+
+    ev = _load_json(reports_dir / "evidently-drift.json")
+    if isinstance(ev, dict) and not ev.get("skipped"):
+        if ev.get("seeded"):
+            props.append(_prop("data_drift.status", "reference-seeded"))
+        else:
+            props.append(_prop("data_drift.detected",
+                               "true" if ev.get("drift_detected") else "false"))
+            if ev.get("drifted_columns") is not None:
+                props.append(_prop("data_drift.columns", ev.get("drifted_columns")))
+        refs.append({
+            "type": "other",
+            "url": "file://reports/evidently-drift.json",
+            "comment": "Evidently data/feature drift report (dataset vs reference)",
+        })
+
+    yd = _load_json(reports_dir / "ydata-profile.json")
+    if isinstance(yd, dict) and not yd.get("skipped"):
+        props.append(_prop("data_quality.ydata_profile.present", "true"))
+        refs.append({
+            "type": "other",
+            "url": "file://reports/ydata-profile.json",
+            "comment": "YData dataset profile",
+        })
+
+    dvc = _load_json(reports_dir / "dvc-status.json")
+    if isinstance(dvc, dict) and not dvc.get("skipped"):
+        props.append(_prop("data_lineage.dvc.present", "true"))
+        refs.append({
+            "type": "other",
+            "url": "file://reports/dvc-status.json",
+            "comment": "DVC tracked-vs-pinned data/model status",
+        })
+
+    return props, refs
+
+
 def _version_properties(evidence_dir: Path) -> list[dict]:
     """Git/CI provenance from version-info.json as BOM metadata properties."""
     info = _load_json(evidence_dir / "version-info.json")
@@ -325,6 +384,7 @@ def build_bom(
     models = _model_components(evidence_dir, reports_dir, model_dir)
     data = _data_components(evidence_dir, reports_dir)
     eval_props, eval_refs = _eval_evidence(reports_dir)
+    dq_props, dq_refs = _data_quality_evidence(reports_dir)
 
     root_ref = "root:" + os.environ.get("CI_PROJECT_PATH_SLUG", "gaips-application")
     root = {
@@ -332,8 +392,8 @@ def build_bom(
         "bom-ref": root_ref,
         "name": os.environ.get("CI_PROJECT_NAME", "gaips-application"),
         "version": os.environ.get("CI_COMMIT_SHORT_SHA", "0.0.0"),
-        "properties": eval_props,
-        "externalReferences": eval_refs,
+        "properties": eval_props + dq_props,
+        "externalReferences": eval_refs + dq_refs,
     }
 
     components = models + data + software

@@ -15,6 +15,16 @@ EXPECTED = [
     "guardrail-regression.json",
 ]
 
+# Advisory artifacts — displayed for completeness but NOT gated (they skip
+# cleanly when their input is absent, so missing ≠ failure).
+ADVISORY = [
+    "great-expectations.json",
+    "ydata-profile.json",
+    "evidently-drift.json",
+    "dvc-status.json",
+    "dependency-track.json",
+]
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()
@@ -31,6 +41,10 @@ def main() -> None:
         lines.append(f"| reports/{name} | {present} |")
         if not present:
             missing.append(name)
+    lines.extend(["", "## Advisory artifacts (not gated)", "",
+                  "| Artifact | Present |", "| --- | --- |"])
+    for name in ADVISORY:
+        lines.append(f"| reports/{name} | {(reports / name).exists()} |")
     lines.extend(["", "## Gate", ""])
     if missing:
         lines.append("Missing required live-evaluation artifacts: " + ", ".join(missing))

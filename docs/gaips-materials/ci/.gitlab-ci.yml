@@ -16,17 +16,34 @@ variables:
   CONDA_CHANNEL: "conda-forge"
   # Override in project CI/CD settings (or fetch from Vault via vault-secrets job):
   # MODEL_ENDPOINT, MODEL_SIGNING_IDENTITY, SIGSTORE_OIDC_ISSUER
+  # AI BOM enveloped signature (ai-bom-sign): set CYCLONEDX_SIGNING_KEY (RSA
+  # private key, PEM) and CYCLONEDX_SIGNING_PUB (matching public key) as masked
+  # CI/CD variables for a STABLE signer identity. If unset, the job generates an
+  # ephemeral keypair — verifiable within the run only, not anchored to a signer.
+  # Drift baseline auto-commit (model-baseline-commit): set GITLAB_PUSH_TOKEN to a
+  # masked Project Access Token (scope: write_repository) to let the first run
+  # commit evals/eval-baseline.json back to the default branch. If unset, the
+  # seeded baseline is published as an artifact to commit manually.
   HF_MODEL_IDS: ""    # comma-separated HF repo IDs to scan, e.g. "org/model-a,org/model-b"
   HF_TOKEN: ""        # HuggingFace token for gated/private repos (mask in CI settings)
   # ── Pinned tool versions — update here to roll the whole pipeline ─────────────
   # Find current releases at each tool's GitHub releases page before bumping.
   COSIGN_VERSION: "v2.4.1"
+  GITLEAKS_VERSION: "8.30.1"          # dataset-redact secret scan (no 'v' in tarball name)
   IMAGE_SEMGREP: "semgrep/semgrep:v1.165.0"
   IMAGE_MINICONDA: "continuumio/miniconda3:26.3.2"
   IMAGE_SYFT: "anchore/syft:v1.45.1"
   IMAGE_GRYPE: "anchore/grype:v0.114.0"
   IMAGE_TRIVY: "aquasec/trivy:v0.71.0"
+  IMAGE_CYCLONEDX: "cyclonedx/cyclonedx-cli:0.32.0"   # AI BOM schema validation / format conversion
   PROMPTFOO_VERSION: "0.121.15"
+  # ── Dataset download — Generic Package Registry ───────────────────────────────
+  # Set these in GitLab Settings → CI/CD → Variables (or fetch from Vault).
+  # Leave DATASET_FILENAME blank to skip the download/scan jobs entirely.
+  DATASET_PACKAGE_NAME: ""          # package name in the Generic Package Registry
+  DATASET_PACKAGE_VERSION: "latest" # package version tag
+  DATASET_FILENAME: ""              # filename to download; blank = skip
+  DATASET_EXPECTED_SHA256: ""       # optional — pipeline fails on hash mismatch
 
 # ── Shared secure-install template (extend in Python jobs) ───────────────────
 # Applied by default to the python:3.11-slim image; override before_script in
@@ -77,6 +94,7 @@ stages:
   - ai-eval
   - guardrail
   - evidence
+  - ai-bom
 
 # ─── SETUP ───────────────────────────────────────────────────────────────────
 
@@ -87,9 +105,16 @@ setup:
     - pip install -r requirements.txt
     - mkdir -p "${SBOM_DIR}" "${EVIDENCE_DIR}" "${REPORTS_DIR}"
     - echo "Pipeline ${CI_PIPELINE_ID} @ ${CI_COMMIT_SHORT_SHA}" | tee "${EVIDENCE_DIR}/pipeline.env"
+    - |
+      # Record the exact Git revision this pipeline ran against, for provenance.
+      TS="${CI_PIPELINE_CREATED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/write_version_info.py" \
+        --out "${EVIDENCE_DIR}/version-info.json" \
+        --timestamp "${TS}"
   artifacts:
     paths:
       - "${EVIDENCE_DIR}/pipeline.env"
+      - "${EVIDENCE_DIR}/version-info.json"
     expire_in: 1 day
 
 vault-secrets:
@@ -168,6 +193,88 @@ semgrep-sast:
       - "${REPORTS_DIR}/semgrep.json"
     expire_in: 7 days
   allow_failure: true
+
+# GitLab-native secret detection — writes gl-secret-detection-report.json, which
+# surfaces findings directly in the GitLab Security Dashboard and MR widget.
+secret-detection:
+  stage: sast
+  image: registry.gitlab.com/security-products/secrets:4
+  before_script: []
+  needs: ["setup"]
+  variables:
+    GIT_DEPTH: 0                            # full history; set to 1 for HEAD-only on large repos
+    SECRET_DETECTION_HISTORIC_SCAN: "false" # flip to "true" to scan entire git history
+    SECRET_DETECTION_LOG_OPTIONS: ""
+  script:
+    - mkdir -p "${REPORTS_DIR}"
+    - /analyzer run
+    - |
+      # Copy to REPORTS_DIR so evidence-summary can pick it up alongside other reports
+      cp gl-secret-detection-report.json "${REPORTS_DIR}/secret-detection.json" 2>/dev/null || true
+    - |
+      python3 - <<'PYEOF'
+      import json, os, sys
+      report_path = "gl-secret-detection-report.json"
+      if not os.path.exists(report_path):
+          print("No secret detection report produced — skipping summary")
+          sys.exit(0)
+      data = json.load(open(report_path))
+      vulns = data.get("vulnerabilities", [])
+      by_severity = {}
+      for v in vulns:
+          sev = v.get("severity", "Unknown")
+          by_severity[sev] = by_severity.get(sev, 0) + 1
+      print(f"Secret detection: {len(vulns)} finding(s) — {by_severity}")
+      if any(v.get("severity") == "Critical" for v in vulns):
+          print("Critical secrets found — failing pipeline")
+          sys.exit(1)
+      PYEOF
+  artifacts:
+    reports:
+      secret_detection: gl-secret-detection-report.json
+    paths:
+      - gl-secret-detection-report.json
+      - "${REPORTS_DIR}/secret-detection.json"
+    expire_in: 7 days
+  allow_failure: false
+
+# Gitleaks — complements the GitLab analyzer with configurable rules and
+# explicit git-history depth control. Produces a standalone JSON report.
+gitleaks-scan:
+  stage: sast
+  image:
+    name: gitleaks/gitleaks:latest
+    entrypoint: [""]
+  before_script: []
+  needs: ["setup"]
+  script:
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      gitleaks detect \
+        --source="${CI_PROJECT_DIR}" \
+        --report-format=json \
+        --report-path="${REPORTS_DIR}/gitleaks.json" \
+        --redact \
+        --exit-code=1 \
+        2>&1 | tee "${REPORTS_DIR}/gitleaks.log" || GITLEAKS_EXIT=${PIPESTATUS[0]}
+    - |
+      # Summarize without leaking secret values (--redact masks them in the report)
+      LEAKS=$(python3 -c "
+      import json, sys
+      try:
+          d = json.load(open('${REPORTS_DIR}/gitleaks.json'))
+          print(len(d) if isinstance(d, list) else 0)
+      except Exception:
+          print(0)
+      " 2>/dev/null || echo 0)
+      echo "gitleaks: ${LEAKS} potential secret(s) detected"
+      [ "${GITLEAKS_EXIT:-0}" -eq 0 ] || { echo "Secrets detected — failing pipeline"; exit 1; }
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/gitleaks.json"
+      - "${REPORTS_DIR}/gitleaks.log"
+    expire_in: 7 days
+  allow_failure: false
 
 pip-audit:
   stage: sast
@@ -605,10 +712,106 @@ modelscan:
     expire_in: 7 days
   allow_failure: true
 
+modelfile-audit:
+  stage: model-integrity
+  needs: ["setup"]
+  allow_failure: true
+  script:
+    - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}"
+    - |
+      python3 - <<'PYEOF'
+      import hashlib, json, os, pathlib, sys
+
+      model_dir    = pathlib.Path(os.environ["MODEL_DIR"])
+      report_dir   = pathlib.Path(os.environ["REPORTS_DIR"])
+      evidence_dir = pathlib.Path(os.environ["EVIDENCE_DIR"])
+      root         = pathlib.Path(os.environ["CI_PROJECT_DIR"])
+
+      # Search MODEL_DIR (recursive) and one level below repo root
+      candidates = (
+          list(model_dir.rglob("Modelfile")) +
+          list(model_dir.rglob("modelfile")) +
+          list(root.glob("Modelfile")) +
+          list(root.glob("*/Modelfile"))
+      )
+      seen, modelfiles = set(), []
+      for c in candidates:
+          rp = c.resolve()
+          if rp not in seen:
+              seen.add(rp)
+              modelfiles.append(c)
+
+      if not modelfiles:
+          print("No Modelfiles found — skipping")
+          (report_dir / "modelfile-audit.json").write_text(
+              json.dumps({"skipped": True, "files": []}, indent=2)
+          )
+          sys.exit(0)
+
+      digest_lines, results = [], []
+
+      for mf in modelfiles:
+          rel    = str(mf.relative_to(root))
+          text   = mf.read_text(errors="replace")
+          digest = hashlib.sha256(text.encode()).hexdigest()
+          digest_lines.append(f"{rel}  sha256:{digest}")
+          results.append({"file": rel, "sha256": digest})
+          print(f"{rel}  sha256:{digest}")
+
+      # Separate file avoids a write race with model-digest
+      (evidence_dir / "modelfile-digests.txt").write_text("\n".join(digest_lines) + "\n")
+
+      (report_dir / "modelfile-audit.json").write_text(
+          json.dumps({"skipped": False, "files_audited": len(results), "files": results}, indent=2)
+      )
+      print(f"\n{len(results)} Modelfile(s) hashed")
+      PYEOF
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/modelfile-audit.json"
+      - "${EVIDENCE_DIR}/modelfile-digests.txt"
+    expire_in: 7 days
+
+clamav-scan:
+  stage: model-integrity
+  image: clamav/clamav:latest
+  before_script: []          # clamav image has no Python — skip .python-secure
+  needs: ["model-signing-install"]
+  script:
+    - mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"
+    - |
+      # Pull latest malware signatures; non-fatal if mirror is unreachable
+      freshclam --quiet 2>&1 | tail -3 || echo "WARNING: freshclam update failed — using cached DB"
+    - |
+      clamscan \
+        --recursive \
+        --infected \
+        --no-summary \
+        --max-filesize=4000M \
+        --max-scansize=4000M \
+        --log="${REPORTS_DIR}/clamav-model.log" \
+        "${MODEL_DIR}" \
+        2>&1; CLAM_EXIT=$?
+      # clamscan exit codes: 0=clean 1=virus found 2=error (e.g. empty dir — non-fatal)
+      INFECTED=$(grep -c " FOUND$" "${REPORTS_DIR}/clamav-model.log" 2>/dev/null || echo 0)
+      printf '{"scanned_dir":"%s","infected":%s,"exit_code":%s}\n' \
+        "${MODEL_DIR}" "${INFECTED}" "${CLAM_EXIT}" \
+        > "${REPORTS_DIR}/clamav-model.json"
+      echo "ClamAV: ${INFECTED} infected file(s) | exit ${CLAM_EXIT}"
+      [ "${CLAM_EXIT}" -ne 1 ] || { echo "Infected files detected — failing pipeline"; exit 1; }
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/clamav-model.log"
+      - "${REPORTS_DIR}/clamav-model.json"
+    expire_in: 7 days
+  allow_failure: false
+
 hf-artifact-scan:
   stage: model-integrity
   needs: ["model-signing-install", "vault-secrets"]
   script:
+    - apt-get update -qq && apt-get install -y -qq clamav clamav-freshclam
+    - freshclam --quiet || echo "WARNING: ClamAV DB update failed — using cached DB"
     - pip install huggingface_hub modelscan
     - mkdir -p "${REPORTS_DIR}/hf-scan" "${CI_PROJECT_DIR}/.hf-cache"
     - |
@@ -653,6 +856,18 @@ hf-artifact-scan:
                   token=token,
               )
 
+              # ClamAV: malware signature scan of downloaded files
+              clam = subprocess.run(
+                  ["clamscan", "--recursive", "--infected", "--no-summary",
+                   "--max-filesize=4000M", "--max-scansize=4000M", str(local_dir)],
+                  capture_output=True, text=True,
+              )
+              clam_infected = clam.stdout.count(" FOUND")
+              record["clamav"] = {"exit_code": clam.returncode, "infected": clam_infected}
+              if clam.returncode == 1:
+                  print(f"ClamAV THREATS DETECTED in {model_id}: {clam_infected} infected file(s)")
+                  exit_code = 1
+
               scan_out = report_dir / f"{slug}-modelscan.json"
               proc = subprocess.run(
                   ["modelscan", "scan", "--path", str(local_dir),
@@ -690,9 +905,275 @@ hf-artifact-scan:
     expire_in: 7 days
   allow_failure: true
 
+dataset-download:
+  stage: model-integrity
+  needs: ["setup", "vault-secrets"]
+  allow_failure: true   # skips gracefully when DATASET_FILENAME is not set
+  script:
+    - mkdir -p "${EVIDENCE_DIR}/dataset-input" "${REPORTS_DIR}"
+    - |
+      if [ -z "${DATASET_FILENAME}" ]; then
+        echo "DATASET_FILENAME not set — skipping dataset download"
+        echo '{"skipped":true}' > "${REPORTS_DIR}/dataset-download.json"
+        exit 0
+      fi
+    - |
+      DOWNLOAD_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${DATASET_PACKAGE_NAME}/${DATASET_PACKAGE_VERSION}/${DATASET_FILENAME}"
+      echo "Downloading: ${DOWNLOAD_URL}"
+      curl --fail --location \
+        --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+        --output "${EVIDENCE_DIR}/dataset-input/${DATASET_FILENAME}" \
+        "${DOWNLOAD_URL}"
+    - |
+      FILEPATH="${EVIDENCE_DIR}/dataset-input/${DATASET_FILENAME}"
+      DIGEST=$(sha256sum "${FILEPATH}" | awk '{print $1}')
+      echo "${DATASET_FILENAME}  sha256:${DIGEST}" | tee "${EVIDENCE_DIR}/dataset-digest.txt"
+      if [ -n "${DATASET_EXPECTED_SHA256}" ] && [ "${DIGEST}" != "${DATASET_EXPECTED_SHA256}" ]; then
+        echo "ERROR: SHA-256 mismatch — expected ${DATASET_EXPECTED_SHA256}, got ${DIGEST}"
+        exit 1
+      fi
+    - |
+      python3 - <<'PYEOF'
+      import json, os, pathlib
+      evidence_dir = pathlib.Path(os.environ["EVIDENCE_DIR"])
+      filename     = os.environ["DATASET_FILENAME"]
+      filepath     = evidence_dir / "dataset-input" / filename
+      digest_line  = (evidence_dir / "dataset-digest.txt").read_text().strip()
+      report = {
+          "skipped":    False,
+          "file":       filename,
+          "size_bytes": filepath.stat().st_size,
+          "sha256":     digest_line.split("sha256:")[1],
+      }
+      (pathlib.Path(os.environ["REPORTS_DIR"]) / "dataset-download.json").write_text(
+          json.dumps(report, indent=2)
+      )
+      print(f"Dataset downloaded: {filename} ({report['size_bytes']:,} bytes)")
+      PYEOF
+  artifacts:
+    paths:
+      - "${EVIDENCE_DIR}/dataset-input/"
+      - "${EVIDENCE_DIR}/dataset-digest.txt"
+      - "${REPORTS_DIR}/dataset-download.json"
+    expire_in: 1 day
+
+dataset-scan:
+  stage: model-integrity
+  needs: ["dataset-download"]
+  allow_failure: false   # hard gate — dataset must be clean before reaching eval jobs
+  script:
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -type f 2>/dev/null | head -1)
+      if [ -z "${DATASET_FILE}" ]; then
+        echo "No dataset file present — skipping scan"
+        echo '{"skipped":true}' > "${REPORTS_DIR}/dataset-scan.json"
+        exit 0
+      fi
+      echo "Scanning: ${DATASET_FILE}"
+    - apt-get update -qq && apt-get install -y -qq clamav clamav-freshclam
+    - freshclam --quiet 2>&1 | tail -3 || echo "WARNING: freshclam update failed — using cached DB"
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -type f | head -1)
+      clamscan \
+        --no-summary \
+        --infected \
+        --log="${REPORTS_DIR}/dataset-clamav.log" \
+        "${DATASET_FILE}"; CLAM_EXIT=$?
+      INFECTED=$(grep -c " FOUND$" "${REPORTS_DIR}/dataset-clamav.log" 2>/dev/null || echo 0)
+      echo "ClamAV: ${INFECTED} infected file(s) | exit ${CLAM_EXIT}"
+      [ "${CLAM_EXIT}" -ne 1 ] || { echo "Infected dataset detected — failing pipeline"; exit 1; }
+    - |
+      python3 - <<'PYEOF'
+      import json, os, pathlib, sys
+
+      evidence_dir = pathlib.Path(os.environ["EVIDENCE_DIR"])
+      report_dir   = pathlib.Path(os.environ["REPORTS_DIR"])
+
+      dataset_file = next(evidence_dir.glob("dataset-input/*"), None)
+      if not dataset_file:
+          sys.exit(0)
+
+      findings = []
+      text = dataset_file.read_text(errors="replace")
+
+      # Structural validation — JSON and JSONL are the expected dataset formats
+      if dataset_file.suffix == ".json":
+          try:
+              data = json.loads(text)
+              count = len(data) if isinstance(data, list) else 1
+              print(f"JSON valid — {count} record(s)")
+          except json.JSONDecodeError as exc:
+              findings.append({"severity": "HIGH", "detail": f"Invalid JSON: {exc}"})
+      elif dataset_file.suffix in (".jsonl", ".ndjson"):
+          line_errors = []
+          for i, line in enumerate(text.splitlines(), 1):
+              if not line.strip():
+                  continue
+              try:
+                  json.loads(line)
+              except json.JSONDecodeError as exc:
+                  line_errors.append(f"line {i}: {exc}")
+          if line_errors:
+              findings.append({"severity": "HIGH", "detail": f"Invalid JSONL: {line_errors[:3]}"})
+          else:
+              print(f"JSONL valid — {i} line(s)")
+      else:
+          print(f"Format {dataset_file.suffix!r} — structural validation skipped")
+
+      report = {
+          "skipped":  False,
+          "file":     dataset_file.name,
+          "findings": findings,
+      }
+      (report_dir / "dataset-scan.json").write_text(json.dumps(report, indent=2))
+
+      if findings:
+          for f in findings:
+              print(f"  [{f['severity']}] {f['detail']}")
+          sys.exit(1)
+
+      print("Dataset scan PASSED")
+      PYEOF
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/dataset-scan.json"
+      - "${REPORTS_DIR}/dataset-clamav.log"
+    expire_in: 7 days
+
+# Defence-in-depth on data confidentiality: after the AV/structural gate, strip
+# secrets (gitleaks) and PII (Presidio) from the downloaded data IN PLACE, before
+# it is validated, signed, or loaded into any eval.
+dataset-redact:
+  stage: model-integrity
+  needs: ["dataset-scan"]
+  # Fail-closed: a redaction tooling failure must NOT let unredacted data through.
+  # The job still exits 0 cleanly when no dataset is configured (skip path below).
+  allow_failure: false
+  variables:
+    # Data is always redacted; the job then HARD-FAILS if findings exceed these.
+    # Default: zero tolerance for secrets in training data; PII gate opt-in (-1).
+    REDACT_MAX_SECRETS: "0"
+    REDACT_MAX_PII: "-1"
+  script:
+    - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/dataset-input"
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+      if [ -z "${DATASET_FILE}" ]; then
+        echo "No dataset file present — redaction skipped"
+        echo '{"skipped":true}' > "${REPORTS_DIR}/dataset-redact.json"
+        exit 0
+      fi
+    - |
+      # Install gitleaks (Go binary) — checksum-verified against the official
+      # release checksums file, same trust model as the cosign install.
+      TGZ="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+      curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${TGZ}" -o "/tmp/${TGZ}"
+      curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_checksums.txt" -o /tmp/gitleaks_checksums.txt
+      grep " ${TGZ}\$" /tmp/gitleaks_checksums.txt | (cd /tmp && sha256sum --check --strict)
+      tar -xzf "/tmp/${TGZ}" -C /tmp gitleaks
+      install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+      gitleaks version
+    - pip install "presidio-analyzer" "presidio-anonymizer"
+    - python -m spacy download en_core_web_sm
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
+        ! -name "dataset.sig" ! -name "dataset.pem" | head -1)
+      # Detect secrets (raw report stays internal — never published as an artifact)
+      gitleaks detect --no-git --source "${DATASET_FILE}" \
+        --report-format json --report-path /tmp/gitleaks-dataset.json --exit-code 0 || true
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/redact_dataset.py" \
+        --input "${DATASET_FILE}" \
+        --gitleaks-report /tmp/gitleaks-dataset.json \
+        --report "${REPORTS_DIR}/dataset-redact.json" \
+        --max-secrets "${REDACT_MAX_SECRETS}" \
+        --max-pii "${REDACT_MAX_PII}"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/dataset-redact.json"
+      - "${EVIDENCE_DIR}/dataset-input/"   # the redacted data
+    expire_in: 7 days
+
+# Contract gate: the eval/training dataset must conform to the eval-dataset JSON
+# Schema before any eval job loads it. Catches off-contract data up front.
+eval-dataset-validate:
+  stage: model-integrity
+  needs: ["dataset-redact"]
+  allow_failure: false   # a malformed eval dataset must stop the run (skips cleanly when no dataset)
+  script:
+    - pip install jsonschema
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+      if [ -z "${DATASET_FILE}" ]; then
+        echo "No eval dataset present — validation skipped (evals run on fixtures)"
+        echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/eval-dataset-validation.json"
+        exit 0
+      fi
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/validate_eval_dataset.py" \
+        --dataset "${DATASET_FILE}" \
+        --schema "${GAIPS_MATERIALS_DIR}/evals/eval-dataset.schema.json" \
+        --report "${REPORTS_DIR}/eval-dataset-validation.json"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/eval-dataset-validation.json"
+    expire_in: 7 days
+
+dataset-sign:
+  stage: model-integrity
+  # Sign only AFTER scan + redaction + schema validation — attest clean, redacted,
+  # on-contract data (signs the redacted bytes, never the raw download).
+  needs: ["eval-dataset-validate"]
+  allow_failure: true   # skips gracefully when no dataset is present
+  # aud "sigstore" is required by Fulcio for keyless signing (same as model-sign).
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: "sigstore"
+  script:
+    - mkdir -p "${EVIDENCE_DIR}/dataset-input"
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+      if [ -z "${DATASET_FILE}" ]; then
+        echo "No dataset file present — signing skipped"
+        exit 0
+      fi
+      echo "Signing dataset: ${DATASET_FILE}"
+    - |
+      # Install cosign (Go binary, not on PyPI) — checksum-verified, as elsewhere.
+      curl -sSfL \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+        -o /tmp/cosign-linux-amd64
+      curl -sSfL \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" \
+        -o /tmp/cosign_checksums.txt
+      grep -E "^[0-9a-f]{64}  cosign-linux-amd64$" /tmp/cosign_checksums.txt \
+        | (cd /tmp && sha256sum --check --strict)
+      install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
+        ! -name "dataset.sig" ! -name "dataset.pem" | head -1)
+      if [ -n "${SIGSTORE_ID_TOKEN}" ]; then
+        # SIGSTORE_ID_TOKEN is set by id_tokens above; cosign reads it automatically
+        cosign sign-blob \
+          --output-signature "${EVIDENCE_DIR}/dataset-input/dataset.sig" \
+          --output-certificate "${EVIDENCE_DIR}/dataset-input/dataset.pem" \
+          "${DATASET_FILE}"
+        echo "Dataset signed via Sigstore keyless"
+      else
+        echo "SIGSTORE_ID_TOKEN not available — dataset unsigned (id_tokens requires GitLab 15.7+)"
+      fi
+  artifacts:
+    paths:
+      - "${EVIDENCE_DIR}/dataset-input/dataset.sig"
+      - "${EVIDENCE_DIR}/dataset-input/dataset.pem"
+    expire_in: 90 days
+
 artifact-signing-gate:
   stage: model-integrity
-  needs: ["signature-verification", "tamper-verification", "modelscan", "hf-artifact-scan"]
+  needs: ["signature-verification", "tamper-verification", "modelscan", "modelfile-audit", "clamav-scan", "hf-artifact-scan", "dataset-scan", "eval-dataset-validate"]
   allow_failure: true
   script:
     - source "${EVIDENCE_DIR}/integrity.env"
@@ -953,12 +1434,91 @@ guardrail-regression:
       - "${REPORTS_DIR}/guardrail-regression.json"
     expire_in: 7 days
 
+# Model/behaviour drift: compare this run's eval metrics against the committed
+# baseline (evals/eval-baseline.json). Same eval set, so a metric moving beyond
+# the threshold means the model or its guardrails regressed between runs.
+model-drift-detection:
+  stage: guardrail
+  needs:
+    - rag-smoke-eval
+    - promptfoo-eval
+    - garak-scan
+    - giskard-scan
+    - inspect-ai-eval
+    - pyrit-scan
+    - guardrail-regression
+  # Report producer (never blocks) — the hard gate is `drift-gate`, placed after
+  # the BOM so a drifted run still yields a signed BOM that RECORDS the drift.
+  allow_failure: true
+  variables:
+    DRIFT_THRESHOLD: "0.10"   # absolute metric movement that flags drift
+  script:
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      BASELINE="${GAIPS_MATERIALS_DIR}/evals/eval-baseline.json"
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/detect_model_drift.py" \
+        --reports "${REPORTS_DIR}" \
+        --baseline "${BASELINE}" \
+        --out "${REPORTS_DIR}/model-drift.json" \
+        --threshold "${DRIFT_THRESHOLD}"
+    - |
+      # If this run seeded a baseline (none existed), surface it for the maintainer to commit.
+      if [ -f "${REPORTS_DIR}/eval-baseline.seed.json" ]; then
+        echo "Baseline seeded — commit ${REPORTS_DIR}/eval-baseline.seed.json to evals/eval-baseline.json"
+      fi
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/model-drift.json"
+      - "${REPORTS_DIR}/eval-baseline.seed.json"
+    expire_in: 30 days
+
+# Auto-commit the seeded drift baseline back to the repo on the FIRST run (when
+# none exists), so drift detection activates without a manual commit. Default
+# branch only; never overwrites an existing baseline; skips cleanly if no push
+# token is configured. Requires GITLAB_PUSH_TOKEN (Project Access Token, scope
+# write_repository) as a masked CI/CD variable, and write access to the branch.
+model-baseline-commit:
+  stage: guardrail
+  needs: ["model-drift-detection"]
+  allow_failure: true   # a failed auto-commit must never break the build
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git
+  script:
+    - |
+      SEED="${REPORTS_DIR}/eval-baseline.seed.json"
+      DEST="${GAIPS_MATERIALS_DIR}/evals/eval-baseline.json"
+      if [ ! -f "${SEED}" ]; then
+        echo "No baseline seeded this run — nothing to commit"; exit 0
+      fi
+      if [ -f "${DEST}" ]; then
+        echo "Baseline already present at ${DEST} — not overwriting"; exit 0
+      fi
+      if [ -z "${GITLAB_PUSH_TOKEN}" ]; then
+        echo "GITLAB_PUSH_TOKEN not set — auto-commit disabled."
+        echo "Commit ${SEED} → ${DEST} manually to activate drift detection."
+        exit 0
+      fi
+      cp "${SEED}" "${DEST}"
+      git config user.email "gaips-ci@${CI_SERVER_HOST}"
+      git config user.name "GAIPS CI"
+      git add "${DEST}"
+      git commit -m "ci: seed eval drift baseline [skip ci]"
+      # ci.skip + [skip ci] both prevent this push from triggering a new pipeline.
+      git push -o ci.skip \
+        "https://oauth2:${GITLAB_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
+        "HEAD:${CI_DEFAULT_BRANCH}"
+      echo "Committed eval-baseline.json → ${CI_DEFAULT_BRANCH} (drift detection now active)"
+
 # ─── EVIDENCE ────────────────────────────────────────────────────────────────
 
 evidence-summary:
   stage: evidence
   needs:
     - semgrep-sast
+    - secret-detection
+    - gitleaks-scan
     - pip-audit
     - pkg-integrity
     - conda-pkg-verify
@@ -967,8 +1527,12 @@ evidence-summary:
     - grype-scan
     - trivy-scan
     - modelscan
+    - modelfile-audit
+    - clamav-scan
     - hf-artifact-scan
     - model-digest
+    - dataset-download
+    - dataset-scan
     - tamper-verification
     - rag-smoke-eval
     - promptfoo-eval
@@ -1053,3 +1617,165 @@ model-signing-evidence:
       - "${EVIDENCE_DIR}/model-signing-evidence.sig"
       - "${EVIDENCE_DIR}/model-signing-evidence.pem"
     expire_in: 90 days
+
+# ─── AI BOM ──────────────────────────────────────────────────────────────────
+# Consolidates every prior element — software components, ML models (digests +
+# signatures + scan verdicts), datasets, and AI evaluation evidence — into one
+# CycloneDX 1.6 AI BOM, then signs it keyless. This is the pipeline's final
+# attestable inventory: the single document an auditor reads to see "all elements".
+
+ai-bom-assemble:
+  stage: ai-bom
+  # Direct needs because GitLab only downloads artifacts from jobs named here
+  # (artifact inheritance is not transitive through evidence-summary).
+  needs:
+    - setup
+    - syft-cyclonedx
+    - pip-audit
+    - model-digest
+    - model-sign
+    - modelfile-audit
+    - modelscan
+    - clamav-scan
+    - hf-artifact-scan
+    - dataset-download
+    - dataset-scan
+    - dataset-redact
+    - eval-dataset-validate
+    - dataset-sign
+    - garak-scan
+    - giskard-scan
+    - inspect-ai-eval
+    - promptfoo-eval
+    - pyrit-scan
+    - guardrail-regression
+    - rag-smoke-eval
+    - model-drift-detection
+    - evidence-summary
+  script:
+    - mkdir -p "${SBOM_DIR}"
+    - |
+      # Stamp the BOM with a UTC build timestamp (CI provides CI_PIPELINE_CREATED_AT;
+      # fall back to `date` so local runs still work). The model and dataset cosign
+      # signatures (model.sig / dataset.sig) are embedded into their components here;
+      # the BOM's OWN signature is applied downstream by ai-bom-sign (enveloped).
+      TS="${CI_PIPELINE_CREATED_AT:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/build_ai_bom.py" \
+        --sbom     "${SBOM_DIR}" \
+        --reports  "${REPORTS_DIR}" \
+        --evidence "${EVIDENCE_DIR}" \
+        --models   "${MODEL_DIR}" \
+        --timestamp "${TS}" \
+        --out      "${SBOM_DIR}/aibom.cyclonedx.json"
+  artifacts:
+    paths:
+      - "${SBOM_DIR}/aibom.cyclonedx.json"
+    expire_in: 90 days
+
+ai-bom-validate:
+  stage: ai-bom
+  image:
+    name: "${IMAGE_CYCLONEDX}"
+    entrypoint: [""]
+  before_script: []          # cyclonedx-cli image has no Python
+  needs: ["ai-bom-assemble"]
+  allow_failure: true        # advisory: a schema slip should not block delivery of the BOM artifact
+  script:
+    - |
+      # Hard-validate the AI BOM against the CycloneDX 1.6 JSON schema.
+      cyclonedx validate \
+        --input-file "${SBOM_DIR}/aibom.cyclonedx.json" \
+        --input-format json \
+        --input-version v1_6 \
+        --fail-on-errors
+    - |
+      # Emit an XML rendering — this is what ai-bom-sign signs (the CLI's
+      # enveloped signature is an XML Digital Signature embedded in the BOM).
+      cyclonedx convert \
+        --input-file "${SBOM_DIR}/aibom.cyclonedx.json" \
+        --output-file "${SBOM_DIR}/aibom.cyclonedx.xml" \
+        --output-format xml \
+        --output-version v1_6
+  artifacts:
+    paths:
+      - "${SBOM_DIR}/aibom.cyclonedx.xml"
+    expire_in: 90 days
+
+ai-bom-sign:
+  stage: ai-bom
+  image:
+    name: "${IMAGE_CYCLONEDX}"
+    entrypoint: [""]
+  before_script: []          # cyclonedx-cli image has no Python
+  needs: ["ai-bom-validate"]
+  allow_failure: true        # advisory: signing failure should not block BOM delivery
+  script:
+    - |
+      XML="${SBOM_DIR}/aibom.cyclonedx.xml"
+      if [ ! -f "${XML}" ]; then
+        echo "No XML BOM present (ai-bom-validate skipped) — signing skipped"
+        exit 0
+      fi
+    - |
+      # Obtain the RSA signing key. Preferred: a STABLE key from CI/CD variables
+      # (CYCLONEDX_SIGNING_KEY + CYCLONEDX_SIGNING_PUB, PEM) so verifiers can trust
+      # one signer identity across runs. Fallback: an ephemeral keypair — the
+      # signature verifies within this run only, not against a persistent identity.
+      if [ -n "${CYCLONEDX_SIGNING_KEY}" ]; then
+        printf '%s' "${CYCLONEDX_SIGNING_KEY}" > "${SBOM_DIR}/aibom-signing.key"
+        [ -n "${CYCLONEDX_SIGNING_PUB}" ] && \
+          printf '%s' "${CYCLONEDX_SIGNING_PUB}" > "${SBOM_DIR}/aibom-signing.pub"
+        echo "Using configured CYCLONEDX_SIGNING_KEY (stable signer identity)"
+      else
+        echo "CYCLONEDX_SIGNING_KEY not set — generating EPHEMERAL keypair (intra-run verification only)"
+        cyclonedx keygen \
+          --private-key-file "${SBOM_DIR}/aibom-signing.key" \
+          --public-key-file "${SBOM_DIR}/aibom-signing.pub"
+      fi
+    - |
+      # Native CycloneDX enveloped signature — embedded directly in the BOM,
+      # verifies as-is with `cyclonedx verify all` (no canonical reconstruction).
+      cyclonedx sign bom "${SBOM_DIR}/aibom.cyclonedx.xml" \
+        --key-file "${SBOM_DIR}/aibom-signing.key"
+    - |
+      # Prove the embedded signature round-trips before publishing.
+      if [ -f "${SBOM_DIR}/aibom-signing.pub" ]; then
+        cyclonedx verify all "${SBOM_DIR}/aibom.cyclonedx.xml" \
+          --key-file "${SBOM_DIR}/aibom-signing.pub"
+        echo "AI BOM enveloped signature verified"
+      else
+        echo "No public key available (CYCLONEDX_SIGNING_PUB unset) — skipping in-job verification"
+      fi
+    - rm -f "${SBOM_DIR}/aibom-signing.key"   # never publish the private key
+  artifacts:
+    paths:
+      - "${SBOM_DIR}/aibom.cyclonedx.xml"     # now carries the enveloped signature
+      - "${SBOM_DIR}/aibom-signing.pub"       # public key for offline verification
+    expire_in: 90 days
+
+# Hard gate on model drift — runs LAST, after the BOM is built and signed, so a
+# drifted run still produces a signed BOM that records the drift. Fails the
+# pipeline when drift is detected; passes on a clean run, a seeded baseline, or
+# when drift detection was skipped (no metrics).
+drift-gate:
+  stage: ai-bom
+  needs: ["model-drift-detection", "ai-bom-sign"]
+  before_script: []          # stdlib python only
+  allow_failure: false       # this is the gate — drift fails the pipeline
+  script:
+    - |
+      python3 - <<'PYEOF'
+      import json, os, sys
+      path = os.path.join(os.environ["REPORTS_DIR"], "model-drift.json")
+      if not os.path.exists(path):
+          print("No drift report — gate passes (drift detection skipped)"); sys.exit(0)
+      d = json.load(open(path))
+      if d.get("skipped") or d.get("seeded"):
+          print("Drift gate: baseline seeded/skipped — pass"); sys.exit(0)
+      if d.get("drift_detected"):
+          drifted = ", ".join(x["metric"] for x in d.get("drifted", []))
+          print(f"DRIFT GATE FAILED — metric(s) beyond threshold: {drifted}")
+          print("Review reports/model-drift.json; update evals/eval-baseline.json if the new behaviour is intended.")
+          sys.exit(1)
+      print("Drift gate PASSED — eval metrics within threshold of baseline")
+      PYEOF

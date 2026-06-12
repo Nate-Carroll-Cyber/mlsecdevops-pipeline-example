@@ -41,5 +41,14 @@ markllm
 torch
 transformers
 
+# ── Eval-dataset contract validation (eval-dataset-validate) ─────────────────
+jsonschema
+
+# ── Data redaction — PII (dataset-redact); secrets handled by gitleaks binary ─
+presidio-analyzer
+presidio-anonymizer
+# NOTE: dataset-redact also runs `python -m spacy download en_core_web_sm`
+# (spaCy is pulled in transitively by presidio-analyzer).
+
 # ── Evidence reporting ───────────────────────────────────────────────────────
 jinja2

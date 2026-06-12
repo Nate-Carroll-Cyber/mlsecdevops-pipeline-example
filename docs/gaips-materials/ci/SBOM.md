@@ -22,6 +22,7 @@
 | `anchore/syft` | `v1.45.1` | `syft-cyclonedx`, `syft-spdx` | ✅ Pinned |
 | `anchore/grype` | `v0.114.0` | `grype-scan` | ✅ Pinned |
 | `aquasec/trivy` | `v0.71.0` | `trivy-scan` | ✅ Pinned |
+| `cyclonedx/cyclonedx-cli` | `0.32.0` | `ai-bom-validate`, `ai-bom-sign` | ✅ Pinned |
 | `node` | `20-slim` | `promptfoo-eval` | ⚠️ Unpinned minor |
 
 ---
@@ -30,7 +31,8 @@
 
 | Tool | Version | Source | Used by | Pin status |
 | --- | --- | --- | --- | --- |
-| `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `model-signing-evidence` | ✅ Pinned + checksum verified |
+| `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `model-signing-evidence`, `dataset-sign` | ✅ Pinned + checksum verified |
+| `gitleaks` | `8.30.1` | `github.com/gitleaks/gitleaks/releases` | `dataset-redact` | ✅ Pinned + checksum verified |
 | `promptfoo` | `0.121.15` | `npm install -g promptfoo` | `promptfoo-eval` | ✅ Pinned |
 
 ---
@@ -58,6 +60,10 @@ All packages below are installed fresh in each job container. None are pinned in
 | `torch` | — | `markllm-watermark-eval` | ⚠️ Unpinned | PyTorch (required by markllm) |
 | `transformers` | — | `markllm-watermark-eval` | ⚠️ Unpinned | Hugging Face Transformers (required by markllm) |
 | `pyrit` | — | `pyrit-scan` | ⚠️ Unpinned | Microsoft PyRIT adversarial red-teaming framework |
+| `jsonschema` | — | `eval-dataset-validate` | ⚠️ Unpinned | Draft-07 validation of eval dataset records against `evals/eval-dataset.schema.json` |
+| `presidio-analyzer` | — | `dataset-redact` | ⚠️ Unpinned | Microsoft Presidio PII detection (pulls in `spacy`) |
+| `presidio-anonymizer` | — | `dataset-redact` | ⚠️ Unpinned | Presidio PII redaction/anonymization |
+| `spacy` (`en_core_web_sm`) | — | `dataset-redact` | ⚠️ Unpinned | NLP model for Presidio; fetched via `python -m spacy download` |
 | `jinja2` | — | `evidence-summary` | ⚠️ Unpinned | Template rendering for evidence summary |
 | `pip` / `setuptools` / `wheel` | — | All Python jobs (before_script) | ⚠️ Unpinned | Upgraded to latest in every job before_script |
 

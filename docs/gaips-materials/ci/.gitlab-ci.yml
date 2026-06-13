@@ -326,6 +326,7 @@ gitleaks-scan:
     - |
       gitleaks detect \
         --source="${CI_PROJECT_DIR}" \
+        --config="${CI_PROJECT_DIR}/.gitleaks.toml" \
         --report-format=json \
         --report-path="${REPORTS_DIR}/gitleaks.json" \
         --redact \
@@ -344,6 +345,7 @@ gitleaks-scan:
       echo "gitleaks: ${LEAKS} potential secret(s) detected"
       [ "${GITLEAKS_EXIT:-0}" -eq 0 ] || { echo "Secrets detected — failing pipeline"; exit 1; }
   artifacts:
+    when: always
     paths:
       - "${REPORTS_DIR}/gitleaks.json"
       - "${REPORTS_DIR}/gitleaks.log"

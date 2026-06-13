@@ -58,6 +58,27 @@ variables:
   # dvc-verify. Without it, the job reports tracked-vs-workspace status only; with
   # no .dvc/ directory it skips entirely.
   DVC_REMOTE_URL: ""
+  # ── Image signing — closes the verify-at-deploy loop on the IMAGE side ────────
+  # The workload container is built+pushed by the app's own pipeline; image-sign
+  # applies a Cosign KEYLESS signature to it so the Kyverno admission policy
+  # (kyverno-verify-image-signatures.yaml) has a real signature to verify. The CI
+  # OIDC identity is what Fulcio certifies, and it matches Kyverno's gitlab regex
+  # branch. Blank = image-sign skips cleanly (until the image exists, the pipeline
+  # runs unchanged). Use a DIGEST ref (repo@sha256:…) so the signed bytes can't
+  # drift from the running tag; a tag ref also works (cosign resolves the digest).
+  IMAGE_REF: ""                     # e.g. ghcr.io/example/gaips-rag-app@sha256:…
+  # Registry auth for cosign to push the signature next to the image. Leave unset
+  # for an anonymous-pull-but-token-push GitLab registry (uses CI_REGISTRY creds).
+  IMAGE_REGISTRY_HOST: ""           # e.g. ghcr.io  (blank → try ${CI_REGISTRY})
+  IMAGE_REGISTRY_USER: ""           # blank → ${CI_REGISTRY_USER}
+  IMAGE_REGISTRY_PASSWORD: ""       # masked; blank → ${CI_REGISTRY_PASSWORD}
+  # ── Signed-artifact publish — feeds the Argo CD PreSync verifier (BLOB side) ──
+  # publish-signed-artifacts uploads the signed AI-BOM, its public key, and the
+  # signed dataset (+ model bundle, when present) to the GitLab Generic Package
+  # Registry. The PreSync hook's ARTIFACT_BASE_URL must point at this same
+  # package/version. Publishing uses CI_JOB_TOKEN — no extra secret needed.
+  EVIDENCE_PACKAGE_NAME: "gaips-evidence"
+  EVIDENCE_PACKAGE_VERSION: "${CI_COMMIT_REF_SLUG}"   # PreSync ARTIFACT_BASE_URL points here
 
 # ── Shared secure-install template (extend in Python jobs) ───────────────────
 # Applied by default to the python:3.11-slim image; override before_script in
@@ -126,6 +147,7 @@ stages:
   - guardrail
   - evidence
   - ai-bom
+  - deploy-prep
 
 # ─── SETUP ───────────────────────────────────────────────────────────────────
 
@@ -2074,3 +2096,146 @@ dependency-track-upload:
     paths:
       - "${REPORTS_DIR}/dependency-track.json"
     expire_in: 30 days
+
+# ─── DEPLOY PREP ───────────────────────────────────────────────────────────────
+# The two halves of the sign→verify-at-deploy loop are produced here:
+#   • image-sign               → Cosign signature on the workload image (Kyverno verifies it at admission)
+#   • publish-signed-artifacts → signed AI-BOM + dataset (+ model) pushed to a registry the Argo CD PreSync hook can fetch
+# Both skip cleanly when their inputs aren't configured, so the pipeline keeps
+# running unchanged until the image and an artifact store are wired in.
+
+# Cosign KEYLESS signature on the already-built workload image. This is the IMAGE
+# half of the loop: kyverno-verify-image-signatures.yaml admits a Pod only if its
+# image carries a signature from this CI identity. Without this job, flipping that
+# policy to Enforce would block every deploy — that mismatch is what this closes.
+image-sign:
+  stage: deploy-prep
+  needs: ["drift-gate"]
+  # Fulcio requires an OIDC token with aud "sigstore" for keyless signing — same
+  # mechanism model-sign / dataset-sign use. The resulting cert's identity is this
+  # GitLab job's SAN, which matches the Kyverno policy's gitlab issuer/subject regex.
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: "sigstore"
+  allow_failure: true   # signing failure must not block BOM/evidence delivery; Kyverno is the deploy-time gate
+  before_script: []     # cosign is a Go binary; no Python venv needed
+  script:
+    - |
+      if [ -z "${IMAGE_REF}" ]; then
+        echo "IMAGE_REF unset — image signing skipped (set it to the built+pushed workload image to enable)"
+        exit 0
+      fi
+    - apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
+    - |
+      # Install cosign — checksum-verified, identical to model-signing-install.
+      curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /tmp/cosign-linux-amd64
+      curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" -o /tmp/cosign_checksums.txt
+      grep -E "^[0-9a-f]{64}  cosign-linux-amd64$" /tmp/cosign_checksums.txt | (cd /tmp && sha256sum --check --strict)
+      install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
+      cosign version
+    - |
+      # Authenticate to the registry so cosign can PUSH the signature next to the
+      # image. Falls back to the GitLab-provided registry creds when the explicit
+      # IMAGE_REGISTRY_* vars are unset.
+      REG_HOST="${IMAGE_REGISTRY_HOST:-${CI_REGISTRY:-}}"
+      REG_USER="${IMAGE_REGISTRY_USER:-${CI_REGISTRY_USER:-}}"
+      REG_PASS="${IMAGE_REGISTRY_PASSWORD:-${CI_REGISTRY_PASSWORD:-}}"
+      if [ -n "${REG_HOST}" ] && [ -n "${REG_USER}" ] && [ -n "${REG_PASS}" ]; then
+        echo "${REG_PASS}" | cosign login "${REG_HOST}" -u "${REG_USER}" --password-stdin
+      else
+        echo "No registry credentials provided — relying on ambient auth (may fail to push the signature)"
+      fi
+    - |
+      # SIGSTORE_ID_TOKEN (from id_tokens) is read automatically by cosign for
+      # keyless signing. --yes suppresses the interactive transparency-log consent.
+      echo "Signing image: ${IMAGE_REF}"
+      COSIGN_YES=true cosign sign --yes "${IMAGE_REF}"
+    - |
+      # Confirm a signature exists and is logged in Rekor. Strict identity matching
+      # is Kyverno's job at admission; here we only assert "a signature from a
+      # gitlab/sigstore issuer is present", so a regexp keeps this self-check robust
+      # across GitLab.com vs self-managed instances.
+      cosign verify \
+        --certificate-identity-regexp ".+" \
+        --certificate-oidc-issuer-regexp "https://(gitlab|oauth2)\\..+" \
+        "${IMAGE_REF}" \
+        && echo "Image signature verified (present + Rekor-logged)" \
+        || echo "WARN: post-sign verify did not match — check the issuer regexp against your Fulcio cert"
+
+# Publish the signed evidence the Argo CD PreSync hook fetches at deploy time.
+# Uploads to the GitLab Generic Package Registry at
+#   ${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}/<file>
+# which is exactly where the PreSync ConfigMap's ARTIFACT_BASE_URL must point.
+# Normalises the dataset to a fixed filename (the cosign blob signature is over
+# the bytes, not the name) so the hook's BLOB_ARTIFACTS list is stable, and emits
+# an artifacts-manifest.txt recording precisely what was published.
+publish-signed-artifacts:
+  stage: deploy-prep
+  needs: ["ai-bom-sign", "dataset-sign", "model-sign"]
+  allow_failure: true   # advisory: a publish hiccup must not fail the run; re-publishable from artifacts
+  before_script: []
+  script:
+    - |
+      if [ -z "${CI_API_V4_URL:-}" ] || [ -z "${CI_PROJECT_ID:-}" ]; then
+        echo "Not running against a GitLab API (CI_API_V4_URL/CI_PROJECT_ID unset) — publish skipped"
+        exit 0
+      fi
+      apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null || true
+    - mkdir -p "${EVIDENCE_DIR}/publish"
+    - |
+      STAGE_DIR="${EVIDENCE_DIR}/publish"
+      : > "${STAGE_DIR}/artifacts-manifest.txt"
+      stage() {  # stage <src> <published-name>
+        [ -f "$1" ] || { echo "  (absent, skipped) $1"; return 0; }
+        cp "$1" "${STAGE_DIR}/$2"
+        echo "$2" >> "${STAGE_DIR}/artifacts-manifest.txt"
+        echo "  staged → $2"
+      }
+      # AI-BOM (enveloped XML signature) + its public verification key
+      stage "${SBOM_DIR}/aibom.cyclonedx.xml" "aibom.cyclonedx.xml"
+      stage "${SBOM_DIR}/aibom-signing.pub"   "aibom-signing.pub"
+      # Dataset cosign blob signature — normalise to dataset.dat|dataset.sig|dataset.pem
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+      [ -n "${DATASET_FILE}" ] && stage "${DATASET_FILE}" "dataset.dat"
+      stage "${EVIDENCE_DIR}/dataset-input/dataset.sig" "dataset.sig"
+      stage "${EVIDENCE_DIR}/dataset-input/dataset.pem" "dataset.pem"
+      # Model bundle (model_signing format) — only when the actual weights AND
+      # their model.sig are present in MODEL_DIR. NOTE: model-sign publishes only
+      # **/model.sig as artifacts, not the weights, so via `needs` alone this stays
+      # empty and the bundle is correctly skipped — a bundle without weights would
+      # fail `model_signing verify` at deploy. To publish a real bundle, have this
+      # job run in the same stage as a model-download step, or mount MODEL_DIR.
+      # The PreSync hook verifies this with `model_signing verify`, NOT cosign.
+      HAVE_WEIGHTS=0
+      for ext in pkl pt safetensors gguf bin h5 onnx; do
+        find "${MODEL_DIR}" -type f -name "*.${ext}" -print -quit 2>/dev/null | grep -q . && HAVE_WEIGHTS=1 && break
+      done
+      if [ "${HAVE_WEIGHTS}" -eq 1 ] && find "${MODEL_DIR}" -name "model.sig" -print -quit 2>/dev/null | grep -q .; then
+        tar -C "${MODEL_DIR}" -cf "${STAGE_DIR}/model-bundle.tar" .
+        echo "model-bundle.tar" >> "${STAGE_DIR}/artifacts-manifest.txt"
+        echo "  staged → model-bundle.tar (model_signing bundle of ${MODEL_DIR})"
+      else
+        echo "  (no weights+sig in ${MODEL_DIR}, skipped) model-bundle.tar"
+      fi
+      echo "── will publish ──"; cat "${STAGE_DIR}/artifacts-manifest.txt"
+    - |
+      STAGE_DIR="${EVIDENCE_DIR}/publish"
+      BASE="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}"
+      if [ ! -s "${STAGE_DIR}/artifacts-manifest.txt" ]; then
+        echo "Nothing signed to publish (no AI-BOM/dataset/model) — skipping upload"; exit 0
+      fi
+      while IFS= read -r f; do
+        echo "PUT ${BASE}/${f}"
+        curl -sSf --retry 3 \
+          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --upload-file "${STAGE_DIR}/${f}" \
+          "${BASE}/${f}"
+        echo "  uploaded ${f}"
+      done < "${STAGE_DIR}/artifacts-manifest.txt"
+      echo "Published signed artifacts to ${BASE}"
+      echo "→ Point the PreSync ConfigMap ARTIFACT_BASE_URL at: ${BASE}"
+  artifacts:
+    paths:
+      - "${EVIDENCE_DIR}/publish/artifacts-manifest.txt"
+    expire_in: 90 days

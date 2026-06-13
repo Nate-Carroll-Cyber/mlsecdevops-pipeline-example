@@ -4,10 +4,14 @@
 # enforces the CONTAINER IMAGE signature on every Pod create/update, so even an
 # out-of-band kubectl apply cannot schedule an unsigned image.
 #
-# ROLLOUT NOTE: validationFailureAction is Audit so a misconfigured identity
-# regex cannot block all deploys on day one. Confirm matches appear as expected
-# (kubectl get policyreport -A), then flip to Enforce to make this a hard gate —
-# that is what actually closes the verify-at-deploy loop. mutateDigest pins the
+# ROLLOUT NOTE: the CI `image-sign` job (.gitlab-ci.yml, deploy-prep stage) now
+# applies the Cosign keyless signature this policy verifies — so Enforce is finally
+# meaningful (before that job existed, flipping to Enforce blocked ALL deploys
+# because nothing signed the image). validationFailureAction stays Audit so a
+# misconfigured identity regex can't block deploys on day one. Confirm matches
+# appear as expected (kubectl get policyreport -A) AND that image-sign has run for
+# the deployed digest, then flip to Enforce to make this a hard gate — that is what
+# actually closes the verify-at-deploy loop on the image side. mutateDigest pins the
 # verified tag to its digest so the running image cannot drift from the signed one.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy

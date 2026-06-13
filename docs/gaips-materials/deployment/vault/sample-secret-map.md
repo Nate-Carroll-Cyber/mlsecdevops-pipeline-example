@@ -19,6 +19,17 @@ variables via a `reports: dotenv` artifact.
 | `secret/data/gaips/ci/dt-api-url` | `DT_API_URL` | `https://dtrack.example.invalid` | Read by CI role |
 | `secret/data/gaips/ci/dt-api-key` | `DT_API_KEY` | `fixture-dt-key-not-real` | Read by CI role |
 
+### Deploy-prep jobs — no Vault secret required
+
+`image-sign` signs the workload image with Cosign **keyless** (Fulcio OIDC via
+`id_tokens`), so no signing key is stored. To let cosign push the signature next
+to the image, set `IMAGE_REF` and registry creds as CI/CD variables
+(`IMAGE_REGISTRY_USER`/`IMAGE_REGISTRY_PASSWORD`, or rely on the GitLab-provided
+`CI_REGISTRY_USER`/`CI_REGISTRY_PASSWORD`). `publish-signed-artifacts` uploads to
+the Generic Package Registry using the built-in `CI_JOB_TOKEN` — also no stored
+secret. The Argo CD PreSync hook reads the published artifacts; point its
+`ARTIFACT_BASE_URL` at `…/packages/generic/${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}`.
+
 ## Model Provider Tokens — `secret/data/gaips/model-providers/*`
 
 | Secret Path | Purpose | Lab Value | Access |

@@ -659,8 +659,8 @@ syft-cyclonedx:
   allow_failure: true
   script:
     - mkdir -p "${SBOM_DIR}"
-    - syft dir:. -o cyclonedx-json="${SBOM_DIR}/sbom.cyclonedx.json"
-    - syft dir:. -o cyclonedx-xml="${SBOM_DIR}/sbom.cyclonedx.xml"
+    - /syft dir:. -o cyclonedx-json="${SBOM_DIR}/sbom.cyclonedx.json"
+    - /syft dir:. -o cyclonedx-xml="${SBOM_DIR}/sbom.cyclonedx.xml"
   artifacts:
     paths:
       - "${SBOM_DIR}/sbom.cyclonedx.json"
@@ -677,8 +677,8 @@ syft-spdx:
   allow_failure: true
   script:
     - mkdir -p "${SBOM_DIR}"
-    - syft dir:. -o spdx-json="${SBOM_DIR}/sbom.spdx.json"
-    - syft dir:. -o spdx-tag-value="${SBOM_DIR}/sbom.spdx"
+    - /syft dir:. -o spdx-json="${SBOM_DIR}/sbom.spdx.json"
+    - /syft dir:. -o spdx-tag-value="${SBOM_DIR}/sbom.spdx"
   artifacts:
     paths:
       - "${SBOM_DIR}/sbom.spdx.json"
@@ -734,8 +734,8 @@ grype-scan:
   needs: ["syft-cyclonedx"]
   script:
     - mkdir -p "${REPORTS_DIR}"
-    - grype sbom:"${SBOM_DIR}/sbom.cyclonedx.json" -o json > "${REPORTS_DIR}/grype.json"
-    - grype sbom:"${SBOM_DIR}/sbom.cyclonedx.json" -o table
+    - /grype sbom:"${SBOM_DIR}/sbom.cyclonedx.json" -o json > "${REPORTS_DIR}/grype.json"
+    - /grype sbom:"${SBOM_DIR}/sbom.cyclonedx.json" -o table
   artifacts:
     paths:
       - "${REPORTS_DIR}/grype.json"

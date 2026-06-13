@@ -3,6 +3,25 @@
 # Terraform in terraform/ automates every step below.
 # These are the equivalent manual Vault CLI commands for reference.
 #
+# ── 0. HCP Vault Dedicated / Vault Enterprise: select a namespace ────────────
+#
+# HCP Vault runs every mount/auth backend under a root namespace ("admin", or a
+# child you create like "admin/gaips"). Set it once for the CLI commands below
+# (Terraform reads var.vault_namespace; the CI jobs read VAULT_NAMESPACE):
+#
+#   export VAULT_ADDR="https://<cluster>.vault.<region>.hashicorp.cloud:8200"
+#   export VAULT_NAMESPACE="admin"        # or "admin/gaips"
+#
+# To use a child namespace, create it first (from the parent), then point the
+# provider / VAULT_NAMESPACE at the child:
+#
+#   VAULT_NAMESPACE="admin" vault namespace create gaips   # → "admin/gaips"
+#
+# Self-managed OSS Vault has no namespaces — leave VAULT_NAMESPACE unset.
+# NOTE: HCP Vault must be able to reach the GitLab JWKS endpoint (step 2) to
+# validate CI tokens, and your runners must be able to reach VAULT_ADDR (enable
+# the public endpoint for GitLab.com SaaS runners, or peer via HVN privately).
+#
 # ── 1. Enable the JWT auth backend ──────────────────────────────────────────
 #
 #   vault auth enable -path=jwt jwt

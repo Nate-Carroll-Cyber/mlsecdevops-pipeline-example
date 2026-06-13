@@ -14,3 +14,12 @@ services/sam-spade/data/
 # repo-rooted relative path; nuke any nested copies that get created.
 services/gateway/services/
 services/sam-spade/services/
+
+# Python virtualenvs and caches (e.g. services/graphrag-sidecar/.venv)
+.venv/
+**/.venv/
+__pycache__/
+*.py[cod]
+
+# Generated knowledge-graph output (regenerate with `graphify update .`)
+graphify-out/

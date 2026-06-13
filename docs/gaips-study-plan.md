@@ -21,11 +21,11 @@ Hands-on labs are backed by `docs/gaips-instructor-materials.md` and `docs/gaips
 
 - AWS Bedrock: managed foundation models, Bedrock Agents, Knowledge Bases, Guardrails, IAM, private networking, logging, and cloud governance.
 - Ollama: local model serving for low-cost labs, offline testing, local red teaming, and repeatable experiments.
-- OpenAI API and Agents SDK: hosted model workflows, agent tooling, guardrails, tracing, and evaluation.
+- OpenAI API, Python SDK, and Agents SDK: hosted model workflows, Responses API requests, agent tooling, guardrails, tracing, and evaluation.
 - Anthropic Claude API: alternate hosted model behavior for prompt, safety, and application security comparisons.
 - Amazon SageMaker Python SDK and Hugging Face Estimator: launching managed Hugging Face training jobs from Jupyter notebooks, reviewing IAM roles, S3 inputs/outputs, training scripts, metrics, and job-cost controls.
-- Hugging Face Transformers, Inference Endpoints, and Hub: open-weight model loading, model cards, adapters, private repositories, fine-grained tokens, 2FA, SSH/GPG workflows, SSO, Resource Groups, and deployment comparisons.
-- PyTorch: tensor/model fundamentals, local inference, fine-tuning mechanics, model artifact handling, and safety regression labs.
+- Hugging Face Transformers, Inference Endpoints, and Hub: `pip install transformers`, `pipeline`, `Trainer`, tokenizer/model/config loading, open-weight model review, model cards, adapters, private repositories, fine-grained tokens, 2FA, SSH/GPG workflows, SSO, Resource Groups, and deployment comparisons.
+- PyTorch: tensor/model fundamentals, local inference, fine-tuning mechanics, adapter workflows, trusted model loading, artifact integrity, GPU/resource risk, and safety regression labs.
 - Llama Guard 3: Meta safety classifier for prompt and response classification, MLCommons hazard taxonomy coverage, guardrail comparison, and false-positive/false-negative analysis.
 - vLLM or llama.cpp: self-hosted inference, endpoint hardening, performance tradeoffs, and local deployment security.
 - LiteLLM: model gateway, provider abstraction, usage logging, budget controls, routing, and policy enforcement.
@@ -34,13 +34,14 @@ Hands-on labs are backed by `docs/gaips-instructor-materials.md` and `docs/gaips
 
 ### Build Tools
 
-- LangGraph: stateful agents, tool routing, and controlled agent workflows.
+- LangChain: chains, LCEL/Runnables, retrievers, tools, callbacks, prompt templates, vector store integrations, and trace/log review.
+- LangGraph: stateful agents, tool routing, and controlled agent workflows in the LangChain ecosystem.
 - OpenAI Agents SDK: agent workflows, tool use, handoffs, tracing, and guardrails.
 - Cline: MCP client for practicing model-context-protocol tool integration, approval boundaries, and agent workflow review.
 - LlamaIndex: RAG pipelines, document ingestion, retrieval, and vector DB integration.
 - Chroma: simple local vector database for quick RAG labs.
 - Qdrant: production-style vector search, metadata filtering, and retrieval security testing.
-- Weaviate: production-style vector database, schema design, hybrid search, metadata filtering, multi-tenancy, module-backed vectorization, Q&A extraction, gRPC API review, and RAG isolation testing.
+- Weaviate: production-style vector database, schema design, hybrid search, metadata filtering, multi-tenancy, authentication, authorization/RBAC, module-backed vectorization, Q&A extraction, gRPC API review, and RAG isolation testing.
 - Pinecone: managed/serverless vector database, indexes, namespaces, metadata filtering, hybrid retrieval, multitenancy design, deletion protection, API-key handling, and managed RAG security comparison.
 - Kubernetes: container orchestration for AI applications, model services, vector databases, secrets, network policy, resource controls, and observability.
 - HashiCorp Vault: secrets management for API keys, model-provider credentials, dynamic secrets, audit logging, and secret injection patterns.
@@ -82,6 +83,7 @@ Outcome: Demonstrate the ability to design and assess agentic AI systems, includ
 Tasks:
 
 - Build a simple agent that can call at least three tools: search, file retrieval, and a harmless API action.
+- Review a LangChain or LangGraph implementation for prompt-template injection, retriever poisoning, unsafe tool binding, callback leakage, and trace redaction.
 - Implement explicit tool allowlists, scoped credentials, rate limits, and human approval gates for sensitive actions.
 - Trace agent execution from user request through planning, tool calls, intermediate outputs, and final response.
 - Test excessive agency, unsafe tool invocation, context poisoning, indirect prompt injection, and insecure delegation.
@@ -90,6 +92,7 @@ Tasks:
 Recommended tools:
 
 - LangGraph
+- LangChain
 - OpenAI Agents SDK
 - AWS Bedrock Agents
 - Cline
@@ -180,13 +183,13 @@ Tasks:
 
 - Deploy one local model endpoint with Ollama, vLLM, or llama.cpp.
 - Deploy or review one managed model workflow using AWS Bedrock.
-- Deploy or review one AI application stack on Kubernetes, including model gateway, backend API, vector database, and observability components.
+- Build or review Docker container images for the AI application components, then deploy or review the stack on Kubernetes as the orchestration layer, including model gateway, backend API, vector database, and observability components.
 - Harden model endpoints with authentication, TLS, rate limits, network restrictions, logging, and least-privilege access.
 - Apply Kubernetes controls such as namespaces, Secrets, NetworkPolicies, resource requests/limits, health checks, and admission or policy checks.
 - Review cloud IAM for model invocation, knowledge base access, log access, and deployment changes.
 - Review Hugging Face Hub access controls for private model/dataset/Space repositories, fine-grained user access tokens, 2FA, SSO, Resource Groups, Git over SSH, and GPG-signed commits.
 - Review HashiCorp Vault or an equivalent secrets manager for storage, access policy, audit logging, rotation, and runtime injection of model-provider and vector-database credentials.
-- Generate an SBOM, scan the image or filesystem, and sign the deployment artifact.
+- Generate an SBOM, scan Docker images and filesystems, sign deployment artifacts, and verify image provenance before Kubernetes deployment.
 - Evaluate abuse cases such as denial of wallet, unbounded context use, exposed model endpoints, and logging sensitive prompts.
 
 Recommended tools:
@@ -393,8 +396,8 @@ Capstone deliverables:
 ## Suggested Learning Sequence
 
 1. Foundations: Ollama, hosted APIs, prompt playground, and baseline model behavior tests.
-2. RAG: LlamaIndex, Chroma/Qdrant/Weaviate/Pinecone, Ragas, and poisoned document testing.
-3. Agents: LangGraph or OpenAI Agents SDK, tool permissions, tracing, and excessive agency testing.
+2. RAG: LlamaIndex or LangChain, Chroma/Qdrant/Weaviate/Pinecone, Ragas, and poisoned document testing.
+3. Agents: LangChain/LangGraph or OpenAI Agents SDK, tool permissions, tracing, and excessive agency testing.
 4. Security testing: garak, PyRIT, Promptfoo, and Giskard against the same app.
 5. Deployment: AWS Bedrock, local runtime hardening, Kubernetes, IAM, logging, SBOMs, scanning, and signing.
 6. MLOps: DVC, MLflow, Evidently, reproducibility, drift, and regression evaluation.
@@ -439,6 +442,7 @@ Capstone deliverables:
 - Evidently: https://docs.evidentlyai.com/
 - Open Policy Agent: https://www.openpolicyagent.org/docs/latest/
 - LlamaIndex: https://docs.llamaindex.ai/
+- LangChain: https://docs.langchain.com/
 - LangGraph: https://docs.langchain.com/langgraph/
 - OpenAI Agents SDK: https://openai.github.io/openai-agents-python/
 - Hugging Face PEFT: https://huggingface.co/docs/peft

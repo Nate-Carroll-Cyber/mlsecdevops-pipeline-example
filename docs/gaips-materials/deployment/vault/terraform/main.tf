@@ -10,7 +10,11 @@ terraform {
 
 provider "vault" {
   address = var.vault_addr
-  # Credentials via VAULT_TOKEN environment variable (never hardcode)
+  # HCP Vault Dedicated / Vault Enterprise: every mount lives under a root
+  # namespace ("admin", or a child like "admin/gaips"). Set var.vault_namespace
+  # so the mount + auth backend below are created there. Blank = OSS Vault (no
+  # namespaces). Credentials via VAULT_TOKEN environment variable (never hardcode).
+  namespace = var.vault_namespace
 }
 
 # ── KV v2 secret engine ──────────────────────────────────────────────────────

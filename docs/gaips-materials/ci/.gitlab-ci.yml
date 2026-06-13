@@ -14,6 +14,13 @@ variables:
   PIP_TRUSTED_HOST: "pypi.org files.pythonhosted.org"
   # Anaconda: strict channel priority forces all packages to come from conda-forge
   CONDA_CHANNEL: "conda-forge"
+  # ── Vault namespace — REQUIRED for HCP Vault Dedicated / Vault Enterprise ─────
+  # HCP Vault runs every mount under a root namespace ("admin", or a child like
+  # "admin/gaips"). Self-managed OSS Vault has no namespaces — leave this blank.
+  # Injected into the hvac clients (vault-secrets, tamper-verification). The KV
+  # mount path and policy paths (secret/data/gaips/...) are unchanged; they simply
+  # resolve INSIDE this namespace.
+  VAULT_NAMESPACE: ""               # e.g. "admin" or "admin/gaips" on HCP Vault
   # Override in project CI/CD settings (or fetch from Vault via vault-secrets job):
   # MODEL_ENDPOINT, MODEL_SIGNING_IDENTITY, SIGSTORE_OIDC_ISSUER
   # AI BOM enveloped signature (ai-bom-sign): set CYCLONEDX_SIGNING_KEY (RSA
@@ -36,6 +43,8 @@ variables:
   IMAGE_GRYPE: "anchore/grype:v0.114.0"
   IMAGE_TRIVY: "aquasec/trivy:v0.71.0"
   IMAGE_CYCLONEDX: "cyclonedx/cyclonedx-cli:0.32.0"   # AI BOM schema validation / format conversion
+  IMAGE_GITLEAKS: "gitleaks/gitleaks:v8.30.1"         # gitleaks-scan SAST job (matches GITLEAKS_VERSION binary)
+  IMAGE_CLAMAV: "clamav/clamav:1.4"                   # clamav-scan job — pinned off :latest (patch-floating line)
   PROMPTFOO_VERSION: "0.121.15"
   # ── Dataset download — Generic Package Registry ───────────────────────────────
   # Set these in GitLab Settings → CI/CD → Variables (or fetch from Vault).
@@ -196,7 +205,11 @@ vault-secrets:
       python3 - <<'PYEOF'
       import hvac, os, pathlib, sys
 
-      client = hvac.Client(url=os.environ["VAULT_ADDR"])
+      # namespace="" is harmless on OSS Vault; REQUIRED on HCP Vault / Enterprise.
+      client = hvac.Client(
+          url=os.environ["VAULT_ADDR"],
+          namespace=os.environ.get("VAULT_NAMESPACE") or None,
+      )
       jwt = os.environ.get("VAULT_ID_TOKEN") or os.environ.get("CI_JOB_JWT_V2", "")
       if not jwt:
           print("ERROR: no JWT available (VAULT_ID_TOKEN and CI_JOB_JWT_V2 both unset)")
@@ -311,7 +324,7 @@ secret-detection:
 gitleaks-scan:
   stage: sast
   image:
-    name: gitleaks/gitleaks:latest
+    name: "${IMAGE_GITLEAKS}"
     entrypoint: [""]
   before_script: []
   needs: ["setup"]
@@ -894,7 +907,11 @@ tamper-verification:
 
       # ── Vault-backed baseline (preferred) ───────────────────────────────────
       if vault_addr:
-          client = hvac.Client(url=vault_addr)
+          # namespace="" is harmless on OSS Vault; REQUIRED on HCP Vault / Enterprise.
+          client = hvac.Client(
+              url=vault_addr,
+              namespace=os.environ.get("VAULT_NAMESPACE") or None,
+          )
           jwt = os.environ.get("VAULT_ID_TOKEN") or os.environ.get("CI_JOB_JWT_V2", "")
           try:
               client.auth.jwt.jwt_login(role="gaips-ci", jwt=jwt)
@@ -1060,7 +1077,7 @@ modelfile-audit:
 
 clamav-scan:
   stage: model-integrity
-  image: clamav/clamav:latest
+  image: "${IMAGE_CLAMAV}"
   before_script: []          # clamav image has no Python — skip .python-secure
   needs: ["model-signing-install"]
   script:
@@ -2396,4 +2413,57 @@ publish-signed-artifacts:
   artifacts:
     paths:
       - "${EVIDENCE_DIR}/publish/artifacts-manifest.txt"
+    expire_in: 90 days
+
+# ─── METRICS DASHBOARD ───────────────────────────────────────────────────────
+# evidence-summary records WHICH artifacts were produced; these two jobs record
+# what they SAY and render it. metrics-normalize reads every report/, evidence/,
+# and sbom/ file (plus the GitLab pipeline/job API) into one normalised JSON; the
+# `pages` job turns that JSON into a self-contained static dashboard on GitLab
+# Pages. Both run last and never gate — a dashboard must survive partial input.
+
+# Collect every signal into one normalised document. No `needs:` on purpose: as a
+# deploy-prep (final-stage) job it downloads artifacts from ALL earlier-stage jobs
+# by default, so reports/, evidence/, and sbom/ arrive without a brittle 34-job
+# list. The normaliser skips any input that is absent or malformed.
+metrics-normalize:
+  stage: deploy-prep
+  allow_failure: true   # reporting only — never fail the pipeline on the dashboard
+  before_script: []
+  script:
+    - pip install requests   # only the GitLab-API block needs it; skips cleanly if absent
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      # GITLAB_API_TOKEN (a project/group access token with read_api) enables the
+      # operational block (pipeline/job duration, queue time, status by stage).
+      # Unset → that block skips cleanly; the report-derived metrics still render.
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/write_operational_metrics.py" \
+        --reports "${REPORTS_DIR}" \
+        --evidence "${EVIDENCE_DIR}" \
+        --sbom "${SBOM_DIR}" \
+        --out "${REPORTS_DIR}/operational-metrics.json" \
+        --gitlab-token-env "GITLAB_API_TOKEN"
+    - cat "${REPORTS_DIR}/operational-metrics.json"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/operational-metrics.json"
+    expire_in: 90 days
+
+# GitLab Pages: render the normalised JSON into public/index.html. The job MUST be
+# named `pages` and publish the `public/` directory for Pages to serve it.
+pages:
+  stage: deploy-prep
+  needs:
+    - job: metrics-normalize
+      artifacts: true
+  allow_failure: true
+  before_script: []
+  script:
+    - |
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/render_metrics_dashboard.py" \
+        --metrics "${REPORTS_DIR}/operational-metrics.json" \
+        --out-dir public
+  artifacts:
+    paths:
+      - public
     expire_in: 90 days

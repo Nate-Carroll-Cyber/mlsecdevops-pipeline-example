@@ -22,13 +22,13 @@ flowchart TD
       s1[semgrep · secret-detection · gitleaks<br/>pip-audit · pkg-integrity · conda-verify<br/>snyk-agent-scan · snyk-agent-scan-live ⟂sandbox⟂]
     end
     subgraph SBOM [sbom]
-      s2[syft-cyclonedx · syft-spdx]
+      s2[syft-cyclonedx · syft-spdx · dvc-verify]
     end
     subgraph VULN [vuln-scan]
       s3[grype-scan · trivy-scan]
     end
     subgraph MI [model-integrity]
-      s4[model digest/sign/verify · tamper · modelscan<br/>clamav · hf-scan · dataset scan→redact→validate→sign]
+      s4[model digest/sign/verify · tamper · modelfile-audit · modelscan<br/>clamav · hf-scan · dataset download→scan→redact→validate→sign<br/>great-expectations · ydata-profile]
       g{{artifact-signing-gate}}
       s4 --> g
     end
@@ -71,6 +71,9 @@ flowchart TD
 | --- | --- | --- | --- |
 | `python` | `3.11-slim` | All jobs (default) | ⚠️ Unpinned minor — use `python:3.11.x-slim` with digest |
 | `python` | `3.10-slim` | `markllm-watermark-eval`, `markllm-deps-audit` | ⚠️ Unpinned minor |
+| `registry.gitlab.com/security-products/secrets` | `4` | `secret-detection` | ✅ Pinned (major tag) — pin to a digest for full reproducibility |
+| `gitleaks/gitleaks` | `v8.30.1` | `gitleaks-scan` | ✅ Pinned via `IMAGE_GITLEAKS` (matches the `GITLEAKS_VERSION` binary; distinct from the checksum-pinned `gitleaks` binary in `dataset-redact`) |
+| `clamav/clamav` | `1.4` | `clamav-scan` | ✅ Pinned via `IMAGE_CLAMAV` (patch-floating line, like `python:3.11-slim`; append a digest for full reproducibility. Also `apt-get`-installed in `hf-artifact-scan`, `dataset-scan`) |
 | `semgrep/semgrep` | `v1.165.0` | `semgrep-sast` | ✅ Pinned |
 | `continuumio/miniconda3` | `26.3.2` | `conda-pkg-verify` | ✅ Pinned |
 | `anchore/syft` | `v1.45.1` | `syft-cyclonedx`, `syft-spdx` | ✅ Pinned |
@@ -86,10 +89,10 @@ flowchart TD
 
 | Tool | Version | Source | Used by | Pin status |
 | --- | --- | --- | --- | --- |
-| `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `model-signing-evidence`, `dataset-sign`, `image-sign` | ✅ Pinned + checksum verified |
+| `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `dataset-sign`, `model-signing-evidence`, `image-sign` (4 install sites) | ✅ Pinned + checksum verified |
 | `gitleaks` | `8.30.1` | `github.com/gitleaks/gitleaks/releases` | `dataset-redact` | ✅ Pinned + checksum verified |
 | `promptfoo` | `0.121.15` | `npm install -g promptfoo` | `promptfoo-eval` | ✅ Pinned |
-| `uv` / `uvx` | latest | `pip install uv` (PyPI) | `snyk-agent-scan`, `snyk-agent-scan-live` | ⚠️ Unpinned — pin `uv==x.y.z`; runs `snyk-agent-scan@latest` |
+| `uv` / `uvx` | latest | `pip install uv` (PyPI) | `snyk-agent-scan` (static) | ⚠️ Unpinned — pin `uv==x.y.z`; runs `snyk-agent-scan@latest`. The live job no longer uses `uv` at runtime (scanner pre-baked into `SANDBOX_IMAGE`) |
 | `podman` | runner-provided | sandbox runner image | `snyk-agent-scan-live` (rootless nested container) | ⚠️ Runner prerequisite — version set by the `sandbox`-tagged runner |
 
 ---
@@ -138,10 +141,11 @@ All packages below are installed fresh in each job container. None are pinned in
 
 | Component | Version | Notes |
 | --- | --- | --- |
-| HashiCorp Vault | ≥ 1.12 | Required for JWT auth backend and KV v2. Version set by your deployment. |
-| Vault Terraform provider (`hashicorp/vault`) | `~> 4.0` | Pinned in `deployment/vault/terraform/main.tf` |
+| HashiCorp Vault | ≥ 1.12 | Required for JWT auth backend and KV v2. Version set by your deployment. **HCP Vault Dedicated** (managed Vault Enterprise) is supported: set `VAULT_NAMESPACE` (`admin` or a child) on the `vault-secrets`/`tamper-verification` jobs — see `deployment/vault/sample-secret-map.md`. |
+| Vault namespace | — | Blank for OSS Vault; `admin` (or `admin/gaips`) for HCP Vault / Enterprise. Wired via the `VAULT_NAMESPACE` CI variable (hvac `namespace=`) and Terraform `var.vault_namespace` (provider `namespace`). Secret paths are unchanged — they resolve inside the namespace. |
+| Vault Terraform provider (`hashicorp/vault`) | `~> 4.0` | Pinned in `deployment/vault/terraform/main.tf`; provider `namespace` set from `var.vault_namespace`. |
 | Terraform | ≥ 1.6 | Required by `deployment/vault/terraform/main.tf` |
-| GitLab `id_tokens` | GitLab ≥ 15.7 | Required for OIDC JWT issuance (`VAULT_ID_TOKEN`, `SIGSTORE_ID_TOKEN`). Falls back to `CI_JOB_JWT_V2` on older instances (deprecated in GitLab 16.x). |
+| GitLab `id_tokens` | GitLab ≥ 15.7 | Required for OIDC JWT issuance (`VAULT_ID_TOKEN`, `SIGSTORE_ID_TOKEN`). Falls back to `CI_JOB_JWT_V2` on older instances (deprecated in GitLab 16.x). HCP Vault must be able to reach the GitLab JWKS endpoint to validate these tokens. |
 
 ---
 
@@ -149,10 +153,10 @@ All packages below are installed fresh in each job container. None are pinned in
 
 | Risk | Status | Notes |
 | --- | --- | --- |
-| `cosign` binary downloaded with no checksum verification | ✅ Fixed | Both install sites now download `cosign_checksums.txt` and verify via `sha256sum --check --strict` before installing |
+| `cosign` binary downloaded with no checksum verification | ✅ Fixed | All four install sites (`model-signing-install`, `dataset-sign`, `model-signing-evidence`, `image-sign`) download `cosign_checksums.txt` and verify via `sha256sum --check --strict` before installing |
 | `promptfoo` unpinned | ✅ Fixed | Pinned to `0.121.15` via `PROMPTFOO_VERSION` variable at top of CI file |
 | `torch` + `transformers` unaudited | ✅ Fixed | New `markllm-deps-audit` job runs `pip-audit` against `torch`, `transformers`, and `markllm` before `markllm-watermark-eval` |
-| Container images use `:latest` | ✅ Fixed | All images pinned via `IMAGE_*` variables at top of CI file: `semgrep/semgrep:v1.165.0`, `continuumio/miniconda3:26.3.2`, `anchore/syft:v1.45.1`, `anchore/grype:v0.114.0`, `aquasec/trivy:v0.71.0`. `python:3.11-slim` and `node:20-slim` remain unpinned at minor version. |
+| Container images use `:latest` | ✅ Fixed | All scanner images pinned via `IMAGE_*` variables at top of CI file: `semgrep/semgrep:v1.165.0`, `continuumio/miniconda3:26.3.2`, `anchore/syft:v1.45.1`, `anchore/grype:v0.114.0`, `aquasec/trivy:v0.71.0`, `cyclonedx/cyclonedx-cli:0.32.0`, **`gitleaks/gitleaks:v8.30.1`** (`IMAGE_GITLEAKS`), and **`clamav/clamav:1.4`** (`IMAGE_CLAMAV`). No job uses `:latest` anymore. `registry.gitlab.com/security-products/secrets:4` is pinned at a major tag; `python:3.11-slim`/`python:3.10-slim`/`node:20-slim` remain unpinned at minor version. **Remaining hardening:** append `@sha256:…` digests for byte-exact reproducibility. |
 | All pip packages unpinned | ✅ Structured | `ci/requirements-ci.in` created listing all pipeline packages. **Remaining action:** run `pip-compile --generate-hashes requirements-ci.in` on a Python 3.11-slim Linux container to produce `requirements-ci.txt`, commit it, then switch each CI job from inline `pip install` to `pip install -r ci/requirements-ci.txt` |
 | Verify-at-deploy loop half-wired (image unsigned; PreSync hook had nothing to fetch) | ✅ Fixed | `deploy-prep` stage added: `image-sign` (Cosign keyless → matches the Kyverno policy identity) and `publish-signed-artifacts` (signed AI-BOM + dataset → Generic Package Registry, the path the Argo CD PreSync hook fetches). PreSync hook corrected to verify the model with `model_signing` (not `cosign verify-blob`). **Remaining action:** set `IMAGE_REF`, point the PreSync `ARTIFACT_BASE_URL` at the package path, and flip Kyverno to `Enforce` once a signed digest is confirmed. |
 | Agent/MCP components unscanned | ✅ Fixed | `snyk-agent-scan` (static) scans the MCP config + skills; `snyk-agent-scan-live` runs the dangerous server-launching scan only manually, in a locked-down rootless sandbox container built from `ci/sandbox/Containerfile` (scanner pre-baked, so no runtime install in the egress-less jail). Requires masked `SNYK_TOKEN`. |

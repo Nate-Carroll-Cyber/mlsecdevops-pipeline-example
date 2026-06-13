@@ -3,6 +3,23 @@
 No real credentials are included in this fixture. Terraform in `terraform/` seeds
 all paths with placeholder values. Replace before any production use.
 
+## Self-managed Vault vs. HCP Vault Dedicated
+
+The integration works against either. **HCP Vault Dedicated** (HashiCorp's managed
+Vault, Vault Enterprise under the hood) differs from self-managed OSS Vault in one
+way that matters here: **namespaces**. HCP puts every mount under a root namespace
+(`admin`, or a child like `admin/gaips`), so clients must declare it:
+
+| Surface | Setting | Self-managed OSS | HCP Vault Dedicated |
+| --- | --- | --- | --- |
+| CI jobs (`vault-secrets`, `tamper-verification`) | `VAULT_NAMESPACE` CI/CD variable | leave blank | `admin` (or `admin/gaips`) |
+| `VAULT_ADDR` | cluster URL | your Vault URL | HCP cluster URL (public endpoint, or HVN-peered private) |
+| Terraform | `var.vault_namespace` | `""` | `admin` (or `admin/gaips`) |
+
+The secret **paths below are unchanged** — they simply resolve *inside* the
+namespace, so `gaips-policy.hcl` needs no edits. HCP Vault must also reach the
+GitLab JWKS endpoint to validate CI OIDC tokens (see `jwt-auth-config.hcl`).
+
 ## CI Secrets — `secret/data/gaips/ci/*`
 
 Fetched once per pipeline run by the `vault-secrets` job and injected as CI

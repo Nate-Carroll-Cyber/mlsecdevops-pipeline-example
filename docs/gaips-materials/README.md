@@ -63,9 +63,12 @@ Before conversion, verify the CSV contains only approved synthetic or sanitized 
 
 `ci/.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, prompt/eval config, and guardrail baselines.
 
+> **Full setup runbook:** [`SETUP.md`](SETUP.md) walks the entire path end to end — provisioning HCP Vault (or self-managed Vault) with Terraform, GitLab CI/CD variables, the first pipeline run, optional integrations (Dependency-Track, Snyk Agent Scan, HF/dataset scanning, DVC), and deploy-time Kyverno + Argo CD verification.
+> **CI/CD variable catalog:** [`ci/CI-VARIABLES.md`](ci/CI-VARIABLES.md) lists every variable the pipeline reads, its source (you / Vault / GitLab), masking, default, and what it gates. Terraform inputs: [`deployment/vault/terraform/terraform.tfvars.example`](deployment/vault/terraform/terraform.tfvars.example).
+
 The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, and `deploy-prep`. It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, agent/MCP supply-chain scanning (Snyk Agent Scan), Syft CycloneDX/SPDX, Grype, Trivy, ModelScan, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, Promptfoo, garak, Giskard, Inspect AI, MarkLLM watermark-readiness, PyRIT, guardrail-regression, model-drift detection, evidence, a consolidated CycloneDX 1.6 AI BOM artifact (also pushed to Dependency-Track), a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification.
 
-Before copying this CI file into a student lab repository, add or adapt `requirements.txt`, `models/`, `promptfooconfig.yaml`, `guardrails/baseline.json`, `scripts/rag_smoke_eval.py`, `scripts/pyrit_scan.py`, `scripts/guardrail_regression.py`, `scripts/evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, `scripts/detect_model_drift.py`, `evals/eval-dataset.schema.json`, and (after the first run seeds it) `evals/eval-baseline.json`. Configure endpoint, signing, and Hugging Face variables in GitLab CI/CD settings. Fixture files under `docs/gaips-materials/fixtures/` remain offline interpretation aids, not automatic CI pass-throughs.
+Before copying this CI file into a student lab repository, add or adapt `requirements.txt`, `models/`, `evals/promptfoo.yaml`, `guardrails/baseline.json`, `scripts/rag_smoke_eval.py`, `scripts/pyrit_scan.py`, `scripts/run_guardrail_regression.py`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, `scripts/detect_model_drift.py`, the eval/data-quality collectors (`scripts/collect_garak_report.py`, `scripts/collect_inspect_report.py`, `scripts/run_giskard_live.py`, `scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/dependency_track_upload.py`), `evals/eval-dataset.schema.json`, and (after the first run seeds it) `evals/eval-baseline.json`. Configure endpoint, signing, and Hugging Face variables in GitLab CI/CD settings. Fixture files under `docs/gaips-materials/fixtures/` remain offline interpretation aids, not automatic CI pass-throughs.
 
 ## Pipeline Walkthrough
 
@@ -83,13 +86,13 @@ flowchart TD
       sast_jobs[semgrep · secret-detection · gitleaks<br/>pip-audit · pkg-integrity · conda-verify<br/>snyk-agent-scan · snyk-agent-scan-live ⟂sandbox⟂]
     end
     subgraph SBOM [sbom]
-      sbom_jobs[syft-cyclonedx · syft-spdx]
+      sbom_jobs[syft-cyclonedx · syft-spdx · dvc-verify]
     end
     subgraph VULN [vuln-scan]
       vuln_jobs[grype-scan · trivy-scan]
     end
     subgraph MI [model-integrity]
-      mi_jobs[model-digest/sign/verify · tamper-verify<br/>modelscan · clamav · hf-scan<br/>dataset: scan→redact→validate→sign]
+      mi_jobs[model-digest/sign/verify · tamper-verify · modelfile-audit<br/>modelscan · clamav · hf-scan<br/>dataset: download→scan→redact→validate→sign<br/>great-expectations · ydata-profile]
       gate{{artifact-signing-gate}}
       mi_jobs --> gate
     end
@@ -130,7 +133,7 @@ flowchart TD
 | Job | What it does |
 | --- | --- |
 | `setup` | Installs Python dependencies, creates `evidence/`, `sbom/`, and `reports/` directories, stamps pipeline ID and commit SHA into `evidence/pipeline.env`, and records Git/CI version provenance (commit, `git describe`, tag, branch, dirty state) to `evidence/version-info.json` for traceability of every downstream artifact. |
-| `vault-secrets` | Authenticates to Vault using a GitLab OIDC JWT and fetches the CI secrets (`MODEL_ENDPOINT`, `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`, `CI_REGISTRY_TOKEN`, `DT_API_URL`, `DT_API_KEY`, `SNYK_TOKEN`) into a dotenv artifact injected as environment variables into all downstream jobs. Falls back to GitLab CI/CD variables if `VAULT_ADDR` is not set. |
+| `vault-secrets` | Authenticates to Vault using a GitLab OIDC JWT and fetches the CI secrets (`MODEL_ENDPOINT`, `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`, `CI_REGISTRY_TOKEN`, `DT_API_URL`, `DT_API_KEY`, `SNYK_TOKEN`) into a dotenv artifact injected as environment variables into all downstream jobs. Falls back to GitLab CI/CD variables if `VAULT_ADDR` is not set. Works against self-managed Vault or **HCP Vault Dedicated** — for HCP, set `VAULT_NAMESPACE` (`admin` or a child); see `deployment/vault/sample-secret-map.md`. |
 
 ### Stage 2 — SAST
 
@@ -172,14 +175,18 @@ This stage runs as a sequential chain that fans out into parallel checks before 
 | Job | What it does |
 | --- | --- |
 | `signature-verification` | Finds every `model.sig` produced by `model-sign` and calls `python -m model_signing verify sigstore` on each, validating the signature against `MODEL_SIGNING_IDENTITY` and `SIGSTORE_OIDC_ISSUER` from Vault. A failed verification fails the job. |
-| `tamper-verification` | Compares the current digest list against a stored baseline. On first run, seeds the baseline. On subsequent runs, any digest change prints a diff and fails. Baseline is stored in Vault (`secret/data/gaips/tamper-baseline/{project-slug}`) for permanent storage; falls back to a 90-day GitLab artifact when Vault is unavailable. |
-| `modelscan` | Runs ModelScan across `models/` to detect malicious serialization payloads (pickle exploits, unsafe operators). Fails immediately on any CRITICAL finding. |
-| `hf-artifact-scan` | Downloads each HuggingFace model listed in `HF_MODEL_IDS` and runs ModelScan against it. Skips cleanly if `HF_MODEL_IDS` is not set. |
-| `dataset-scan` → `dataset-redact` → `eval-dataset-validate` → `dataset-sign` | The downloaded training/eval data runs a four-step chain: **(1)** `dataset-scan` — ClamAV + structural scan (hard gate); **(2)** `dataset-redact` — strips secrets (gitleaks) and PII (Microsoft Presidio) **in place**, so confidential data never reaches signing/eval (report records counts only, never raw values). Fail-closed (`allow_failure: false`); after redacting, the job **hard-fails** if findings exceed `REDACT_MAX_SECRETS` (default `0` — any secret in training data fails the run) or `REDACT_MAX_PII` (default `-1` — disabled); **(3)** `eval-dataset-validate` — validates every record against `evals/eval-dataset.schema.json` (fails the run on off-contract data, gating the AI-eval stage); **(4)** `dataset-sign` — `cosign sign-blob` over the **redacted, validated** bytes (`SIGSTORE_ID_TOKEN`, audience `"sigstore"`) → `dataset.sig` / `dataset.pem`, giving data the same Sigstore provenance as models. Every step skips cleanly when no dataset is configured (labs run on built-in fixtures). |
+| `tamper-verification` | Compares the current digest list against a stored baseline. On first run, seeds the baseline. On subsequent runs, any digest change prints a diff and fails. Baseline is stored in Vault (`secret/data/gaips/tamper-baseline/{project-slug}`) for permanent storage; falls back to a 90-day GitLab artifact (plus a best-effort job cache) when Vault is unavailable. |
+| `modelscan` | Runs ModelScan across `models/` to detect malicious serialization payloads (pickle exploits, unsafe operators). Fails the job on any CRITICAL finding (`allow_failure: true`, so the gate — not this job — is the hard stop). |
+| `modelfile-audit` | SHA-256 hashes any Ollama `Modelfile` found under `models/` or one level below the repo root, recording digests to `evidence/modelfile-digests.txt` (separate file to avoid a write race with `model-digest`). Skips cleanly when none are present. |
+| `clamav-scan` | Runs ClamAV (`clamav/clamav` image, fresh signatures via `freshclam`) recursively across `models/`. Hard gate (`allow_failure: false`) — any infected file fails the pipeline. |
+| `hf-artifact-scan` | Downloads each HuggingFace model listed in `HF_MODEL_IDS` and runs ClamAV + ModelScan against it. Skips cleanly if `HF_MODEL_IDS` is not set. |
+| `dataset-download` → `dataset-scan` → `dataset-redact` → `eval-dataset-validate` → `dataset-sign` | The training/eval data runs a chain: **(0)** `dataset-download` — pulls `DATASET_FILENAME` from the Generic Package Registry and verifies `DATASET_EXPECTED_SHA256` (skips when unset); **(1)** `dataset-scan` — ClamAV + structural (JSON/JSONL) scan (hard gate); **(2)** `dataset-redact` — strips secrets (gitleaks) and PII (Microsoft Presidio) **in place**, so confidential data never reaches signing/eval (report records counts only, never raw values). Fail-closed (`allow_failure: false`); after redacting, the job **hard-fails** if findings exceed `REDACT_MAX_SECRETS` (default `0` — any secret in training data fails the run) or `REDACT_MAX_PII` (default `-1` — disabled); **(3)** `eval-dataset-validate` — validates every record against `evals/eval-dataset.schema.json` (fails the run on off-contract data, gating the AI-eval stage); **(4)** `dataset-sign` — `cosign sign-blob` over the **redacted, validated** bytes (`SIGSTORE_ID_TOKEN`, audience `"sigstore"`) → `dataset.sig` / `dataset.pem`, giving data the same Sigstore provenance as models. Every step skips cleanly when no dataset is configured (labs run on built-in fixtures). |
+
+The dataset content-quality jobs `great-expectations-validate` (null rates, ranges, uniqueness — soft gate) and `ydata-profile` (advisory auto-profile, never gates) also run in this stage on the redacted data; they are not gate inputs.
 
 **Gate:**
 
-**`artifact-signing-gate`** — Waits for all four parallel checks. Confirms `tamper_check_passed=true`. Nothing in the AI evaluation stage runs until this gate passes.
+**`artifact-signing-gate`** — Waits for all eight integrity checks (`signature-verification`, `tamper-verification`, `modelscan`, `modelfile-audit`, `clamav-scan`, `hf-artifact-scan`, `dataset-scan`, `eval-dataset-validate`). Confirms `tamper_check_passed=true`. Nothing in the AI evaluation stage runs until this gate passes.
 
 ### Stage 6 — AI Evaluation
 
@@ -192,6 +199,7 @@ All jobs run in parallel after the gate passes.
 | `garak-scan` | Probes the live model endpoint (from `MODEL_ENDPOINT`) with all Garak probe modules to test for jailbreaks, extraction, and unsafe outputs. |
 | `giskard-scan` | Runs Giskard's LLM scan against the live model for bias, hallucination, and prompt injection. |
 | `inspect-ai-eval` | Runs structured capability and safety evaluations using `inspect-ai`. Uses project task files if present; otherwise runs MMLU (knowledge), TruthfulQA (honesty), WMDP bio/chem/cyber (hazard refusal), and GDM in-house CTF (agent safety). |
+| `markllm-deps-audit` | Runs `pip-audit` against `torch`, `transformers`, and `markllm` (the heavy watermark stack) on `python:3.10-slim` before `markllm-watermark-eval`. Advisory (`allow_failure: true`). |
 | `markllm-watermark-eval` | Tests whether model outputs can be watermark-detected using MarkLLM. |
 | `pyrit-scan` | Runs Microsoft PyRIT adversarial probes against the model endpoint. |
 
@@ -202,6 +210,7 @@ All jobs run in parallel after the gate passes.
 | `guardrail-regression` | Waits for `promptfoo-eval` and `pyrit-scan`. Compares current results against a baseline to detect regressions — catches cases where a previously-blocked attack now succeeds. |
 | `model-drift-detection` | Extracts normalised eval metrics (Inspect score/pass-rate, garak/pyrit/RAG/guardrail pass-rates, Giskard high-finding count, Promptfoo pass-rate) and compares them to the committed baseline `evals/eval-baseline.json`. Any metric moving beyond `DRIFT_THRESHOLD` (default ±0.10) flags model/behaviour drift on the same eval set. Report producer only (`allow_failure: true`) — the enforcing gate is `drift-gate` in the `ai-bom` stage. On first run (no baseline) it seeds `eval-baseline.seed.json`. |
 | `model-baseline-commit` | **Automates baseline activation.** On the default branch, when a baseline was just seeded and none exists in the repo, commits `eval-baseline.seed.json` → `evals/eval-baseline.json` and pushes (with `[skip ci]` + `-o ci.skip`, so no pipeline loop). Requires `GITLAB_PUSH_TOKEN` (Project Access Token, scope `write_repository`); if unset, falls back to the manual artifact. Never overwrites an existing baseline. `allow_failure: true` — a failed auto-commit never breaks the build. |
+| `evidently-drift` | Data/feature drift on the **input** side (complements `model-drift-detection`, which watches eval *metrics*). Evidently's `DataDriftPreset` (PSI) compares a committed reference snapshot (`evals/dataset-reference.jsonl`) to the current dataset; TextEvals adds LLM-relevant text descriptors over prompt columns. Seeds the reference on first run. Soft gate (`allow_failure: true`); skips cleanly when no dataset is present. |
 
 ### Stage 8 — Evidence
 

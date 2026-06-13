@@ -19,14 +19,14 @@ By the end of the course, students will be able to:
 
 ## Core Tooling
 
-- Model platforms: AWS Bedrock, Amazon SageMaker Python SDK with the Hugging Face Estimator, Ollama, OpenAI API, Anthropic Claude API, Hugging Face Hub/Transformers/Inference Endpoints, PyTorch, Llama Guard 3, vLLM or llama.cpp, LiteLLM.
-- Application frameworks and clients: LangGraph, OpenAI Agents SDK, Cline as an MCP client, LlamaIndex.
+- Model platforms: AWS Bedrock, Amazon SageMaker Python SDK with the Hugging Face Estimator, Ollama, OpenAI API and Python SDK, Anthropic Claude API, Hugging Face Hub/Transformers/Inference Endpoints, PyTorch for local model loading/customization review, Llama Guard 3, vLLM or llama.cpp, LiteLLM.
+- Application frameworks and clients: LangChain, LangGraph, OpenAI Agents SDK, Cline as an MCP client, LlamaIndex.
 - Retrieval systems: Chroma, Qdrant, Weaviate, Pinecone, Weaviate `text2vec-transformers`, Weaviate `qna-transformers`, Weaviate gRPC, AWS EFS-backed Weaviate persistence, and AWS Bedrock Knowledge Bases.
 - Red-team tools: PyRIT, garak, Promptfoo, Giskard open source framework for testing models.
 - Evaluation tools: Ragas, Inspect AI, MLflow GenAI, Evidently, Llama Guard 3 classification results.
 - Pipeline and supply-chain tools: Semgrep, pip-audit, package-integrity checks, Syft with CycloneDX and SPDX SBOM outputs, Grype, Trivy, ModelScan, Hugging Face artifact scanning, Buttercup for automated vulnerability finding and patching, Cosign, Sigstore model-transparency/model-signing, model digest/signature/tamper gates, evidence bundle signing, and DVC.
 - Deployment tools: Docker, Kubernetes, kubectl, NetworkPolicy, admission/policy checks, HashiCorp Vault or equivalent secrets management, and cloud IAM.
-- Governance frameworks: OWASP LLM Top 10, MITRE ATLAS, NIST AI RMF, NIST GenAI Profile, Google SAIF.
+- Governance frameworks: OWASP LLM Top 10, OWASP Top 10 for Agentic Applications, MITRE ATLAS, NIST AI RMF, NIST GenAI Profile, Google SAIF.
 
 ## Capstone Thread
 
@@ -155,11 +155,13 @@ Topics:
 - Chunking and embedding.
 - Vector databases and similarity search.
 - Retrieval, reranking, grounding, and citations.
+- LangChain chains, retrievers, vector store integrations, tool binding, callbacks, and LCEL composition.
 - Local RAG vs managed knowledge bases.
 
 Lab:
 
-- Build a RAG workflow using LlamaIndex, Chroma or Qdrant, and Ollama.
+- Build a RAG workflow using LlamaIndex or LangChain, Chroma or Qdrant, and Ollama.
+- If using LangChain, identify the prompt template, retriever, document loader, vector store, chain/LCEL graph, callback handlers, and any LangSmith tracing configuration.
 - Extend or compare the workflow with Weaviate for schema design, hybrid search, metadata filtering, and isolation controls.
 - Extend or compare the workflow with Pinecone for managed/serverless indexes, namespaces, metadata filters, and API-key access patterns.
 - Review Weaviate modules including `text2vec-transformers` for vectorization and `qna-transformers` for answer extraction.
@@ -170,6 +172,7 @@ Lab:
 Tools:
 
 - LlamaIndex
+- LangChain
 - Ollama
 - Chroma, Qdrant, or Weaviate
 - Pinecone
@@ -266,19 +269,23 @@ Topics:
 - Multi-agent and delegated workflows.
 - Context management and protocol-level risk.
 - Human-in-the-loop control points.
+- OWASP Top 10 for Agentic Applications 2026: goal hijack, tool misuse, identity and privilege abuse, agentic supply chain, unexpected code execution, memory and context injection, insecure inter-agent communication, cascading failures, human-agent trust exploitation, and rogue agents.
 
 Lab:
 
 - Build a simple agent that can call at least three tools.
 - Review an MCP-client workflow with Cline or an equivalent MCP client where available.
 - Add tool allowlists, scoped credentials, and approval gates.
+- Map each agent tool, memory path, and approval boundary to the relevant OWASP Agentic Top 10 risks.
 
 Tools:
 
 - LangGraph or OpenAI Agents SDK
+- LangChain tool/function calling and callbacks
 - Cline or another MCP client
 - AWS Bedrock Agents
 - LiteLLM
+- OWASP Top 10 for Agentic Applications
 
 Deliverable:
 
@@ -293,12 +300,14 @@ Topics:
 - Context poisoning.
 - Insecure delegation.
 - Prompt injection through tools and retrieved content.
+- Agent goal hijacking, tool misuse, memory and context injection, human-agent trust exploitation, and rogue-agent behavior.
 - Audit logs and trace review.
 
 Lab:
 
 - Run adversarial tests against the agent.
 - Verify whether the agent can be tricked into unauthorized tool use or policy bypass.
+- Classify each adversarial result against OWASP Agentic Top 10 categories.
 
 Tools:
 
@@ -306,6 +315,7 @@ Tools:
 - Promptfoo
 - MLflow GenAI traces
 - Inspect AI
+- OWASP Top 10 for Agentic Applications
 
 Deliverable:
 
@@ -367,7 +377,8 @@ Topics:
 - Local model endpoints with Ollama, vLLM, or llama.cpp.
 - Managed platforms such as AWS Bedrock, Azure OpenAI, and Vertex AI.
 - Hugging Face Hub and Inference Endpoint access controls for private model, dataset, and Space repositories.
-- Kubernetes deployment patterns for AI apps, model gateways, vector databases, observability, and policy enforcement.
+- Docker image build and container hardening for AI apps, model gateways, vector databases, observability, and agent/tool services.
+- Kubernetes orchestration patterns for those containers, including workload identity, service discovery, scaling, rollout, network policy, and policy enforcement.
 - IAM, private networking, authentication, rate limits, secrets management, and logging.
 - Kubernetes Secrets, namespaces, NetworkPolicies, resource requests/limits, probes, ingress, and admission controls.
 - HashiCorp Vault policies, secret paths, audit logs, rotation, and runtime secret injection patterns.
@@ -379,7 +390,7 @@ Lab:
 
 - Review or deploy a model endpoint.
 - Harden it with authentication, network restrictions, logging controls, resource limits, and rate limits.
-- Review or deploy the lab stack on Kubernetes, then verify secrets, network policy, service exposure, and resource controls.
+- Review or build Docker images for the lab stack, deploy or review them under Kubernetes orchestration, then verify secrets, network policy, service exposure, rollout behavior, and resource controls.
 - Review HashiCorp Vault or an equivalent secrets manager when configured for model-provider, vector-database, or tool credentials.
 - Review Hugging Face Hub repository visibility, token scopes, org controls, signed commits, and scan results when Hugging Face is used.
 
@@ -486,6 +497,7 @@ Deliverable:
 Topics:
 
 - Combining STRIDE, OWASP LLM Top 10, MITRE ATLAS, and NIST AI RMF.
+- Mapping agent-specific findings to the OWASP Top 10 for Agentic Applications.
 - Source-to-sink thinking for AI systems.
 - Control mapping and residual risk.
 - Risk acceptance and remediation planning.
@@ -498,6 +510,7 @@ Lab:
 Tools:
 
 - OWASP LLM Top 10
+- OWASP Top 10 for Agentic Applications
 - MITRE ATLAS
 - NIST AI RMF
 - Google SAIF

@@ -2,6 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { sanitizePrompt } from '@counter-spy/backend-shared/security/sanitizer.js';
 
+const fakeAwsKey = `AKIA${'1234567890ABCDEF'}`;
+const fakeLlmKeySuffix = '1234567890abcdef1234567890abcdef';
+
 test('allows a normal prompt without redactions', () => {
   const result = sanitizePrompt('Summarize the purpose of an incident response runbook.');
 
@@ -57,7 +60,7 @@ test('detects custom cipher and acrostic secret instructions', () => {
 });
 
 test('fails closed on high-risk secret material', () => {
-  const result = sanitizePrompt('Here is a key: AKIA1234567890ABCDEF');
+  const result = sanitizePrompt(`Here is a key: ${fakeAwsKey}`);
 
   assert.equal(result.verdict, 'ADVERSARIAL');
   assert(result.redactions.includes('AWS_KEY'));
@@ -77,10 +80,10 @@ test('flags canary token exfiltration with operational alert label', () => {
 
 test('redacts bare LLM API keys before routing', () => {
   const variants = [
-    'sk_1234567890abcdef1234567890abcdef',
-    'sk-1234567890abcdef1234567890abcdef',
-    'sk-proj-1234567890abcdef1234567890abcdef',
-    'sk-svcacct-1234567890abcdef1234567890abcdef',
+    `sk_${fakeLlmKeySuffix}`,
+    `sk-${fakeLlmKeySuffix}`,
+    `sk-proj-${fakeLlmKeySuffix}`,
+    `sk-svcacct-${fakeLlmKeySuffix}`,
   ];
 
   for (const key of variants) {

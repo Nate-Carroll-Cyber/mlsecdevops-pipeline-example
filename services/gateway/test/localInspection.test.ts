@@ -18,6 +18,8 @@ const {
   getInstructionMatchReasons,
 } = await import('../src/server.ts');
 
+const fakeAwsKey = `AKIA${'1234567890ABCDEF'}`;
+
 test('OpenAI-compatible endpoint resolver keeps LM Studio on chat completions', () => {
   assert.equal(
     getOpenAiCompatibleEndpoint('http://192.168.0.183:1234/v1'),
@@ -91,9 +93,8 @@ test('instruction match reasons mirror semantic classifier thresholds', () => {
 });
 
 test('local inspection still identifies local adversarial prompts before passthrough', () => {
-  const sanitization = sanitizePrompt('Here is a key: AKIA1234567890ABCDEF');
+  const sanitization = sanitizePrompt(`Here is a key: ${fakeAwsKey}`);
 
   assert.equal(sanitization.verdict, 'ADVERSARIAL');
   assert(sanitization.detectionFlags.includes('AWS_KEY'));
 });
-

@@ -14,6 +14,8 @@ import { sanitizeOutput } from '@counter-spy/backend-shared/security/sanitizer.j
 import { assertEgressAllowed } from '@counter-spy/backend-shared/security/urlGuard.js';
 import { createRateLimiter } from '@counter-spy/backend-shared/middleware/rateLimit.js';
 
+const fakeAwsKey = `AKIA${'IOSFODNN7EXAMPLE'}`;
+
 // --- sanitizeOutput ---------------------------------------------------------
 
 test('sanitizeOutput passes clean model text through untouched', () => {
@@ -34,7 +36,7 @@ test('sanitizeOutput redacts PII echoed back by the responder', () => {
 });
 
 test('sanitizeOutput marks credential/secret leaks as high risk', () => {
-  const result = sanitizeOutput('Here is the key: AKIAIOSFODNN7EXAMPLE for your convenience.');
+  const result = sanitizeOutput(`Here is the key: ${fakeAwsKey} for your convenience.`);
   assert.equal(result.tripped, true);
   assert.equal(result.highRiskLeak, true);
   assert.ok(result.detectionFlags.includes('OUTPUT_HIGH_RISK_LEAK'));
@@ -127,4 +129,3 @@ test('createRateLimiter is a no-op when max is 0', () => {
   }
   assert.equal(passed, 50);
 });
-

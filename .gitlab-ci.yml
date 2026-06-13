@@ -39,8 +39,8 @@ variables:
   GITLEAKS_VERSION: "8.30.1"          # dataset-redact secret scan (no 'v' in tarball name)
   IMAGE_SEMGREP: "semgrep/semgrep:latest"
   IMAGE_MINICONDA: "continuumio/miniconda3:26.3.2"
-  IMAGE_SYFT: "anchore/syft:v1.45.1"
-  IMAGE_GRYPE: "anchore/grype:v0.114.0"
+  IMAGE_SYFT: "anchore/syft:v1.45.1-debug"
+  IMAGE_GRYPE: "anchore/grype:v0.114.0-debug"
   IMAGE_TRIVY: "aquasec/trivy:latest"
   IMAGE_CYCLONEDX: "cyclonedx/cyclonedx-cli:0.32.0"   # AI BOM schema validation / format conversion
   IMAGE_GITLEAKS: "zricethezav/gitleaks:latest"       # gitleaks-scan SAST job image
@@ -259,14 +259,13 @@ vault-secrets:
 
 semgrep-sast:
   stage: sast
-  image: "${IMAGE_SEMGREP}"
   needs: ["setup"]
-  before_script: []          # semgrep image has no Python — skip .python-secure
   script:
+    - pip install semgrep
     - mkdir -p "${REPORTS_DIR}"
     # `semgrep scan` runs a tokenless rules-based scan; `semgrep ci` expects a
     # SEMGREP_APP_TOKEN and the managed-scan workflow.
-    - semgrep scan --config=auto --json --output "${REPORTS_DIR}/semgrep.json"
+    - semgrep scan --config=auto --json --output "${REPORTS_DIR}/semgrep.json" .
   artifacts:
     reports:
       sast: "${REPORTS_DIR}/semgrep.json"
@@ -745,7 +744,9 @@ grype-scan:
 
 trivy-scan:
   stage: vuln-scan
-  image: "${IMAGE_TRIVY}"
+  image:
+    name: "${IMAGE_TRIVY}"
+    entrypoint: [""]
   before_script: []          # trivy image has no Python
   needs: ["setup", "vault-secrets"]
   allow_failure: true

@@ -293,23 +293,17 @@ secret-detection:
       # Copy to REPORTS_DIR so evidence-summary can pick it up alongside other reports
       cp gl-secret-detection-report.json "${REPORTS_DIR}/secret-detection.json" 2>/dev/null || true
     - |
-      python3 - <<'PYEOF'
-      import json, os, sys
-      report_path = "gl-secret-detection-report.json"
-      if not os.path.exists(report_path):
-          print("No secret detection report produced — skipping summary")
-          sys.exit(0)
-      data = json.load(open(report_path))
-      vulns = data.get("vulnerabilities", [])
-      by_severity = {}
-      for v in vulns:
-          sev = v.get("severity", "Unknown")
-          by_severity[sev] = by_severity.get(sev, 0) + 1
-      print(f"Secret detection: {len(vulns)} finding(s) — {by_severity}")
-      if any(v.get("severity") == "Critical" for v in vulns):
-          print("Critical secrets found — failing pipeline")
-          sys.exit(1)
-      PYEOF
+      if [ ! -f gl-secret-detection-report.json ]; then
+        echo "No secret detection report produced — skipping summary"
+        exit 0
+      fi
+      FINDINGS=$(grep -c '"severity"' gl-secret-detection-report.json 2>/dev/null || echo 0)
+      CRITICAL=$(grep -c '"severity"[[:space:]]*:[[:space:]]*"Critical"' gl-secret-detection-report.json 2>/dev/null || echo 0)
+      echo "Secret detection: ${FINDINGS} finding(s); critical=${CRITICAL}"
+      if [ "${CRITICAL}" -gt 0 ]; then
+        echo "Critical secrets found — failing pipeline"
+        exit 1
+      fi
   artifacts:
     reports:
       secret_detection: gl-secret-detection-report.json
@@ -783,6 +777,7 @@ model-signing-install:
   script:
     - pip install model-signing sigstore
     - python -c "import model_signing; print('model-signing', model_signing.__version__)"
+    - apt-get update -qq && apt-get install -y -qq curl ca-certificates
     # cosign is a Go binary — not available on PyPI
     - |
       COSIGN_VERSION="${COSIGN_VERSION}"

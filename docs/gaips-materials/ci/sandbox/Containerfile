@@ -1,0 +1,46 @@
+# Pre-baked sandbox image for the `snyk-agent-scan-live` CI job.
+#
+# Why a dedicated image: the live scan launches MCP servers
+# (--dangerously-run-mcp-servers) and therefore runs in a locked-down,
+# EGRESS-LESS (--network none) rootless container. Installing the scanner at
+# RUNTIME would need network — so it is baked in here at BUILD time instead.
+# The running container needs no package index, no uv cache mount, and no
+# --offline juggling: the `snyk-agent-scan` console script is already on PATH.
+#
+# Build + publish to a registry your `sandbox` runner can pull:
+#   podman build \
+#     --build-arg AGENT_SCAN_VERSION=<release-tag> \
+#     -t registry.example.com/gaips/agent-scan-sandbox:<tag> \
+#     -f docs/gaips-materials/ci/sandbox/Containerfile docs/gaips-materials/ci/sandbox
+#   podman push registry.example.com/gaips/agent-scan-sandbox:<tag>
+# Then set SANDBOX_IMAGE to that ref in the snyk-agent-scan-live job.
+#
+# NOTE: this image contains ONLY the scanner. For *real* live tool
+# introspection, the MCP servers in your config must be runnable here too —
+# add their runtimes/modules below (the lab fixture's `gaips_*` modules are not
+# installed, so those servers fail to start, which is the contained, expected
+# outcome). Keep this image minimal: every package added is reachable by an
+# adversarial MCP server you chose to launch.
+
+FROM python:3.11-slim
+
+# Pin the scanner to a real release tag at build time. `latest` is the default
+# only so the image builds out-of-the-box; override --build-arg for production.
+ARG AGENT_SCAN_VERSION=latest
+
+# Install the scanner into system site-packages so its console script lands in
+# /usr/local/bin and is on PATH for any (including non-root) runtime user.
+RUN set -eux; \
+    pip install --no-cache-dir uv; \
+    if [ "$AGENT_SCAN_VERSION" = "latest" ]; then \
+      pip install --no-cache-dir snyk-agent-scan; \
+    else \
+      pip install --no-cache-dir "snyk-agent-scan==${AGENT_SCAN_VERSION}"; \
+    fi; \
+    # Fail the build if the entrypoint isn't present — never ship a broken image.
+    command -v snyk-agent-scan
+
+# Drop privileges by default; the job also enforces --user / --cap-drop at run time.
+USER 65534:65534
+ENV HOME=/tmp
+ENTRYPOINT ["snyk-agent-scan"]

@@ -14,14 +14,10 @@
  * 503s. This mirrors `auditStore.ts`.
  */
 import { Pool } from 'pg';
+import { resolvePostgresConnectionString } from './postgresConnection.js';
 
 function resolveConnectionString(): string | undefined {
-  return (
-    process.env.APP_CONFIG_DATABASE_URL?.trim() ||
-    process.env.DATABASE_URL?.trim() ||
-    process.env.INSTRUCTION_MONITOR_DATABASE_URL?.trim() ||
-    undefined
-  );
+  return resolvePostgresConnectionString(['APP_CONFIG_DATABASE_URL', 'DATABASE_URL', 'INSTRUCTION_MONITOR_DATABASE_URL']);
 }
 
 export function isConfigStoreConfigured(): boolean {

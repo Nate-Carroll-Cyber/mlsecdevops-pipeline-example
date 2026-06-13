@@ -184,6 +184,12 @@ On a clean repo with no models/datasets, expect:
 - `artifact-signing-gate` passes because `tamper-verification` seeds its baseline
   and writes `integrity.env`.
 
+Native `secret-detection` is scoped to the current HEAD checkout. It still blocks
+new committed secrets, while historic secret remediation remains a separate repo
+hygiene task. During repeated CI debugging, enable GitLab auto-cancel redundant
+pipelines so `interruptible: true` can stop superseded jobs before they burn
+runner minutes.
+
 If a hard gate fails, it's a real finding (a committed secret, an infected file, a
 malformed dataset) — fix the input, not the gate.
 

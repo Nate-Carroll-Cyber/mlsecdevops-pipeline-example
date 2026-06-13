@@ -14,6 +14,7 @@
  * so a single demo Postgres backs both stores.
  */
 import { Pool } from 'pg';
+import { resolvePostgresConnectionString } from './postgresConnection.js';
 
 export const USER_ROLES = ['developer', 'analyst', 'engineer', 'admin'] as const;
 export type UserRole = (typeof USER_ROLES)[number];
@@ -29,12 +30,7 @@ export interface UserProfileRecord {
 }
 
 function resolveConnectionString(): string | undefined {
-  return (
-    process.env.APP_CONFIG_DATABASE_URL?.trim() ||
-    process.env.DATABASE_URL?.trim() ||
-    process.env.INSTRUCTION_MONITOR_DATABASE_URL?.trim() ||
-    undefined
-  );
+  return resolvePostgresConnectionString(['APP_CONFIG_DATABASE_URL', 'DATABASE_URL', 'INSTRUCTION_MONITOR_DATABASE_URL']);
 }
 
 export function isUserProfileStoreConfigured(): boolean {

@@ -140,6 +140,8 @@ flowchart TD
 | Job | What it does |
 | --- | --- |
 | `semgrep-sast` | Runs Semgrep `--config=auto` across the full codebase; outputs a GitLab SAST report. |
+| `secret-detection` | Runs GitLab native Secret Detection as a hard gate against the current HEAD checkout (`GIT_DEPTH: 1`, `SECRET_DETECTION_LOG_OPTIONS: "--max-count=1"`). Historic secret cleanup is handled as a separate repository hygiene task so old training/app fixtures do not keep blocking current CI. |
+| `gitleaks-scan` | Runs the configurable Gitleaks hard gate with the repo's `.gitleaks.toml`; this complements native Secret Detection and remains enabled. |
 | `pip-audit` | Audits `requirements.txt` against OSV, PyPI advisory DB, and GitHub Advisory DB; outputs JSON and CycloneDX (use CycloneDX for CVSS score analysis). |
 | `pkg-integrity` | Checks for hash-pinning in `requirements.txt`; generates a hashed lockfile if absent; verifies no dependency conflicts in an isolated venv via `pip check`. |
 | `conda-pkg-verify` | Re-verifies the same packages in a `conda-forge`-only conda environment with strict channel priority; produces a reproducible environment manifest. |
@@ -160,6 +162,8 @@ flowchart TD
 | `grype-scan` | Feeds the CycloneDX SBOM into Grype and scans for known CVEs; outputs a JSON findings report and a human-readable table. |
 | `trivy-scan` | Runs Trivy against the filesystem and the container image (if a registry image exists for this commit); outputs a GitLab container scanning report. |
 
+`grype-scan` skips cleanly with a small JSON report when its CycloneDX input is absent, for example when the SBOM producer could not run. This avoids a misleading secondary failure while preserving the SBOM producer as the root cause to investigate.
+
 ### Stage 5 — Model Integrity
 
 This stage runs as a sequential chain that fans out into parallel checks before converging on a hard gate.
@@ -176,7 +180,7 @@ This stage runs as a sequential chain that fans out into parallel checks before 
 | --- | --- |
 | `signature-verification` | Finds every `model.sig` produced by `model-sign` and calls `python -m model_signing verify sigstore` on each, validating the signature against `MODEL_SIGNING_IDENTITY` and `SIGSTORE_OIDC_ISSUER` from Vault. A failed verification fails the job. |
 | `tamper-verification` | Compares the current digest list against a stored baseline. On first run, seeds the baseline. On subsequent runs, any digest change prints a diff and fails. Baseline is stored in Vault (`secret/data/gaips/tamper-baseline/{project-slug}`) for permanent storage; falls back to a 90-day GitLab artifact (plus a best-effort job cache) when Vault is unavailable. |
-| `modelscan` | Runs ModelScan across `models/` to detect malicious serialization payloads (pickle exploits, unsafe operators). Fails the job on any CRITICAL finding (`allow_failure: true`, so the gate — not this job — is the hard stop). |
+| `modelscan` | Runs ModelScan across `models/` to detect malicious serialization payloads (pickle exploits, unsafe operators). Skips cleanly when no model files are present; fails the job on any CRITICAL finding (`allow_failure: true`, so the gate — not this job — is the hard stop). |
 | `modelfile-audit` | SHA-256 hashes any Ollama `Modelfile` found under `models/` or one level below the repo root, recording digests to `evidence/modelfile-digests.txt` (separate file to avoid a write race with `model-digest`). Skips cleanly when none are present. |
 | `clamav-scan` | Runs ClamAV (`clamav/clamav` image, fresh signatures via `freshclam`) recursively across `models/`. Hard gate (`allow_failure: false`) — any infected file fails the pipeline. |
 | `hf-artifact-scan` | Downloads each HuggingFace model listed in `HF_MODEL_IDS` and runs ClamAV + ModelScan against it. Skips cleanly if `HF_MODEL_IDS` is not set. |
@@ -195,12 +199,12 @@ All jobs run in parallel after the gate passes.
 | Job | What it does |
 | --- | --- |
 | `rag-smoke-eval` | Runs a local RAG smoke test against the GAIPS course materials. |
-| `promptfoo-eval` | Runs adversarial prompt evaluations defined in `evals/promptfoo.yaml`. |
+| `promptfoo-eval` | Runs adversarial prompt evaluations defined in `evals/promptfoo.yaml`. Advisory failures still upload `promptfoo-results.json`; if Promptfoo exits before writing a report, the job writes a minimal failure JSON for downstream evidence. |
 | `garak-scan` | Probes the live model endpoint (from `MODEL_ENDPOINT`) with all Garak probe modules to test for jailbreaks, extraction, and unsafe outputs. |
 | `giskard-scan` | Runs Giskard's LLM scan against the live model for bias, hallucination, and prompt injection. |
 | `inspect-ai-eval` | Runs structured capability and safety evaluations using `inspect-ai`. Uses project task files if present; otherwise runs MMLU (knowledge), TruthfulQA (honesty), WMDP bio/chem/cyber (hazard refusal), and GDM in-house CTF (agent safety). |
 | `markllm-deps-audit` | Runs `pip-audit` against `torch`, `transformers`, and `markllm` (the heavy watermark stack) on `python:3.10-slim` before `markllm-watermark-eval`. Advisory (`allow_failure: true`). |
-| `markllm-watermark-eval` | Tests whether model outputs can be watermark-detected using MarkLLM. |
+| `markllm-watermark-eval` | Tests whether model outputs can be watermark-detected using MarkLLM. Advisory failures still upload `markllm-results.json`, including readiness/import status when the heavy watermark stack is unavailable. |
 | `pyrit-scan` | Runs Microsoft PyRIT adversarial probes against the model endpoint. |
 
 ### Stage 7 — Guardrail Regression
@@ -230,6 +234,8 @@ The final stage rolls every prior element into **one CycloneDX 1.6 AI BOM** — 
 | `ai-bom-sign` | Applies the BOM's **own** signature as a native CycloneDX **enveloped signature** (`cyclonedx sign bom`, an XML Digital Signature embedded directly in `aibom.cyclonedx.xml`), then proves it with `cyclonedx verify all`. Unlike a detached signature, this verifies **as-is** — no canonical reconstruction. Uses a stable RSA key from `CYCLONEDX_SIGNING_KEY` / `CYCLONEDX_SIGNING_PUB` when configured, else an ephemeral keypair (intra-run verification only). The private key is never published; the public key ships as `aibom-signing.pub` for offline verification. Models and datasets keep their cosign/Sigstore signatures (embedded by `ai-bom-assemble`); only the BOM document itself moves to enveloped signing. |
 | `drift-gate` | The hard gate for model drift. Runs **last** — after the BOM is built and signed — and fails the pipeline (`allow_failure: false`) when `model-drift-detection` reported drift. Placing it here means a drifted run still produces a signed BOM that **records** the drift, rather than a blocked pipeline that explains nothing. Passes on a clean run, a freshly-seeded baseline, or when drift detection was skipped. |
 | `dependency-track-upload` | Ingests the Syft SBOM and the AI BOM (nested under it via `parentName`/`parentVersion`) into **Dependency-Track** for *continuous* analysis — re-scanning against new CVEs and policy conditions over time. Hard policy gate: fails on any non-suppressed violation whose `violationState` is in `DT_FAIL_ON` (default `FAIL`). Skips cleanly when `DT_API_URL`/`DT_API_KEY` are unset. |
+
+The pipeline default is `interruptible: true` so superseded jobs can be canceled by GitLab when a newer pipeline replaces them. Enable GitLab's project-level auto-cancel redundant pipelines setting to turn that into runner-minute savings during CI debugging.
 
 ### Stage 10 — Deploy Prep
 

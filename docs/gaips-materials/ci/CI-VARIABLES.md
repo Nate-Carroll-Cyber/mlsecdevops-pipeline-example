@@ -28,6 +28,11 @@ these in **GitLab → Settings → CI/CD → Variables** (or fetch from Vault vi
 > `gitleaks-scan`, `clamav-scan`, `artifact-signing-gate`, `drift-gate` — pass on
 > a clean repo.
 
+`secret-detection` uses a shallow HEAD checkout (`GIT_DEPTH: 1`) plus
+`SECRET_DETECTION_LOG_OPTIONS="--max-count=1"` so current pipelines gate new
+committed secrets without repeatedly failing on historic lab/app fixtures.
+Run one-off historic scans or repository history cleanup separately when needed.
+
 ---
 
 ## 2. Secrets fetched by `vault-secrets` (or set directly if not using Vault)

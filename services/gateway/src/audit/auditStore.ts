@@ -19,17 +19,13 @@
  */
 import { randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
+import { resolvePostgresConnectionString } from '../config/postgresConnection.js';
 
 const MAX_LIST_LIMIT = 1000;
 const DEFAULT_LIST_LIMIT = 500;
 
 function resolveConnectionString(): string | undefined {
-  return (
-    process.env.AUDIT_DATABASE_URL?.trim() ||
-    process.env.DATABASE_URL?.trim() ||
-    process.env.INSTRUCTION_MONITOR_DATABASE_URL?.trim() ||
-    undefined
-  );
+  return resolvePostgresConnectionString(['AUDIT_DATABASE_URL', 'DATABASE_URL', 'INSTRUCTION_MONITOR_DATABASE_URL']);
 }
 
 export function isAuditStoreConfigured(): boolean {

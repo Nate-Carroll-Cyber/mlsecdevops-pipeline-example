@@ -9,7 +9,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isPolicyStoreConfigured } from '../src/config/policyStore.ts';
 
-const ENV_KEYS = ['APP_CONFIG_DATABASE_URL', 'DATABASE_URL', 'INSTRUCTION_MONITOR_DATABASE_URL'] as const;
+const ENV_KEYS = ['APP_CONFIG_DATABASE_URL', 'DATABASE_URL', 'INSTRUCTION_MONITOR_DATABASE_URL', 'POSTGRES_HOST', 'POSTGRES_PORT', 'POSTGRES_DB', 'POSTGRES_USER', 'POSTGRES_PASSWORD'] as const;
 
 function saveEnv() {
   return ENV_KEYS.reduce<Record<string, string | undefined>>((acc, key) => {

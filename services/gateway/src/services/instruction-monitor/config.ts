@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { resolvePostgresConnectionString } from '../../config/postgresConnection.js';
 
 const InstructionMonitorEnvSchema = z.object({
   INSTRUCTION_MONITOR_ENABLED: z
@@ -7,6 +8,11 @@ const InstructionMonitorEnvSchema = z.object({
     .transform((value) => value === undefined ? false : value.toLowerCase() !== 'false'),
   INSTRUCTION_MONITOR_DATABASE_URL: z.string().url().optional(),
   DATABASE_URL: z.string().url().optional(),
+  POSTGRES_HOST: z.string().optional(),
+  POSTGRES_PORT: z.string().optional(),
+  POSTGRES_DB: z.string().optional(),
+  POSTGRES_USER: z.string().optional(),
+  POSTGRES_PASSWORD: z.string().optional(),
   INSTRUCTION_MONITOR_EMBEDDING_DIMENSIONS: z.coerce.number().int().min(1).max(4096).default(768),
   INSTRUCTION_MONITOR_COMPARE_LIMIT: z.coerce.number().int().min(1).max(100).default(10),
   INSTRUCTION_MONITOR_SIMILARITY_THRESHOLD: z.coerce.number().min(0).max(1).default(0.78),
@@ -20,5 +26,5 @@ const InstructionMonitorEnvSchema = z.object({
 export const instructionMonitorConfig = InstructionMonitorEnvSchema.parse(process.env);
 
 export function getInstructionMonitorConnectionString() {
-  return instructionMonitorConfig.INSTRUCTION_MONITOR_DATABASE_URL || instructionMonitorConfig.DATABASE_URL;
+  return resolvePostgresConnectionString(['INSTRUCTION_MONITOR_DATABASE_URL', 'DATABASE_URL']);
 }

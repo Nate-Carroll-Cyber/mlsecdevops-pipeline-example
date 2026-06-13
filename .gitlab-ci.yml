@@ -1593,8 +1593,19 @@ promptfoo-eval:
     - npm install -g "promptfoo@${PROMPTFOO_VERSION}"
   script:
     - mkdir -p "${REPORTS_DIR}"
-    - promptfoo eval --config "${GAIPS_MATERIALS_DIR}/evals/promptfoo.yaml" --output "${REPORTS_DIR}/promptfoo-results.json" --no-cache
+    - |
+      PROMPTFOO_EXIT=0
+      promptfoo eval \
+        --config "${GAIPS_MATERIALS_DIR}/evals/promptfoo.yaml" \
+        --output "${REPORTS_DIR}/promptfoo-results.json" \
+        --no-cache || PROMPTFOO_EXIT=$?
+      if [ ! -f "${REPORTS_DIR}/promptfoo-results.json" ]; then
+        printf '{"tool":"promptfoo","status":"failed","exit_code":%s,"reason":"promptfoo did not produce an output report"}\n' \
+          "${PROMPTFOO_EXIT}" > "${REPORTS_DIR}/promptfoo-results.json"
+      fi
+      exit "${PROMPTFOO_EXIT}"
   artifacts:
+    when: always
     paths:
       - "${REPORTS_DIR}/promptfoo-results.json"
     expire_in: 7 days
@@ -1814,6 +1825,7 @@ markllm-watermark-eval:
       python "${GAIPS_MATERIALS_DIR}/scripts/run_markllm_watermark_eval.py" \
         --output "${REPORTS_DIR}/markllm-results.json"
   artifacts:
+    when: always
     paths:
       - "${REPORTS_DIR}/markllm-results.json"
     expire_in: 7 days

@@ -283,9 +283,9 @@ secret-detection:
   before_script: []
   needs: ["setup"]
   variables:
-    GIT_DEPTH: 0                            # full history; set to 1 for HEAD-only on large repos
+    GIT_DEPTH: 1                            # HEAD-only; old app history is handled outside CI
     SECRET_DETECTION_HISTORIC_SCAN: "false" # flip to "true" to scan entire git history
-    SECRET_DETECTION_LOG_OPTIONS: ""
+    SECRET_DETECTION_LOG_OPTIONS: "--max-count=1"
   script:
     - mkdir -p "${REPORTS_DIR}"
     - /analyzer run

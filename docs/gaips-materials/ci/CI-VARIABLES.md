@@ -64,6 +64,9 @@ Each maps to a Vault path `secret/data/gaips/ci/<name>` (field `value`). If you'
 | Variable | Source | Masked | Default | Purpose |
 | --- | --- | --- | --- | --- |
 | `HF_MODEL_IDS` | you | No | `""` | Comma-separated HF repo IDs to scan, e.g. `org/model-a,org/model-b`. Blank → `hf-artifact-scan` skips. |
+| `MODEL_FIXTURE_URL` | you | No | `""` | Optional direct model artifact URL to download into `MODEL_DIR` before digest/sign/scan jobs. Blank → `model-fixture-download` skips. |
+| `MODEL_FIXTURE_PATH` | default/you | No | `qwen2.5-1.5b-instruct-gguf/qwen2.5-1.5b-instruct-q2_k.gguf` | Relative path under `models/` for the downloaded fixture. |
+| `MODEL_FIXTURE_SHA256` | default/you | No | `5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a` | Expected SHA-256 for `MODEL_FIXTURE_URL`; the download job fails if it does not match. |
 | `DATASET_PACKAGE_NAME` | you | No | `""` | Generic Package Registry package holding the dataset. |
 | `DATASET_PACKAGE_VERSION` | you | No | `latest` | Dataset package version tag. |
 | `DATASET_FILENAME` | you | No | `""` | Dataset filename to download. **Blank → the entire dataset chain skips.** |

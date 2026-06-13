@@ -171,8 +171,9 @@ This stage runs as a sequential chain that fans out into parallel checks before 
 **Sequential chain:**
 
 1. **`model-signing-install`** — Installs the `model-signing` and `sigstore` Python packages; downloads and installs the `cosign` Go binary from GitHub releases.
-2. **`model-digest`** — SHA-256 hashes every model file (`.pkl`, `.pt`, `.safetensors`, `.gguf`, `.bin`, `.h5`, `.onnx`) under `models/` and writes the digest list to `evidence/model-digests.txt`.
-3. **`model-sign`** — Gets a `SIGSTORE_ID_TOKEN` OIDC JWT (audience `"sigstore"`) from GitLab and runs `python -m model_signing sign sigstore` on each subdirectory under `models/`, producing a `model.sig` Sigstore bundle inside each one. Publishes the `.sig` files as artifacts.
+2. **`model-fixture-download`** — Optionally downloads a checksum-pinned public model artifact into `models/` when `MODEL_FIXTURE_URL` is set. By default it skips cleanly, so model weights are never committed to Git.
+3. **`model-digest`** — SHA-256 hashes every model file (`.pkl`, `.pt`, `.safetensors`, `.gguf`, `.bin`, `.h5`, `.onnx`) under `models/` and writes the digest list to `evidence/model-digests.txt`.
+4. **`model-sign`** — Gets a `SIGSTORE_ID_TOKEN` OIDC JWT (audience `"sigstore"`) from GitLab and runs `python -m model_signing sign sigstore` on each subdirectory under `models/`, producing a `model.sig` Sigstore bundle inside each one. Publishes the `.sig` files as artifacts.
 
 **Parallel checks (run after `model-digest` or `model-sign`):**
 
@@ -187,6 +188,14 @@ This stage runs as a sequential chain that fans out into parallel checks before 
 | `dataset-download` → `dataset-scan` → `dataset-redact` → `eval-dataset-validate` → `dataset-sign` | The training/eval data runs a chain: **(0)** `dataset-download` — pulls `DATASET_FILENAME` from the Generic Package Registry and verifies `DATASET_EXPECTED_SHA256` (skips when unset); **(1)** `dataset-scan` — ClamAV + structural (JSON/JSONL) scan (hard gate); **(2)** `dataset-redact` — strips secrets (gitleaks) and PII (Microsoft Presidio) **in place**, so confidential data never reaches signing/eval (report records counts only, never raw values). Fail-closed (`allow_failure: false`); after redacting, the job **hard-fails** if findings exceed `REDACT_MAX_SECRETS` (default `0` — any secret in training data fails the run) or `REDACT_MAX_PII` (default `-1` — disabled); **(3)** `eval-dataset-validate` — validates every record against `evals/eval-dataset.schema.json` (fails the run on off-contract data, gating the AI-eval stage); **(4)** `dataset-sign` — `cosign sign-blob` over the **redacted, validated** bytes (`SIGSTORE_ID_TOKEN`, audience `"sigstore"`) → `dataset.sig` / `dataset.pem`, giving data the same Sigstore provenance as models. Every step skips cleanly when no dataset is configured (labs run on built-in fixtures). |
 
 The dataset content-quality jobs `great-expectations-validate` (null rates, ranges, uniqueness — soft gate) and `ydata-profile` (advisory auto-profile, never gates) also run in this stage on the redacted data; they are not gate inputs.
+
+To exercise the primary model-integrity path without committing a model to Git, set:
+
+```text
+MODEL_FIXTURE_URL=https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q2_k.gguf
+MODEL_FIXTURE_PATH=qwen2.5-1.5b-instruct-gguf/qwen2.5-1.5b-instruct-q2_k.gguf
+MODEL_FIXTURE_SHA256=5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a
+```
 
 **Gate:**
 

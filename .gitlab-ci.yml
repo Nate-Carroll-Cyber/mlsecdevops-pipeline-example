@@ -33,6 +33,12 @@ variables:
   # seeded baseline is published as an artifact to commit manually.
   HF_MODEL_IDS: ""    # comma-separated HF repo IDs to scan, e.g. "org/model-a,org/model-b"
   HF_TOKEN: ""        # HuggingFace token for gated/private repos (mask in CI settings)
+  # Optional public model fixture. When MODEL_FIXTURE_URL is set, the pipeline
+  # downloads this exact artifact into MODEL_DIR so the primary digest/sign/scan
+  # jobs exercise real model bytes without committing weights to Git.
+  MODEL_FIXTURE_URL: ""
+  MODEL_FIXTURE_PATH: "qwen2.5-1.5b-instruct-gguf/qwen2.5-1.5b-instruct-q2_k.gguf"
+  MODEL_FIXTURE_SHA256: "5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a"
   # ── Pinned tool versions — update here to roll the whole pipeline ─────────────
   # Find current releases at each tool's GitHub releases page before bumping.
   COSIGN_VERSION: "v2.4.1"
@@ -802,9 +808,44 @@ model-signing-install:
         | (cd /tmp && sha256sum --check --strict)
       install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
       cosign version
+
+model-fixture-download:
+  stage: model-integrity
+  needs: ["setup"]
+  before_script: []          # curl-only job; skip Python venv bootstrap
+  script:
+    - apt-get update -qq && apt-get install -y -qq curl ca-certificates
+    - mkdir -p "${MODEL_DIR}" "${EVIDENCE_DIR}"
+    - |
+      if [ -z "${MODEL_FIXTURE_URL}" ]; then
+        echo "MODEL_FIXTURE_URL not set — skipping model fixture download"
+        printf '{"skipped":true,"reason":"MODEL_FIXTURE_URL not set"}\n' \
+          > "${EVIDENCE_DIR}/model-fixture-download.json"
+        exit 0
+      fi
+
+      dest="${MODEL_DIR}/${MODEL_FIXTURE_PATH}"
+      mkdir -p "$(dirname "${dest}")"
+      curl -sSfL "${MODEL_FIXTURE_URL}" -o "${dest}"
+
+      if [ -n "${MODEL_FIXTURE_SHA256}" ]; then
+        printf '%s  %s\n' "${MODEL_FIXTURE_SHA256}" "${dest}" | sha256sum --check --strict
+      fi
+
+      bytes=$(wc -c < "${dest}" | tr -d ' ')
+      printf '{"skipped":false,"path":"%s","sha256":"%s","bytes":%s}\n' \
+        "${dest#${CI_PROJECT_DIR}/}" "${MODEL_FIXTURE_SHA256}" "${bytes}" \
+        > "${EVIDENCE_DIR}/model-fixture-download.json"
+      cat "${EVIDENCE_DIR}/model-fixture-download.json"
+  artifacts:
+    paths:
+      - "${MODEL_DIR}/"
+      - "${EVIDENCE_DIR}/model-fixture-download.json"
+    expire_in: 1 day
+
 model-digest:
   stage: model-integrity
-  needs: ["model-signing-install"]
+  needs: ["model-signing-install", "model-fixture-download"]
   allow_failure: true
   script:
     - pip install model-signing
@@ -830,7 +871,7 @@ model-digest:
 
 model-sign:
   stage: model-integrity
-  needs: ["model-digest", "vault-secrets"]
+  needs: ["model-digest", "model-fixture-download", "vault-secrets"]
   # id_tokens issues a per-job OIDC JWT; aud "sigstore" is required by Fulcio for keyless signing.
   id_tokens:
     SIGSTORE_ID_TOKEN:
@@ -856,7 +897,7 @@ model-sign:
 
 signature-verification:
   stage: model-integrity
-  needs: ["model-sign", "vault-secrets"]
+  needs: ["model-sign", "model-fixture-download", "vault-secrets"]
   script:
     - pip install model-signing sigstore
     - |
@@ -983,7 +1024,7 @@ tamper-verification:
 
 modelscan:
   stage: model-integrity
-  needs: ["model-signing-install"]
+  needs: ["model-signing-install", "model-fixture-download"]
   script:
     - pip install modelscan
     - mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"
@@ -1088,7 +1129,7 @@ clamav-scan:
   stage: model-integrity
   image: "${IMAGE_CLAMAV}"
   before_script: []          # clamav image has no Python — skip .python-secure
-  needs: ["model-signing-install"]
+  needs: ["model-signing-install", "model-fixture-download"]
   script:
     - mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"
     - |
@@ -2126,6 +2167,7 @@ ai-bom-assemble:
     - setup
     - syft-cyclonedx
     - pip-audit
+    - model-fixture-download
     - model-digest
     - model-sign
     - modelfile-audit
@@ -2384,7 +2426,7 @@ image-sign:
 # an artifacts-manifest.txt recording precisely what was published.
 publish-signed-artifacts:
   stage: deploy-prep
-  needs: ["ai-bom-sign", "dataset-sign", "model-sign"]
+  needs: ["ai-bom-sign", "dataset-sign", "model-sign", "model-fixture-download"]
   allow_failure: true   # advisory: a publish hiccup must not fail the run; re-publishable from artifacts
   before_script: []
   script:

@@ -347,12 +347,13 @@ gitleaks-scan:
 # Snyk Agent Scan (github.com/snyk/agent-scan, Apache-2.0) — supply-chain scan of
 # this repo's AGENT components: the MCP server config and the agent skill files.
 # Detects prompt injection, tool poisoning/shadowing, toxic flows, and credential
-# issues that the code-level SAST (semgrep/gitleaks) does not look for. Static by
-# default: it does NOT launch the MCP servers (their `python3 -m gaips_*` modules
-# aren't installed in CI, and running arbitrary server commands in CI is unsafe).
-# Set AGENT_SCAN_RUN_MCP_SERVERS=true ONLY in a trusted runner to let it start the
-# servers and introspect live tool descriptions. Skips cleanly when SNYK_TOKEN is
-# unset — same pattern as dependency-track-upload.
+# issues that the code-level SAST (semgrep/gitleaks) does not look for.
+#
+# This job is STATIC ONLY: it parses the MCP config + skill files and never starts
+# the servers. Launching the servers (--dangerously-run-mcp-servers) executes the
+# config's `command`/`args` — arbitrary code on the runner — so it is FORBIDDEN
+# here and lives in the isolated snyk-agent-scan-live job instead. Skips cleanly
+# when SNYK_TOKEN is unset — same pattern as dependency-track-upload.
 snyk-agent-scan:
   stage: sast
   needs: ["setup"]
@@ -361,7 +362,6 @@ snyk-agent-scan:
   # allow_failure: false to make agent-component findings a hard gate.
   allow_failure: true
   variables:
-    AGENT_SCAN_RUN_MCP_SERVERS: "false"
     MCP_CONFIG: "${GAIPS_MATERIALS_DIR}/mcp/cline_mcp_settings.json"
     SKILLS_PATH: "${GAIPS_MATERIALS_DIR}/agent"
     # uvx resolves snyk-agent-scan from PyPI; pin the package index to the same
@@ -373,22 +373,22 @@ snyk-agent-scan:
         echo "SNYK_TOKEN unset — agent-scan skipped (set it as a masked CI/CD variable to enable)"
         exit 0
       fi
+    - |
+      # Hard refusal: the dangerous flag must never run on the shared runner.
+      if [ "${AGENT_SCAN_RUN_MCP_SERVERS:-false}" = "true" ]; then
+        echo "ERROR: AGENT_SCAN_RUN_MCP_SERVERS=true is not allowed in this job — it would"
+        echo "       execute MCP server commands on the shared runner. Use the sandboxed,"
+        echo "       manual 'snyk-agent-scan-live' job instead."
+        exit 1
+      fi
     - mkdir -p "${REPORTS_DIR}"
     - pip install --quiet uv      # provides `uvx`; honours UV_INDEX_URL above
     - |
-      # Opt-in, trusted-runner-only: actually launch the MCP servers to read their
-      # live tool descriptions. Default off → static config scan only.
-      RUN_SERVERS=""
-      if [ "${AGENT_SCAN_RUN_MCP_SERVERS}" = "true" ]; then
-        echo "AGENT_SCAN_RUN_MCP_SERVERS=true — will start MCP servers (trusted runner only)"
-        RUN_SERVERS="--dangerously-run-mcp-servers --server-timeout 20"
-      fi
-    - |
-      # 1) Scan the MCP server configuration. --ci → exit 1 on findings; --json →
-      #    machine-readable evidence. Captured so the gate decision is explicit.
+      # 1) Scan the MCP server configuration (static). --ci → exit 1 on findings;
+      #    --json → machine-readable evidence. Captured so the gate is explicit.
       AS_EXIT=0
       uvx snyk-agent-scan@latest "${MCP_CONFIG}" \
-        --json --ci ${RUN_SERVERS} \
+        --json --ci \
         > "${REPORTS_DIR}/agent-scan-mcp.json" 2> "${REPORTS_DIR}/agent-scan-mcp.log" \
         || AS_EXIT=$?
       echo "agent-scan (mcp config) exit=${AS_EXIT}"
@@ -414,6 +414,90 @@ snyk-agent-scan:
       - "${REPORTS_DIR}/agent-scan-mcp.log"
       - "${REPORTS_DIR}/agent-scan-skills.json"
       - "${REPORTS_DIR}/agent-scan-skills.log"
+    expire_in: 7 days
+
+# LIVE introspection — actually starts the MCP servers so agent-scan can read each
+# server's real tool descriptions (catches tool poisoning/shadowing that a static
+# config read can't). Because that EXECUTES the config's command/args, it is fully
+# isolated and never runs automatically:
+#   • when: manual + a dedicated, DISPOSABLE runner (tags: [sandbox]) — a throwaway
+#     VM-backed/autoscaled runner reserved for untrusted execution, destroyed after.
+#   • the scan runs inside a NESTED rootless container that is locked down:
+#     --network none (the spawned servers get no egress — no exfiltration),
+#     --read-only rootfs + tmpfs scratch, --cap-drop ALL, no-new-privileges,
+#     non-root user, and pids/memory caps. The repo is mounted READ-ONLY.
+#   • the agent-scan tool is pre-fetched BEFORE the network is cut, so the offline
+#     container can still run it (--no-bootstrap skips the online verification call).
+# NOTE: the fixture servers are `python3 -m gaips_*` modules that aren't installed,
+# so they will fail to start and be reported as errors — that is the contained,
+# expected outcome here. Point this at a config whose server modules ARE present to
+# get real live tool introspection.
+snyk-agent-scan-live:
+  stage: sast
+  needs: ["setup"]
+  rules:
+    - if: '$SNYK_TOKEN == ""'
+      when: never            # nothing to do without a token
+    - when: manual           # explicit human trigger only; never part of an auto run
+  allow_failure: true
+  tags:
+    - sandbox                # REQUIRED: an isolated, disposable runner for untrusted exec
+  variables:
+    MCP_CONFIG: "${GAIPS_MATERIALS_DIR}/mcp/cline_mcp_settings.json"
+    UV_INDEX_URL: "${PIP_INDEX_URL}"
+    SANDBOX_IMAGE: "python:3.11-slim"
+    UV_CACHE_DIR: "${CI_PROJECT_DIR}/.uv-cache"
+  before_script: []
+  script:
+    - |
+      command -v podman >/dev/null 2>&1 || {
+        echo "ERROR: this job requires a rootless-container-capable runner (podman)."
+        echo "       Provision the 'sandbox' runner with podman + user-namespace support."
+        exit 1
+      }
+    - mkdir -p "${REPORTS_DIR}" "${UV_CACHE_DIR}"
+    - pip install --quiet uv
+    - |
+      # Pre-fetch agent-scan into the uv cache WHILE network is available, so the
+      # --network none container below can still resolve and run it offline.
+      uv tool install --reinstall snyk-agent-scan
+    - |
+      # Run the server-launching scan inside a locked-down, egress-less, rootless
+      # container. The MCP servers start INSIDE this jail: no network, no caps, no
+      # privilege escalation, read-only repo, ephemeral writable /tmp only.
+      AS_EXIT=0
+      podman run --rm \
+        --network none \
+        --read-only \
+        --tmpfs /tmp:rw,size=256m \
+        --cap-drop ALL \
+        --security-opt no-new-privileges \
+        --pids-limit 256 \
+        --memory 1g \
+        --user 65534:65534 \
+        -e SNYK_TOKEN \
+        -e "UV_CACHE_DIR=/cache" \
+        -e "HOME=/tmp" \
+        -v "${CI_PROJECT_DIR}:/work:ro" \
+        -v "${UV_CACHE_DIR}:/cache:ro" \
+        -w /work \
+        "${SANDBOX_IMAGE}" \
+        sh -c 'pip install --quiet --no-index uv 2>/dev/null; \
+               uvx --offline snyk-agent-scan@latest "'"${MCP_CONFIG#${CI_PROJECT_DIR}/}"'" \
+                 --json --ci --no-bootstrap \
+                 --dangerously-run-mcp-servers --server-timeout 20 --suppress-mcpserver-io true' \
+        > "${REPORTS_DIR}/agent-scan-live.json" 2> "${REPORTS_DIR}/agent-scan-live.log" \
+        || AS_EXIT=$?
+      echo "agent-scan (live, sandboxed) exit=${AS_EXIT}"
+      if [ "${AS_EXIT}" -ne 0 ]; then
+        echo "Live agent-scan reported risks (or a sandboxed server failed to start) — see reports/agent-scan-live.*"
+        exit 1
+      fi
+  artifacts:
+    when: always
+    paths:
+      - "${REPORTS_DIR}/agent-scan-live.json"
+      - "${REPORTS_DIR}/agent-scan-live.log"
     expire_in: 7 days
 
 pip-audit:

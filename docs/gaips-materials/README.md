@@ -63,7 +63,7 @@ Before conversion, verify the CSV contains only approved synthetic or sanitized 
 
 `ci/.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, prompt/eval config, and guardrail baselines.
 
-The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, and `ai-bom`. It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, ModelScan, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, Promptfoo, garak, Giskard, Inspect AI, MarkLLM watermark-readiness, PyRIT, guardrail-regression, model-drift detection, evidence, and a consolidated CycloneDX 1.6 AI BOM artifact.
+The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, and `deploy-prep`. It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, agent/MCP supply-chain scanning (Snyk Agent Scan), Syft CycloneDX/SPDX, Grype, Trivy, ModelScan, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, Promptfoo, garak, Giskard, Inspect AI, MarkLLM watermark-readiness, PyRIT, guardrail-regression, model-drift detection, evidence, a consolidated CycloneDX 1.6 AI BOM artifact (also pushed to Dependency-Track), a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification.
 
 Before copying this CI file into a student lab repository, add or adapt `requirements.txt`, `models/`, `promptfooconfig.yaml`, `guardrails/baseline.json`, `scripts/rag_smoke_eval.py`, `scripts/pyrit_scan.py`, `scripts/guardrail_regression.py`, `scripts/evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, `scripts/detect_model_drift.py`, `evals/eval-dataset.schema.json`, and (after the first run seeds it) `evals/eval-baseline.json`. Configure endpoint, signing, and Hugging Face variables in GitLab CI/CD settings. Fixture files under `docs/gaips-materials/fixtures/` remain offline interpretation aids, not automatic CI pass-throughs.
 
@@ -73,14 +73,14 @@ Jobs within each stage run in parallel unless a `needs:` dependency forces seque
 
 ### Process Flow
 
-The pipeline is a DAG: the `model-integrity` stage converges on `artifact-signing-gate`, which blocks all AI evaluation until model and dataset integrity is proven. The terminal `ai-bom` stage rolls every prior element into one signed CycloneDX 1.6 AI BOM. (Rendered natively by GitLab.)
+The pipeline is a DAG: the `model-integrity` stage converges on `artifact-signing-gate`, which blocks all AI evaluation until model and dataset integrity is proven. The `ai-bom` stage rolls every prior element into one signed CycloneDX 1.6 AI BOM. The terminal `deploy-prep` stage then **signs the workload image** and **publishes the signed artifacts**, closing the sign→verify-at-deploy loop that **Kyverno** (container image) and the **Argo CD PreSync hook** (model / dataset / AI-BOM signatures) enforce at admission and sync time — the dashed edges below. (Rendered natively by GitLab.)
 
 ```mermaid
 flowchart TD
     setup[setup<br/>+ vault-secrets]
 
     subgraph SAST [sast]
-      sast_jobs[semgrep · secret-detection · gitleaks<br/>pip-audit · pkg-integrity · conda-verify]
+      sast_jobs[semgrep · secret-detection · gitleaks<br/>pip-audit · pkg-integrity · conda-verify<br/>snyk-agent-scan · snyk-agent-scan-live ⟂sandbox⟂]
     end
     subgraph SBOM [sbom]
       sbom_jobs[syft-cyclonedx · syft-spdx]
@@ -97,13 +97,22 @@ flowchart TD
       eval_jobs[rag-smoke · promptfoo · garak<br/>giskard · inspect-ai · markllm · pyrit]
     end
     subgraph GUARD [guardrail]
-      guard_jobs[guardrail-regression · model-drift-detection<br/>model-baseline-commit]
+      guard_jobs[guardrail-regression · model-drift-detection<br/>model-baseline-commit · evidently-drift]
     end
     subgraph EVID [evidence]
       evid_jobs[evidence-summary · model-signing-evidence]
     end
     subgraph AIBOM [ai-bom]
       assemble[ai-bom-assemble<br/>→ aibom.cyclonedx.json<br/>+ version, redaction, drift<br/>embeds model/dataset cosign sigs] --> validate[ai-bom-validate<br/>schema 1.6 + XML] --> aibom_sign[ai-bom-sign<br/>enveloped XML signature] --> drift_gate[drift-gate<br/>hard-fail on drift]
+      dtrack[dependency-track-upload<br/>continuous BOM policy gate]
+    end
+    subgraph DEPLOY [deploy-prep]
+      imgsign[image-sign<br/>cosign keyless → workload image]
+      publish[publish-signed-artifacts<br/>AI-BOM + dataset → package registry]
+    end
+    subgraph VERIFY [deploy-time verification — outside CI, in-cluster]
+      kyverno[[Kyverno ClusterPolicy<br/>verify image signature at admission]]
+      presync[[Argo CD PreSync hook<br/>verify AI-BOM / dataset / model sigs]]
     end
 
     setup --> SAST & SBOM & MI
@@ -111,6 +120,9 @@ flowchart TD
     gate --> EVAL --> GUARD
     SAST & VULN & GUARD & MI --> EVID
     EVID --> AIBOM
+    AIBOM --> DEPLOY
+    imgsign -. "signature verified by" .-> kyverno
+    publish -. "artifacts fetched & verified by" .-> presync
 ```
 
 ### Stage 1 — Setup
@@ -118,7 +130,7 @@ flowchart TD
 | Job | What it does |
 | --- | --- |
 | `setup` | Installs Python dependencies, creates `evidence/`, `sbom/`, and `reports/` directories, stamps pipeline ID and commit SHA into `evidence/pipeline.env`, and records Git/CI version provenance (commit, `git describe`, tag, branch, dirty state) to `evidence/version-info.json` for traceability of every downstream artifact. |
-| `vault-secrets` | Authenticates to Vault using a GitLab OIDC JWT and fetches six secrets (`MODEL_ENDPOINT`, `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`, `CI_REGISTRY_TOKEN`) into a dotenv artifact injected as environment variables into all downstream jobs. Falls back to GitLab CI/CD variables if `VAULT_ADDR` is not set. |
+| `vault-secrets` | Authenticates to Vault using a GitLab OIDC JWT and fetches the CI secrets (`MODEL_ENDPOINT`, `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`, `CI_REGISTRY_TOKEN`, `DT_API_URL`, `DT_API_KEY`, `SNYK_TOKEN`) into a dotenv artifact injected as environment variables into all downstream jobs. Falls back to GitLab CI/CD variables if `VAULT_ADDR` is not set. |
 
 ### Stage 2 — SAST
 
@@ -128,6 +140,8 @@ flowchart TD
 | `pip-audit` | Audits `requirements.txt` against OSV, PyPI advisory DB, and GitHub Advisory DB; outputs JSON and CycloneDX (use CycloneDX for CVSS score analysis). |
 | `pkg-integrity` | Checks for hash-pinning in `requirements.txt`; generates a hashed lockfile if absent; verifies no dependency conflicts in an isolated venv via `pip check`. |
 | `conda-pkg-verify` | Re-verifies the same packages in a `conda-forge`-only conda environment with strict channel priority; produces a reproducible environment manifest. |
+| `snyk-agent-scan` | Static supply-chain scan of the repo's **agent components** — the MCP server config (`mcp/cline_mcp_settings.json`) and agent skill files (`agent/`) — via `uvx snyk-agent-scan@latest … --json --ci`. Detects prompt injection, tool poisoning/shadowing, toxic flows, and credential issues that code-level SAST misses. Parses configs only; **never starts the servers** (hard-refuses `AGENT_SCAN_RUN_MCP_SERVERS=true`). Skips cleanly when `SNYK_TOKEN` is unset; soft (`allow_failure: true`) on introduction. |
+| `snyk-agent-scan-live` | Manual-only (`when: manual`), runs on a dedicated **disposable sandbox runner** (`tags: [sandbox]`). Performs the *live* scan that actually launches the MCP servers (`--dangerously-run-mcp-servers`) to read their real tool descriptions — confined inside a **locked-down rootless container** (`--network none`, read-only rootfs + tmpfs, `--cap-drop ALL`, `no-new-privileges`, non-root, pids/memory caps, repo mounted read-only). The tool is pre-fetched before egress is cut so it runs offline (`--no-bootstrap`). This is the only place the dangerous flag is permitted. |
 
 ### Stage 3 — SBOM
 
@@ -206,3 +220,15 @@ The final stage rolls every prior element into **one CycloneDX 1.6 AI BOM** — 
 | `ai-bom-validate` | Validates the BOM against the CycloneDX 1.6 JSON schema with `cyclonedx validate --fail-on-errors`, then converts it to `sbom/aibom.cyclonedx.xml` — the form the next job signs. Advisory (`allow_failure: true`) so a schema slip never blocks delivery of the BOM artifact. |
 | `ai-bom-sign` | Applies the BOM's **own** signature as a native CycloneDX **enveloped signature** (`cyclonedx sign bom`, an XML Digital Signature embedded directly in `aibom.cyclonedx.xml`), then proves it with `cyclonedx verify all`. Unlike a detached signature, this verifies **as-is** — no canonical reconstruction. Uses a stable RSA key from `CYCLONEDX_SIGNING_KEY` / `CYCLONEDX_SIGNING_PUB` when configured, else an ephemeral keypair (intra-run verification only). The private key is never published; the public key ships as `aibom-signing.pub` for offline verification. Models and datasets keep their cosign/Sigstore signatures (embedded by `ai-bom-assemble`); only the BOM document itself moves to enveloped signing. |
 | `drift-gate` | The hard gate for model drift. Runs **last** — after the BOM is built and signed — and fails the pipeline (`allow_failure: false`) when `model-drift-detection` reported drift. Placing it here means a drifted run still produces a signed BOM that **records** the drift, rather than a blocked pipeline that explains nothing. Passes on a clean run, a freshly-seeded baseline, or when drift detection was skipped. |
+| `dependency-track-upload` | Ingests the Syft SBOM and the AI BOM (nested under it via `parentName`/`parentVersion`) into **Dependency-Track** for *continuous* analysis — re-scanning against new CVEs and policy conditions over time. Hard policy gate: fails on any non-suppressed violation whose `violationState` is in `DT_FAIL_ON` (default `FAIL`). Skips cleanly when `DT_API_URL`/`DT_API_KEY` are unset. |
+
+### Stage 10 — Deploy Prep
+
+This stage produces the two artifacts the **deploy-time verifiers** consume, closing the sign→verify loop. Both skip cleanly when their inputs aren't configured, so the pipeline runs unchanged until the image and an artifact store are wired in.
+
+| Job | What it does |
+| --- | --- |
+| `image-sign` | Applies a **Cosign keyless** signature to the already-built workload image (`IMAGE_REF`), using the GitLab `SIGSTORE_ID_TOKEN` (audience `"sigstore"`). The resulting Fulcio certificate's identity matches the gitlab branch of the **Kyverno** `ClusterPolicy` regex, so admission control admits a Pod only when its image carries this signature. Without this job, flipping that Kyverno policy to `Enforce` would block every deploy. Skips when `IMAGE_REF` is unset; `allow_failure: true` (Kyverno is the deploy-time gate). |
+| `publish-signed-artifacts` | Uploads the signed **AI-BOM** (`aibom.cyclonedx.xml`) + its public key, the cosign-signed **dataset** (normalised to `dataset.dat`/`.sig`/`.pem`), and — when present — the **model bundle** to the GitLab **Generic Package Registry** at `${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}`. This is exactly the path the **Argo CD PreSync hook** fetches via `ARTIFACT_BASE_URL` to verify signatures *before* a rollout (AI-BOM via `cyclonedx verify`, dataset via `cosign verify-blob`, model via `model_signing verify`). Uses `CI_JOB_TOKEN` — no extra secret. Emits `artifacts-manifest.txt` recording what was published. |
+
+> **Deploy-time verification (in-cluster, outside CI).** The loop is closed by two manifests under `deployment/`: `kubernetes/policies/kyverno-verify-image-signatures.yaml` (verifies the **image** signature at admission — `Audit` by default; flip to `Enforce` once `image-sign` has run for the deployed digest) and `argocd/verify-signatures-presync-hook.yaml` (a PreSync Job that verifies the **AI-BOM / dataset / model** signatures and aborts the sync on failure). See `deployment/vault/sample-secret-map.md` for the (secretless) wiring.

@@ -1114,7 +1114,8 @@ hf-artifact-scan:
   needs: ["model-signing-install", "vault-secrets"]
   script:
     - apt-get update -qq && apt-get install -y -qq clamav clamav-freshclam
-    - freshclam --quiet || echo "WARNING: ClamAV DB update failed — using cached DB"
+    - |
+      freshclam --quiet || echo "WARNING: ClamAV DB update failed — using cached DB"
     - pip install huggingface_hub modelscan
     - mkdir -p "${REPORTS_DIR}/hf-scan" "${CI_PROJECT_DIR}/.hf-cache"
     - |
@@ -1275,7 +1276,8 @@ dataset-scan:
       fi
       echo "Scanning: ${DATASET_FILE}"
     - apt-get update -qq && apt-get install -y -qq clamav clamav-freshclam
-    - freshclam --quiet 2>&1 | tail -3 || echo "WARNING: freshclam update failed — using cached DB"
+    - |
+      freshclam --quiet 2>&1 | tail -3 || echo "WARNING: freshclam update failed — using cached DB"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -type f | head -1)
       clamscan \

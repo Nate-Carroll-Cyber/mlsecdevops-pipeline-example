@@ -199,12 +199,12 @@ All jobs run in parallel after the gate passes.
 | Job | What it does |
 | --- | --- |
 | `rag-smoke-eval` | Runs a local RAG smoke test against the GAIPS course materials. |
-| `promptfoo-eval` | Runs adversarial prompt evaluations defined in `evals/promptfoo.yaml`. Advisory failures still upload `promptfoo-results.json`; if Promptfoo exits before writing a report, the job writes a minimal failure JSON for downstream evidence. |
+| `promptfoo-eval` | Runs adversarial prompt evaluations defined in `evals/promptfoo.yaml` only when `MODEL_ENDPOINT` is configured; otherwise it writes a skipped `promptfoo-results.json` artifact. Advisory failures still upload `promptfoo-results.json`; if Promptfoo exits before writing a report, the job writes a minimal failure JSON for downstream evidence. |
 | `garak-scan` | Probes the live model endpoint (from `MODEL_ENDPOINT`) with all Garak probe modules to test for jailbreaks, extraction, and unsafe outputs. |
 | `giskard-scan` | Runs Giskard's LLM scan against the live model for bias, hallucination, and prompt injection. |
 | `inspect-ai-eval` | Runs structured capability and safety evaluations using `inspect-ai`. Uses project task files if present; otherwise runs MMLU (knowledge), TruthfulQA (honesty), WMDP bio/chem/cyber (hazard refusal), and GDM in-house CTF (agent safety). |
 | `markllm-deps-audit` | Runs `pip-audit` against `torch`, `transformers`, and `markllm` (the heavy watermark stack) on `python:3.10-slim` before `markllm-watermark-eval`. Advisory (`allow_failure: true`). |
-| `markllm-watermark-eval` | Tests whether model outputs can be watermark-detected using MarkLLM. Advisory failures still upload `markllm-results.json`, including readiness/import status when the heavy watermark stack is unavailable. |
+| `markllm-watermark-eval` | Records MarkLLM readiness by default and exits successfully even when the MarkLLM import surface is unavailable. Set `MARKLLM_LIVE_EVAL=true` to make import/runtime readiness failures fail the advisory job once a model-cache policy is approved. Artifacts always include `markllm-results.json`. |
 | `pyrit-scan` | Runs Microsoft PyRIT adversarial probes against the model endpoint. |
 
 ### Stage 7 — Guardrail Regression

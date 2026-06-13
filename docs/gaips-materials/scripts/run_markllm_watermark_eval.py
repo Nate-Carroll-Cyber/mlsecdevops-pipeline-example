@@ -30,6 +30,7 @@ def main() -> None:
     parser.add_argument("--model-id", default=os.environ.get("MARKLLM_MODEL_ID", "facebook/opt-125m"))
     args = parser.parse_args()
 
+    live_eval = os.environ.get("MARKLLM_LIVE_EVAL", "false").lower() == "true"
     markllm_ready = module_available("watermark.auto_watermark")
     torch_ready = module_available("torch")
     transformers_ready = module_available("transformers")
@@ -38,6 +39,7 @@ def main() -> None:
         "tool": "markllm",
         "mode": "ci-advisory",
         "status": "configured" if markllm_ready else "markllm-import-unavailable",
+        "live_eval_enabled": live_eval,
         "algorithm": args.algorithm,
         "algorithm_config": args.config,
         "model_id": args.model_id,
@@ -58,7 +60,7 @@ def main() -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
 
-    if not markllm_ready:
+    if live_eval and not markllm_ready:
         raise SystemExit("MarkLLM import failed; see markllm-results.json for readiness details.")
 
 

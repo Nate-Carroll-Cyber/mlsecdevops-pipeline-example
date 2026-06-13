@@ -46,6 +46,7 @@ variables:
   IMAGE_GITLEAKS: "zricethezav/gitleaks:latest"       # gitleaks-scan SAST job image
   IMAGE_CLAMAV: "clamav/clamav:1.4"                   # clamav-scan job — pinned off :latest (patch-floating line)
   PROMPTFOO_VERSION: "0.121.15"
+  MARKLLM_LIVE_EVAL: "false"
   # ── Dataset download — Generic Package Registry ───────────────────────────────
   # Set these in GitLab Settings → CI/CD → Variables (or fetch from Vault).
   # Leave DATASET_FILENAME blank to skip the download/scan jobs entirely.
@@ -1587,12 +1588,19 @@ rag-smoke-eval:
 promptfoo-eval:
   stage: ai-eval
   image: node:20-slim
-  needs: ["artifact-signing-gate"]
+  needs: ["artifact-signing-gate", "vault-secrets"]
   allow_failure: true
   before_script:
     - npm install -g "promptfoo@${PROMPTFOO_VERSION}"
   script:
     - mkdir -p "${REPORTS_DIR}"
+    - |
+      if [ -z "${MODEL_ENDPOINT}" ]; then
+        echo "MODEL_ENDPOINT not set — skipping Promptfoo live eval"
+        printf '{"tool":"promptfoo","skipped":true,"reason":"MODEL_ENDPOINT not set","results":{"stats":{"successes":0,"failures":0,"errors":0}}}\n' \
+          > "${REPORTS_DIR}/promptfoo-results.json"
+        exit 0
+      fi
     - |
       PROMPTFOO_EXIT=0
       promptfoo eval \
@@ -1822,8 +1830,15 @@ markllm-watermark-eval:
     - pip install --quiet markllm torch transformers
     - mkdir -p "${REPORTS_DIR}"
     - |
+      MARKLLM_EXIT=0
       python "${GAIPS_MATERIALS_DIR}/scripts/run_markllm_watermark_eval.py" \
-        --output "${REPORTS_DIR}/markllm-results.json"
+        --output "${REPORTS_DIR}/markllm-results.json" || MARKLLM_EXIT=$?
+      if [ "${MARKLLM_LIVE_EVAL:-false}" = "true" ]; then
+        exit "${MARKLLM_EXIT}"
+      fi
+      if [ "${MARKLLM_EXIT}" -ne 0 ]; then
+        echo "MarkLLM live eval disabled — preserving readiness report and not failing advisory job"
+      fi
   artifacts:
     when: always
     paths:
@@ -2046,6 +2061,7 @@ model-signing-evidence:
       aud: "sigstore"
   script:
     - pip install model-signing sigstore
+    - apt-get update -qq && apt-get install -y -qq curl ca-certificates
     - mkdir -p "${EVIDENCE_DIR}"
     - |
       python - <<'PYEOF'

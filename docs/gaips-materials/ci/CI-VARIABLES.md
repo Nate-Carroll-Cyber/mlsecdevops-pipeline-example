@@ -132,6 +132,7 @@ match an internal mirror or bump a tool.
 | `COSIGN_VERSION` | `v2.4.1` | cosign release (checksum-verified at install). |
 | `GITLEAKS_VERSION` | `8.30.1` | gitleaks **binary** for `dataset-redact` (checksum-verified). |
 | `PROMPTFOO_VERSION` | `0.121.15` | `npm install -g promptfoo@…`. |
+| `MARKLLM_LIVE_EVAL` | `false` | Keep MarkLLM in readiness-only mode by default. Set to `true` only after approving model download/cache policy and making watermark runtime failures meaningful. |
 | `IMAGE_SEMGREP` | `semgrep/semgrep:v1.165.0` | SAST image. |
 | `IMAGE_MINICONDA` | `continuumio/miniconda3:26.3.2` | conda verify image. |
 | `IMAGE_SYFT` | `anchore/syft:v1.45.1` | SBOM image. |

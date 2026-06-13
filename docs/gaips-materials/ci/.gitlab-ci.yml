@@ -53,6 +53,10 @@ variables:
   DT_API_URL: ""                    # e.g. https://dtrack.example.com (no trailing /api)
   DT_API_KEY: ""                    # masked; needs BOM_UPLOAD + VIEW perms
   DT_FAIL_ON: "FAIL"                # violationState(s) that fail the gate (comma list)
+  # ── Snyk Agent Scan — agent/MCP/skill supply-chain scan ───────────────────────
+  # Required to run snyk-agent-scan. Set as a MASKED CI/CD variable (or fetch from
+  # Vault). Blank = the snyk-agent-scan job skips cleanly.
+  SNYK_TOKEN: ""
   # ── DVC — data/model version lineage (optional) ───────────────────────────────
   # Set DVC_REMOTE_URL (s3://, gs://, azure://, ssh://…) to enable `dvc pull` in
   # dvc-verify. Without it, the job reports tracked-vs-workspace status only; with
@@ -210,6 +214,7 @@ vault-secrets:
           "gaips/ci/registry-token":       "CI_REGISTRY_TOKEN",
           "gaips/ci/dt-api-url":           "DT_API_URL",
           "gaips/ci/dt-api-key":           "DT_API_KEY",
+          "gaips/ci/snyk-token":           "SNYK_TOKEN",
       }
 
       lines = []
@@ -338,6 +343,78 @@ gitleaks-scan:
       - "${REPORTS_DIR}/gitleaks.log"
     expire_in: 7 days
   allow_failure: false
+
+# Snyk Agent Scan (github.com/snyk/agent-scan, Apache-2.0) — supply-chain scan of
+# this repo's AGENT components: the MCP server config and the agent skill files.
+# Detects prompt injection, tool poisoning/shadowing, toxic flows, and credential
+# issues that the code-level SAST (semgrep/gitleaks) does not look for. Static by
+# default: it does NOT launch the MCP servers (their `python3 -m gaips_*` modules
+# aren't installed in CI, and running arbitrary server commands in CI is unsafe).
+# Set AGENT_SCAN_RUN_MCP_SERVERS=true ONLY in a trusted runner to let it start the
+# servers and introspect live tool descriptions. Skips cleanly when SNYK_TOKEN is
+# unset — same pattern as dependency-track-upload.
+snyk-agent-scan:
+  stage: sast
+  needs: ["setup"]
+  # New scanner introduced soft: --ci makes it EXIT 1 on findings, but allow_failure
+  # keeps the pipeline green while you triage the fixture's baseline. Flip to
+  # allow_failure: false to make agent-component findings a hard gate.
+  allow_failure: true
+  variables:
+    AGENT_SCAN_RUN_MCP_SERVERS: "false"
+    MCP_CONFIG: "${GAIPS_MATERIALS_DIR}/mcp/cline_mcp_settings.json"
+    SKILLS_PATH: "${GAIPS_MATERIALS_DIR}/agent"
+    # uvx resolves snyk-agent-scan from PyPI; pin the package index to the same
+    # vetted mirror the rest of the pipeline uses.
+    UV_INDEX_URL: "${PIP_INDEX_URL}"
+  script:
+    - |
+      if [ -z "${SNYK_TOKEN:-}" ]; then
+        echo "SNYK_TOKEN unset — agent-scan skipped (set it as a masked CI/CD variable to enable)"
+        exit 0
+      fi
+    - mkdir -p "${REPORTS_DIR}"
+    - pip install --quiet uv      # provides `uvx`; honours UV_INDEX_URL above
+    - |
+      # Opt-in, trusted-runner-only: actually launch the MCP servers to read their
+      # live tool descriptions. Default off → static config scan only.
+      RUN_SERVERS=""
+      if [ "${AGENT_SCAN_RUN_MCP_SERVERS}" = "true" ]; then
+        echo "AGENT_SCAN_RUN_MCP_SERVERS=true — will start MCP servers (trusted runner only)"
+        RUN_SERVERS="--dangerously-run-mcp-servers --server-timeout 20"
+      fi
+    - |
+      # 1) Scan the MCP server configuration. --ci → exit 1 on findings; --json →
+      #    machine-readable evidence. Captured so the gate decision is explicit.
+      AS_EXIT=0
+      uvx snyk-agent-scan@latest "${MCP_CONFIG}" \
+        --json --ci ${RUN_SERVERS} \
+        > "${REPORTS_DIR}/agent-scan-mcp.json" 2> "${REPORTS_DIR}/agent-scan-mcp.log" \
+        || AS_EXIT=$?
+      echo "agent-scan (mcp config) exit=${AS_EXIT}"
+    - |
+      # 2) Scan the agent skill files (static; never starts servers).
+      SK_EXIT=0
+      uvx snyk-agent-scan@latest --skills "${SKILLS_PATH}" \
+        --json --ci \
+        > "${REPORTS_DIR}/agent-scan-skills.json" 2> "${REPORTS_DIR}/agent-scan-skills.log" \
+        || SK_EXIT=$?
+      echo "agent-scan (skills) exit=${SK_EXIT}"
+    - |
+      # Gate: any non-zero --ci exit means at least one risk was reported.
+      if [ "${AS_EXIT:-0}" -ne 0 ] || [ "${SK_EXIT:-0}" -ne 0 ]; then
+        echo "Snyk Agent Scan reported agent-component risks — see reports/agent-scan-*.json"
+        exit 1
+      fi
+      echo "Snyk Agent Scan: no agent-component risks detected"
+  artifacts:
+    when: always
+    paths:
+      - "${REPORTS_DIR}/agent-scan-mcp.json"
+      - "${REPORTS_DIR}/agent-scan-mcp.log"
+      - "${REPORTS_DIR}/agent-scan-skills.json"
+      - "${REPORTS_DIR}/agent-scan-skills.log"
+    expire_in: 7 days
 
 pip-audit:
   stage: sast

@@ -1488,15 +1488,24 @@ dataset-scan:
       freshclam --quiet 2>&1 | tail -3 || echo "WARNING: freshclam update failed — using cached DB"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -type f | head -1)
+      set +e
       clamscan \
         --no-summary \
         --infected \
         --log="${REPORTS_DIR}/dataset-clamav.log" \
-        "${DATASET_FILE}"; CLAM_EXIT=$?
+        "${DATASET_FILE}" \
+        > "${REPORTS_DIR}/clamav-dataset.txt" 2>&1
+      CLAM_EXIT=$?
+      set -e
+      cat "${REPORTS_DIR}/clamav-dataset.txt"
       INFECTED=$(grep " FOUND$" "${REPORTS_DIR}/dataset-clamav.log" 2>/dev/null | wc -l | tr -d ' ')
       INFECTED="${INFECTED:-0}"
+      printf '{"scanned_file":"%s","infected":%s,"exit_code":%s}\n' \
+        "${DATASET_FILE}" "${INFECTED}" "${CLAM_EXIT}" \
+        > "${REPORTS_DIR}/dataset-clamav.json"
       echo "ClamAV: ${INFECTED} infected file(s) | exit ${CLAM_EXIT}"
       [ "${CLAM_EXIT}" -ne 1 ] || { echo "Infected dataset detected — failing pipeline"; exit 1; }
+      [ "${CLAM_EXIT}" -ne 2 ] || { echo "ClamAV dataset scan error — failing pipeline"; exit 1; }
     - |
       python3 - <<'PYEOF'
       import json, os, pathlib, sys
@@ -1553,6 +1562,8 @@ dataset-scan:
     paths:
       - "${REPORTS_DIR}/dataset-scan.json"
       - "${REPORTS_DIR}/dataset-clamav.log"
+      - "${REPORTS_DIR}/dataset-clamav.json"
+      - "${REPORTS_DIR}/clamav-dataset.txt"
     expire_in: 7 days
 
 # Defence-in-depth on data confidentiality: after the AV/structural gate, strip

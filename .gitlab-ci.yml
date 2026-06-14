@@ -299,18 +299,10 @@ secret-detection:
         echo "No secret detection report produced — skipping summary"
         exit 0
       fi
-      read -r FINDINGS CRITICAL < <(python3 - <<'PYEOF'
-      import json
-      try:
-          report = json.load(open("gl-secret-detection-report.json"))
-      except Exception:
-          print("0 0")
-      else:
-          vulnerabilities = report.get("vulnerabilities", []) if isinstance(report, dict) else []
-          critical = sum(1 for item in vulnerabilities if item.get("severity") == "Critical")
-          print(f"{len(vulnerabilities)} {critical}")
-      PYEOF
-      )
+      # The GitLab secrets analyzer image is intentionally minimal and does not
+      # include Python or jq, so keep this summary POSIX-shell compatible.
+      FINDINGS=$(grep -c '"severity"' gl-secret-detection-report.json 2>/dev/null || echo 0)
+      CRITICAL=$(grep -c '"severity"[[:space:]]*:[[:space:]]*"Critical"' gl-secret-detection-report.json 2>/dev/null || echo 0)
       echo "Secret detection: ${FINDINGS} finding(s); critical=${CRITICAL}"
       if [ "${CRITICAL}" -gt 0 ]; then
         echo "Critical secrets found — failing pipeline"

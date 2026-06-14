@@ -169,7 +169,7 @@ stages:
 setup:
   stage: setup
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   allow_failure: true
@@ -193,7 +193,7 @@ setup:
 vault-secrets:
   stage: setup
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: []
@@ -269,7 +269,7 @@ vault-secrets:
 semgrep-sast:
   stage: sast
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["setup"]
@@ -292,7 +292,7 @@ semgrep-sast:
 secret-detection:
   stage: sast
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image: registry.gitlab.com/security-products/secrets:4
@@ -336,7 +336,7 @@ secret-detection:
 gitleaks-scan:
   stage: sast
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image:
@@ -378,7 +378,7 @@ gitleaks-scan:
 pip-audit:
   stage: sast
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["setup"]
@@ -427,7 +427,7 @@ pip-audit:
 pkg-integrity:
   stage: sast
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["setup"]
@@ -491,7 +491,7 @@ pkg-integrity:
 conda-pkg-verify:
   stage: sast
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image: "${IMAGE_MINICONDA}"
@@ -536,7 +536,7 @@ conda-pkg-verify:
 syft-cyclonedx:
   stage: sbom
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image:
@@ -558,7 +558,7 @@ syft-cyclonedx:
 syft-spdx:
   stage: sbom
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image:
@@ -585,7 +585,7 @@ syft-spdx:
 dvc-verify:
   stage: sbom
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["setup"]
@@ -624,7 +624,7 @@ dvc-verify:
 grype-scan:
   stage: vuln-scan
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image:
@@ -645,7 +645,7 @@ grype-scan:
 trivy-scan:
   stage: vuln-scan
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image:
@@ -678,7 +678,7 @@ trivy-scan:
 model-signing-install:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["setup"]
@@ -708,7 +708,7 @@ model-signing-install:
 model-fixture-download:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["setup"]
@@ -746,7 +746,7 @@ model-fixture-download:
 model-digest:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["model-signing-install", "model-fixture-download"]
@@ -776,7 +776,7 @@ model-digest:
 model-sign:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["model-digest", "model-fixture-download", "vault-secrets"]
@@ -819,7 +819,7 @@ sigstore-identity-discover:
   image: python:3.11-slim
   needs: []
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main" && $SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: manual
     - when: never
   allow_failure: true
@@ -879,7 +879,7 @@ sigstore-identity-discover:
 signature-verification:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["model-sign", "model-fixture-download", "vault-secrets"]
@@ -913,7 +913,7 @@ signature-verification:
 tamper-verification:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["model-digest"]
@@ -1035,7 +1035,7 @@ tamper-verification:
 modelscan:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["model-signing-install", "model-fixture-download"]
@@ -1089,7 +1089,7 @@ modelscan:
 modelaudit-scan:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image: python:3.11-slim
@@ -1183,7 +1183,7 @@ modelaudit-scan:
 modelfile-audit:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["setup"]
@@ -1247,7 +1247,7 @@ modelfile-audit:
 clamav-scan:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image: "${IMAGE_CLAMAV}"
@@ -1285,7 +1285,7 @@ clamav-scan:
 hf-artifact-scan:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["model-signing-install", "vault-secrets"]
@@ -1389,7 +1389,7 @@ hf-artifact-scan:
 dataset-download:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["setup", "vault-secrets"]
@@ -1445,7 +1445,7 @@ dataset-download:
 dataset-scan:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["dataset-download"]
@@ -1537,7 +1537,7 @@ dataset-scan:
 dataset-redact:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["dataset-scan"]
@@ -1594,7 +1594,7 @@ dataset-redact:
 eval-dataset-validate:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["dataset-redact"]
@@ -1626,7 +1626,7 @@ eval-dataset-validate:
 great-expectations-validate:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["eval-dataset-validate", "dataset-redact"]
@@ -1660,7 +1660,7 @@ great-expectations-validate:
 ydata-profile:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["dataset-redact"]
@@ -1689,7 +1689,7 @@ ydata-profile:
 dataset-sign:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   # Sign only AFTER scan + redaction + schema validation — attest clean, redacted,
@@ -1743,7 +1743,7 @@ dataset-sign:
 artifact-signing-gate:
   stage: model-integrity
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["signature-verification", "tamper-verification", "modelscan", "modelaudit-scan", "modelfile-audit", "clamav-scan", "hf-artifact-scan", "dataset-scan", "eval-dataset-validate"]
@@ -1805,7 +1805,7 @@ artifact-signing-gate:
 rag-smoke-eval:
   stage: ai-eval
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["artifact-signing-gate"]
@@ -1826,7 +1826,7 @@ rag-smoke-eval:
 promptfoo-eval:
   stage: ai-eval
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image: node:20-slim
@@ -1845,7 +1845,7 @@ promptfoo-eval:
 garak-scan:
   stage: ai-eval
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["artifact-signing-gate", "vault-secrets"]
@@ -1912,7 +1912,7 @@ garak-scan:
 giskard-scan:
   stage: ai-eval
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["artifact-signing-gate"]
@@ -1930,7 +1930,7 @@ giskard-scan:
 inspect-ai-eval:
   stage: ai-eval
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["artifact-signing-gate", "vault-secrets"]
@@ -2037,7 +2037,7 @@ inspect-ai-eval:
 markllm-deps-audit:
   stage: ai-eval
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image: python:3.10-slim
@@ -2072,7 +2072,7 @@ markllm-deps-audit:
 markllm-watermark-eval:
   stage: ai-eval
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image: python:3.10-slim
@@ -2093,7 +2093,7 @@ markllm-watermark-eval:
 pyrit-scan:
   stage: ai-eval
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["artifact-signing-gate"]
@@ -2115,7 +2115,7 @@ pyrit-scan:
 guardrail-regression:
   stage: guardrail
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs:
@@ -2141,7 +2141,7 @@ guardrail-regression:
 model-drift-detection:
   stage: guardrail
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs:
@@ -2187,7 +2187,7 @@ model-baseline-commit:
   needs: ["model-drift-detection"]
   allow_failure: true   # a failed auto-commit must never break the build
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   before_script:
@@ -2226,7 +2226,7 @@ model-baseline-commit:
 evidently-drift:
   stage: guardrail
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["dataset-redact", "eval-dataset-validate"]
@@ -2264,7 +2264,7 @@ evidently-drift:
 evidence-summary:
   stage: evidence
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs:
@@ -2318,7 +2318,7 @@ evidence-summary:
 model-signing-evidence:
   stage: evidence
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs:
@@ -2391,7 +2391,7 @@ model-signing-evidence:
 ai-bom-assemble:
   stage: ai-bom
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   # Direct needs because GitLab only downloads artifacts from jobs named here
@@ -2449,7 +2449,7 @@ ai-bom-assemble:
 ai-bom-validate:
   stage: ai-bom
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image:
@@ -2484,7 +2484,7 @@ ai-bom-validate:
 ai-bom-sign:
   stage: ai-bom
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image:
@@ -2544,7 +2544,7 @@ ai-bom-sign:
 drift-gate:
   stage: ai-bom
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["model-drift-detection", "ai-bom-sign"]
@@ -2578,7 +2578,7 @@ drift-gate:
 dependency-track-upload:
   stage: ai-bom
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["syft-cyclonedx", "ai-bom-assemble", "vault-secrets"]
@@ -2616,7 +2616,7 @@ dependency-track-upload:
 image-sign:
   stage: deploy-prep
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["drift-gate"]
@@ -2681,7 +2681,7 @@ image-sign:
 publish-signed-artifacts:
   stage: deploy-prep
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["ai-bom-sign", "dataset-sign", "model-sign", "model-fixture-download"]
@@ -2767,7 +2767,7 @@ publish-signed-artifacts:
 metrics-normalize:
   stage: deploy-prep
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   allow_failure: true   # reporting only — never fail the pipeline on the dashboard
@@ -2796,7 +2796,7 @@ metrics-normalize:
 pages:
   stage: deploy-prep
   rules:
-    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs:

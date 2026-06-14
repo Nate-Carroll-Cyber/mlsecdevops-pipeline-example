@@ -170,6 +170,10 @@ stages:
 
 setup:
   stage: setup
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   allow_failure: true
   script:
     - !reference [.resolve-reqs, script]
@@ -190,6 +194,10 @@ setup:
 
 vault-secrets:
   stage: setup
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: []
   allow_failure: true
   # id_tokens issues a per-job OIDC JWT (GitLab 15.7+).
@@ -262,6 +270,10 @@ vault-secrets:
 
 semgrep-sast:
   stage: sast
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["setup"]
   script:
     - pip install semgrep
@@ -281,6 +293,10 @@ semgrep-sast:
 # surfaces findings directly in the GitLab Security Dashboard and MR widget.
 secret-detection:
   stage: sast
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image: registry.gitlab.com/security-products/secrets:4
   before_script: []
   needs: ["setup"]
@@ -321,6 +337,10 @@ secret-detection:
 # explicit git-history depth control. Produces a standalone JSON report.
 gitleaks-scan:
   stage: sast
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image:
     name: "${IMAGE_GITLEAKS}"
     entrypoint: [""]
@@ -359,6 +379,10 @@ gitleaks-scan:
 
 pip-audit:
   stage: sast
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["setup"]
   script:
     - pip install pip-audit
@@ -404,6 +428,10 @@ pip-audit:
 
 pkg-integrity:
   stage: sast
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["setup"]
   script:
     - pip install pip-tools
@@ -464,6 +492,10 @@ pkg-integrity:
 
 conda-pkg-verify:
   stage: sast
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image: "${IMAGE_MINICONDA}"
   needs: ["setup"]
   before_script: []          # conda image manages its own Python env
@@ -505,6 +537,10 @@ conda-pkg-verify:
 
 syft-cyclonedx:
   stage: sbom
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image:
     name: "${IMAGE_SYFT}"
     entrypoint: [""]
@@ -523,6 +559,10 @@ syft-cyclonedx:
 
 syft-spdx:
   stage: sbom
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image:
     name: "${IMAGE_SYFT}"
     entrypoint: [""]
@@ -546,6 +586,10 @@ syft-spdx:
 # skips cleanly when the repo has no .dvc/ directory, so it is opt-in.
 dvc-verify:
   stage: sbom
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["setup"]
   allow_failure: true   # advisory until DVC is initialized + a remote is configured
   script:
@@ -581,6 +625,10 @@ dvc-verify:
 
 grype-scan:
   stage: vuln-scan
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image:
     name: "${IMAGE_GRYPE}"
     entrypoint: [""]
@@ -604,6 +652,10 @@ grype-scan:
 
 trivy-scan:
   stage: vuln-scan
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image:
     name: "${IMAGE_TRIVY}"
     entrypoint: [""]
@@ -633,6 +685,10 @@ trivy-scan:
 
 model-signing-install:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["setup"]
   allow_failure: true
   script:
@@ -655,6 +711,10 @@ model-signing-install:
 
 model-fixture-download:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["setup"]
   before_script: []          # curl-only job; skip Python venv bootstrap
   script:
@@ -689,6 +749,10 @@ model-fixture-download:
 
 model-digest:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["model-signing-install", "model-fixture-download"]
   allow_failure: true
   script:
@@ -715,6 +779,10 @@ model-digest:
 
 model-sign:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["model-digest", "model-fixture-download", "vault-secrets"]
   # id_tokens issues a per-job OIDC JWT; aud "sigstore" is required by Fulcio for keyless signing.
   id_tokens:
@@ -738,7 +806,7 @@ model-sign:
         SIG_COUNT=$((SIG_COUNT + 1))
         echo "Signing: ${model_dir}"
         python -m model_signing sign sigstore "${model_dir}" \
-          --identity-token "${SIGSTORE_ID_TOKEN}" \
+          --identity_token "${SIGSTORE_ID_TOKEN}" \
           --signature "${model_dir}/model.sig"
       done < <(find "${MODEL_DIR}" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
       if [ "${SIG_COUNT}" -eq 0 ]; then
@@ -755,7 +823,7 @@ sigstore-identity-discover:
   image: python:3.11-slim
   needs: []
   rules:
-    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_BRANCH == "main" && $SIGSTORE_IDENTITY_DISCOVERY == "1"'
       when: manual
     - when: never
   allow_failure: true
@@ -769,7 +837,7 @@ sigstore-identity-discover:
     - echo "sigstore identity probe" > .sigstore-identity-discover/probe/probe.txt
     - |
       python -m model_signing sign sigstore .sigstore-identity-discover/probe \
-        --identity-token "${SIGSTORE_ID_TOKEN}" \
+        --identity_token "${SIGSTORE_ID_TOKEN}" \
         --signature .sigstore-identity-discover/probe/model.sig
     - |
       python3 - <<'PYEOF'
@@ -814,6 +882,10 @@ sigstore-identity-discover:
 
 signature-verification:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["model-sign", "model-fixture-download", "vault-secrets"]
   script:
     - pip install model-signing sigstore
@@ -844,6 +916,10 @@ signature-verification:
 
 tamper-verification:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["model-digest"]
   allow_failure: true
   # Persist the file-mode baseline across pipelines (best-effort; Vault is the
@@ -962,6 +1038,10 @@ tamper-verification:
 
 modelscan:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["model-signing-install", "model-fixture-download"]
   script:
     - pip install modelscan
@@ -1012,6 +1092,10 @@ modelscan:
 
 modelaudit-scan:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image: python:3.11-slim
   before_script: []
   needs: ["modelscan", "model-fixture-download"]
@@ -1102,6 +1186,10 @@ modelaudit-scan:
 
 modelfile-audit:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["setup"]
   allow_failure: true
   script:
@@ -1162,6 +1250,10 @@ modelfile-audit:
 
 clamav-scan:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image: "${IMAGE_CLAMAV}"
   before_script: []          # clamav image has no Python — skip .python-secure
   needs: ["model-signing-install", "model-fixture-download"]
@@ -1196,6 +1288,10 @@ clamav-scan:
 
 hf-artifact-scan:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["model-signing-install", "vault-secrets"]
   script:
     - apt-get update -qq && apt-get install -y -qq clamav clamav-freshclam
@@ -1296,6 +1392,10 @@ hf-artifact-scan:
 
 dataset-download:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["setup", "vault-secrets"]
   allow_failure: true   # skips gracefully when DATASET_FILENAME is not set
   script:
@@ -1348,6 +1448,10 @@ dataset-download:
 
 dataset-scan:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["dataset-download"]
   allow_failure: false   # hard gate — dataset must be clean before reaching eval jobs
   script:
@@ -1436,6 +1540,10 @@ dataset-scan:
 # it is validated, signed, or loaded into any eval.
 dataset-redact:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["dataset-scan"]
   # Fail-closed: a redaction tooling failure must NOT let unredacted data through.
   # The job still exits 0 cleanly when no dataset is configured (skip path below).
@@ -1489,6 +1597,10 @@ dataset-redact:
 # Schema before any eval job loads it. Catches off-contract data up front.
 eval-dataset-validate:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["dataset-redact"]
   allow_failure: false   # a malformed eval dataset must stop the run (skips cleanly when no dataset)
   script:
@@ -1517,6 +1629,10 @@ eval-dataset-validate:
 # human-readable evidence artifact. Runs on the redacted, on-contract data.
 great-expectations-validate:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["eval-dataset-validate", "dataset-redact"]
   allow_failure: true   # soft gate — flip to false once expectations are tuned (mixed-strictness rollout)
   script:
@@ -1547,6 +1663,10 @@ great-expectations-validate:
 # the expectation suite. Never gates — artifact only.
 ydata-profile:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["dataset-redact"]
   allow_failure: true   # advisory profiling — never blocks
   script:
@@ -1572,6 +1692,10 @@ ydata-profile:
 
 dataset-sign:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   # Sign only AFTER scan + redaction + schema validation — attest clean, redacted,
   # on-contract data (signs the redacted bytes, never the raw download).
   needs: ["eval-dataset-validate"]
@@ -1622,6 +1746,10 @@ dataset-sign:
 
 artifact-signing-gate:
   stage: model-integrity
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["signature-verification", "tamper-verification", "modelscan", "modelaudit-scan", "modelfile-audit", "clamav-scan", "hf-artifact-scan", "dataset-scan", "eval-dataset-validate"]
   # Enforcing chokepoint: no eval job runs unless model integrity passed. The
   # tamper job is allow_failure so it stays green and THIS gate makes the call —
@@ -1680,6 +1808,10 @@ artifact-signing-gate:
 
 rag-smoke-eval:
   stage: ai-eval
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["artifact-signing-gate"]
   allow_failure: true
   script:
@@ -1697,6 +1829,10 @@ rag-smoke-eval:
 
 promptfoo-eval:
   stage: ai-eval
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image: node:20-slim
   needs: ["artifact-signing-gate", "vault-secrets"]
   allow_failure: true
@@ -1730,6 +1866,10 @@ promptfoo-eval:
 
 garak-scan:
   stage: ai-eval
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["artifact-signing-gate", "vault-secrets"]
   script:
     - pip install garak
@@ -1793,6 +1933,10 @@ garak-scan:
 
 giskard-scan:
   stage: ai-eval
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["artifact-signing-gate"]
   script:
     - pip install "giskard[llm]" requests pandas
@@ -1807,6 +1951,10 @@ giskard-scan:
 
 inspect-ai-eval:
   stage: ai-eval
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["artifact-signing-gate", "vault-secrets"]
   allow_failure: true
   script:
@@ -1910,6 +2058,10 @@ inspect-ai-eval:
 
 markllm-deps-audit:
   stage: ai-eval
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image: python:3.10-slim
   needs: ["artifact-signing-gate"]
   allow_failure: true
@@ -1941,6 +2093,10 @@ markllm-deps-audit:
 
 markllm-watermark-eval:
   stage: ai-eval
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image: python:3.10-slim
   needs: ["artifact-signing-gate"]
   script:
@@ -1966,6 +2122,10 @@ markllm-watermark-eval:
 
 pyrit-scan:
   stage: ai-eval
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["artifact-signing-gate"]
   allow_failure: true
   script:
@@ -1984,6 +2144,10 @@ pyrit-scan:
 
 guardrail-regression:
   stage: guardrail
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs:
     - promptfoo-eval
     - pyrit-scan
@@ -2006,6 +2170,10 @@ guardrail-regression:
 # the threshold means the model or its guardrails regressed between runs.
 model-drift-detection:
   stage: guardrail
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs:
     - rag-smoke-eval
     - promptfoo-eval
@@ -2049,6 +2217,8 @@ model-baseline-commit:
   needs: ["model-drift-detection"]
   allow_failure: true   # a failed auto-commit must never break the build
   rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
   before_script:
     - apt-get update -qq && apt-get install -y -qq git
@@ -2085,6 +2255,10 @@ model-baseline-commit:
 # first run it seeds the reference for the maintainer to commit.
 evidently-drift:
   stage: guardrail
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["dataset-redact", "eval-dataset-validate"]
   allow_failure: true   # soft gate — flip to false once a reference is committed + tuned
   script:
@@ -2119,6 +2293,10 @@ evidently-drift:
 
 evidence-summary:
   stage: evidence
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs:
     - semgrep-sast
     - secret-detection
@@ -2169,6 +2347,10 @@ evidence-summary:
 
 model-signing-evidence:
   stage: evidence
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs:
     - artifact-signing-gate
     - model-digest
@@ -2239,6 +2421,10 @@ model-signing-evidence:
 
 ai-bom-assemble:
   stage: ai-bom
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   # Direct needs because GitLab only downloads artifacts from jobs named here
   # (artifact inheritance is not transitive through evidence-summary).
   needs:
@@ -2293,6 +2479,10 @@ ai-bom-assemble:
 
 ai-bom-validate:
   stage: ai-bom
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image:
     name: "${IMAGE_CYCLONEDX}"
     entrypoint: [""]
@@ -2324,6 +2514,10 @@ ai-bom-validate:
 
 ai-bom-sign:
   stage: ai-bom
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   image:
     name: "${IMAGE_CYCLONEDX}"
     entrypoint: [""]
@@ -2380,6 +2574,10 @@ ai-bom-sign:
 # when drift detection was skipped (no metrics).
 drift-gate:
   stage: ai-bom
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["model-drift-detection", "ai-bom-sign"]
   before_script: []          # stdlib python only
   allow_failure: false       # this is the gate — drift fails the pipeline
@@ -2410,6 +2608,10 @@ drift-gate:
 # components ride along as inventory + POLICY targets (which DO gate), not CVE matches.
 dependency-track-upload:
   stage: ai-bom
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["syft-cyclonedx", "ai-bom-assemble", "vault-secrets"]
   allow_failure: false   # hard gate on blocking policy violations (skips cleanly when DT unconfigured)
   variables:
@@ -2444,6 +2646,10 @@ dependency-track-upload:
 # policy to Enforce would block every deploy — that mismatch is what this closes.
 image-sign:
   stage: deploy-prep
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["drift-gate"]
   # Fulcio requires an OIDC token with aud "sigstore" for keyless signing — same
   # mechanism model-sign / dataset-sign use. The resulting cert's identity is this
@@ -2505,6 +2711,10 @@ image-sign:
 # an artifacts-manifest.txt recording precisely what was published.
 publish-signed-artifacts:
   stage: deploy-prep
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs: ["ai-bom-sign", "dataset-sign", "model-sign", "model-fixture-download"]
   allow_failure: true   # advisory: a publish hiccup must not fail the run; re-publishable from artifacts
   before_script: []
@@ -2587,6 +2797,10 @@ publish-signed-artifacts:
 # list. The normaliser skips any input that is absent or malformed.
 metrics-normalize:
   stage: deploy-prep
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   allow_failure: true   # reporting only — never fail the pipeline on the dashboard
   before_script: []
   script:
@@ -2612,6 +2826,10 @@ metrics-normalize:
 # named `pages` and publish the `public/` directory for Pages to serve it.
 pages:
   stage: deploy-prep
+  rules:
+    - if: '$SIGSTORE_IDENTITY_DISCOVERY == "1"'
+      when: never
+    - when: on_success
   needs:
     - job: metrics-normalize
       artifacts: true

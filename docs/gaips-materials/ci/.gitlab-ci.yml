@@ -33,9 +33,9 @@ variables:
   # seeded baseline is published as an artifact to commit manually.
   HF_MODEL_IDS: ""    # comma-separated HF repo IDs to scan, e.g. "org/model-a,org/model-b"
   HF_TOKEN: ""        # HuggingFace token for gated/private repos (mask in CI settings)
-  # Optional public model fixture. When MODEL_FIXTURE_URL is set, the pipeline
-  # downloads this exact artifact into MODEL_DIR so the primary digest/sign/scan
-  # jobs exercise real model bytes without committing weights to Git.
+  # Public model fixture downloaded into MODEL_DIR by default so the primary
+  # digest/sign/scan jobs exercise real model bytes without committing weights.
+  # Override to an empty value to skip the download.
   MODEL_FIXTURE_URL: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q2_k.gguf"
   MODEL_FIXTURE_PATH: "qwen2.5-1.5b-instruct-gguf/qwen2.5-1.5b-instruct-q2_k.gguf"
   MODEL_FIXTURE_SHA256: "5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a"
@@ -297,8 +297,18 @@ secret-detection:
         echo "No secret detection report produced — skipping summary"
         exit 0
       fi
-      FINDINGS=$(grep -c '"severity"' gl-secret-detection-report.json 2>/dev/null || echo 0)
-      CRITICAL=$(grep -c '"severity"[[:space:]]*:[[:space:]]*"Critical"' gl-secret-detection-report.json 2>/dev/null || echo 0)
+      read -r FINDINGS CRITICAL < <(python3 - <<'PYEOF'
+      import json
+      try:
+          report = json.load(open("gl-secret-detection-report.json"))
+      except Exception:
+          print("0 0")
+      else:
+          vulnerabilities = report.get("vulnerabilities", []) if isinstance(report, dict) else []
+          critical = sum(1 for item in vulnerabilities if item.get("severity") == "Critical")
+          print(f"{len(vulnerabilities)} {critical}")
+      PYEOF
+      )
       echo "Secret detection: ${FINDINGS} finding(s); critical=${CRITICAL}"
       if [ "${CRITICAL}" -gt 0 ]; then
         echo "Critical secrets found — failing pipeline"
@@ -889,6 +899,7 @@ modelscan:
           sys.exit(1)
       PYEOF
   artifacts:
+    when: always
     paths:
       - "${REPORTS_DIR}/modelscan.json"
       - "${REPORTS_DIR}/modelscan.log"
@@ -1435,6 +1446,22 @@ artifact-signing-gate:
         echo "GATE FAILED: integrity check did not pass"
         exit 1
       fi
+      python3 - <<'PYEOF'
+      import json, os, sys
+
+      path = os.path.join(os.environ["REPORTS_DIR"], "modelscan.json")
+      if not os.path.exists(path):
+          print("GATE FAILED: modelscan report missing")
+          sys.exit(1)
+
+      data = json.load(open(path))
+      total = (data.get("summary", {}) or {}).get("total_issues_by_severity", {}) or {}
+      critical = int(total.get("CRITICAL", 0))
+      if critical > 0:
+          print(f"GATE FAILED: modelscan reported {critical} CRITICAL issue(s)")
+          sys.exit(1)
+      print("ModelScan gate check PASSED")
+      PYEOF
       echo "Artifact signing gate PASSED — proceeding to evaluation"
 
 # ─── AI EVALUATION ───────────────────────────────────────────────────────────
@@ -1553,10 +1580,18 @@ inspect-ai-eval:
   needs: ["artifact-signing-gate", "vault-secrets"]
   allow_failure: true
   script:
-    - pip install "inspect-ai" "inspect-evals"
     - mkdir -p "${REPORTS_DIR}/inspect-logs"
     - |
-      MODEL="${MODEL_ENDPOINT:-openai/gpt-4o-mini}"
+      if [ -z "${MODEL_ENDPOINT}" ]; then
+        echo "MODEL_ENDPOINT not set — skipping Inspect AI live eval"
+        printf '{"tool":"inspect-ai","skipped":true,"reason":"MODEL_ENDPOINT not set","evals":[],"total_pass":0,"total_fail":0,"errors":[]}\n' \
+          > "${REPORTS_DIR}/inspect-ai-results.json"
+        : > "${REPORTS_DIR}/inspect-ai.log"
+        exit 0
+      fi
+    - pip install "inspect-ai" "inspect-evals"
+    - |
+      MODEL="${MODEL_ENDPOINT}"
       LOG_DIR="${REPORTS_DIR}/inspect-logs"
 
       run_eval() {
@@ -1916,7 +1951,7 @@ model-signing-evidence:
           "pipeline_id":    os.environ["CI_PIPELINE_ID"],
           "commit_sha":     os.environ["CI_COMMIT_SHA"],
           "ref":            os.environ["CI_COMMIT_REF_NAME"],
-          "timestamp":      datetime.datetime.utcnow().isoformat() + "Z",
+          "timestamp":      datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
           "model_digests":  open(os.environ["EVIDENCE_DIR"] + "/model-digests.txt").read().splitlines(),
       }
 

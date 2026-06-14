@@ -42,7 +42,7 @@ Each maps to a Vault path `secret/data/gaips/ci/<name>` (field `value`). If you'
 
 | Variable | Vault path (`…/ci/…`) | Masked | Seeded by TF? | Purpose / consuming jobs |
 | --- | --- | --- | --- | --- |
-| `MODEL_ENDPOINT` | `model-endpoint` | No | ✅ stub | Model API base URL. Drives `garak-scan`, `giskard-scan`, `inspect-ai-eval`, `pyrit-scan`. Unset → those skip/fall back. |
+| `MODEL_ENDPOINT` | `model-endpoint` | No | ✅ stub | Model API base URL. Drives `garak-scan`, `giskard-scan`, `inspect-ai-eval`, `pyrit-scan`. Unset → live eval jobs skip cleanly or emit fixture-only reports. |
 | `MODEL_SIGNING_IDENTITY` | `model-signing-identity` | No | ✅ stub | Fulcio cert identity `signature-verification` checks model sigs against. |
 | `SIGSTORE_OIDC_ISSUER` | `sigstore-oidc-issuer` | No | ✅ stub | OIDC issuer for `signature-verification`. |
 | `HF_TOKEN` | `hf-token` | Yes | ✅ stub | HuggingFace token for gated/private repos (`hf-artifact-scan`). |
@@ -63,7 +63,7 @@ Each maps to a Vault path `secret/data/gaips/ci/<name>` (field `value`). If you'
 | Variable | Source | Masked | Default | Purpose |
 | --- | --- | --- | --- | --- |
 | `HF_MODEL_IDS` | you | No | `""` | Comma-separated HF repo IDs to scan, e.g. `org/model-a,org/model-b`. Blank → `hf-artifact-scan` skips. |
-| `MODEL_FIXTURE_URL` | you | No | `""` | Optional direct model artifact URL to download into `MODEL_DIR` before digest/sign/scan jobs. Blank → `model-fixture-download` skips. |
+| `MODEL_FIXTURE_URL` | default/you | No | `https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q2_k.gguf` | Direct model artifact URL downloaded into `MODEL_DIR` before digest/sign/scan jobs. Set to blank to skip. |
 | `MODEL_FIXTURE_PATH` | default/you | No | `qwen2.5-1.5b-instruct-gguf/qwen2.5-1.5b-instruct-q2_k.gguf` | Relative path under `models/` for the downloaded fixture. |
 | `MODEL_FIXTURE_SHA256` | default/you | No | `5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a` | Expected SHA-256 for `MODEL_FIXTURE_URL`; the download job fails if it does not match. |
 | `DATASET_PACKAGE_NAME` | you | No | `""` | Generic Package Registry package holding the dataset. |

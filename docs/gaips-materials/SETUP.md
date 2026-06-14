@@ -282,5 +282,5 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
 > **Hardening after first green run:** pin `gitleaks/gitleaks` and `clamav/clamav`
 > off `:latest` (see `ci/SBOM.md` remediation), generate
 > `ci/requirements-ci.txt` via `pip-compile --generate-hashes` and switch jobs to
-> it, and flip soft gates (`garak`, `giskard`, `modelscan`, GX) to
+> it, and flip soft gates (`garak`, `giskard`, GX) to
 > `allow_failure: false` once baselines are stable.

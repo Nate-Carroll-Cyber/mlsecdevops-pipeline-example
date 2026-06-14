@@ -1476,7 +1476,7 @@ dataset-scan:
   script:
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/dataset-input"
     - |
-      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -type f 2>/dev/null | head -1)
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -type f -print -quit 2>/dev/null)
       if [ -z "${DATASET_FILE}" ]; then
         echo "No dataset file present — skipping scan"
         echo '{"skipped":true}' > "${REPORTS_DIR}/dataset-scan.json"
@@ -1487,7 +1487,8 @@ dataset-scan:
     - |
       freshclam --quiet 2>&1 | tail -3 || echo "WARNING: freshclam update failed — using cached DB"
     - |
-      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -type f | head -1)
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -type f -print -quit)
+      [ -n "${DATASET_FILE}" ] || { echo "No dataset file found before ClamAV scan"; exit 1; }
       set +e
       clamscan \
         --no-summary \

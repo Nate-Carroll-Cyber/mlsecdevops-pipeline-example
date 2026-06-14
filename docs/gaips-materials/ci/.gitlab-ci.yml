@@ -869,11 +869,13 @@ modelscan:
     - pip install modelscan
     - mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"
     - |
+      set +e
       modelscan scan \
         --path "${MODEL_DIR}" \
         --reporting-format json \
         --output-file "${REPORTS_DIR}/modelscan.json" \
         2>&1 | tee "${REPORTS_DIR}/modelscan.log"; SCAN_EXIT=${PIPESTATUS[0]}
+      set -e
       # Exit >1 means tool error (not just findings); propagate it
       [ "${SCAN_EXIT:-0}" -le 1 ] || exit "${SCAN_EXIT}"
     - |
@@ -884,8 +886,12 @@ modelscan:
       total   = summary.get("total_issues_by_severity", {})
       critical = int(total.get("CRITICAL", 0))
       high     = int(total.get("HIGH", 0))
+      scanned  = int((summary.get("scanned", {}) or {}).get("total_scanned", 0))
       print(f"modelscan: CRITICAL={critical} HIGH={high} "
-            f"MEDIUM={total.get('MEDIUM',0)} LOW={total.get('LOW',0)}")
+            f"MEDIUM={total.get('MEDIUM',0)} LOW={total.get('LOW',0)} "
+            f"SCANNED={scanned}")
+      if scanned == 0:
+          print("modelscan: no supported model artifacts scanned; preserving report and continuing")
       if critical > 0:
           print("CRITICAL issues found — failing pipeline")
           sys.exit(1)
@@ -1447,11 +1453,16 @@ artifact-signing-gate:
           sys.exit(1)
 
       data = json.load(open(path))
-      total = (data.get("summary", {}) or {}).get("total_issues_by_severity", {}) or {}
+      summary = data.get("summary", {}) or {}
+      total = summary.get("total_issues_by_severity", {}) or {}
       critical = int(total.get("CRITICAL", 0))
       if critical > 0:
           print(f"GATE FAILED: modelscan reported {critical} CRITICAL issue(s)")
           sys.exit(1)
+      scanned = int((summary.get("scanned", {}) or {}).get("total_scanned", 0))
+      if scanned == 0:
+          print("ModelScan gate check PASSED: no supported artifacts scanned")
+          sys.exit(0)
       print("ModelScan gate check PASSED")
       PYEOF
       echo "Artifact signing gate PASSED — proceeding to evaluation"

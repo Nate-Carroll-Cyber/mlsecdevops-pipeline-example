@@ -106,7 +106,7 @@ vault kv put secret/gaips/ci/registry-token        value="<registry_token_or_bla
 >
 > Do **not** create a `SIGSTORE_ID_TOKEN` CI/CD variable. GitLab mints it
 > automatically from each signing job's `id_tokens:` block. The `model-sign` job
-> passes that short-lived token to `model_signing` with `--identity-token`; if the
+> passes that short-lived token to `model_signing` with `--identity_token`; if the
 > log prints a browser OAuth URL, the token was not used.
 
 ### A6. (Optional) add the secrets Terraform does NOT seed
@@ -167,6 +167,21 @@ dotenv artifact.
 CI/CD variables (mask the sensitive ones): `MODEL_ENDPOINT`,
 `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`,
 `CI_REGISTRY_TOKEN`, plus `DT_API_URL` and `DT_API_KEY` if you use Dependency-Track.
+
+For GitLab keyless model signing, first discover the exact verification inputs:
+
+1. Push/run the one-shot `sigstore-identity-discover` CI job on `main`. The job
+   signs a throwaway probe with the same GitLab `SIGSTORE_ID_TOKEN` flow used by
+   `model-sign`.
+2. Copy the two values printed in the job log:
+   `MODEL_SIGNING_IDENTITY` and `SIGSTORE_OIDC_ISSUER`.
+3. Add them as GitLab project CI/CD variables in **Settings → CI/CD → Variables**.
+   Use type `Variable`, visibility `Visible`, environment scope `All`, masked off,
+   hidden off, and variable expansion off. Protect them only if `main` is protected
+   and you want verification limited to protected-branch pipelines.
+
+These two values are public Sigstore identity strings, not secrets, but they are
+exact-match verification inputs. Do not guess or hand-edit the identity string.
 
 ### B4. Confirm OIDC issuance
 The Vault/Sigstore jobs declare `id_tokens:` blocks (GitLab ≥ 15.7). Nothing to

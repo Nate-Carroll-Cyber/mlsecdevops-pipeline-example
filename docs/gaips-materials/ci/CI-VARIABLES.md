@@ -51,6 +51,12 @@ Each maps to a Vault path `secret/data/gaips/ci/<name>` (field `value`). If you'
 | `DT_API_URL` | `dt-api-url` | No | ❌ add manually | Dependency-Track base URL (see §4). |
 | `DT_API_KEY` | `dt-api-key` | Yes | ❌ add manually | Dependency-Track API key (needs BOM_UPLOAD + VIEW). |
 
+For projects not using Vault yet, set `MODEL_SIGNING_IDENTITY` and
+`SIGSTORE_OIDC_ISSUER` directly as GitLab project CI/CD variables after running
+the one-shot `sigstore-identity-discover` job on `main`. Use the exact values
+printed by that job. Keep masking and hiding off because these are public
+verification identifiers, not secrets; leave variable expansion off.
+
 > **"Seeded by TF?"** Terraform (`deployment/vault/terraform/`) creates the first
 > six as fixture stubs (`ignore_changes`, so real values you `vault kv put` later
 > survive applies). The last three are **not** seeded — add them only if you use
@@ -167,7 +173,7 @@ id_tokens:
 ```
 
 GitLab then injects a short-lived OIDC JWT into that job only. `model-sign`
-passes this token explicitly to `model_signing` with `--identity-token` so the
+passes this token explicitly to `model_signing` with `--identity_token` so the
 Sigstore signer uses noninteractive GitLab OIDC instead of starting a browser
 OAuth flow. If a signing job logs an OAuth URL, the job is not using the minted
 token path.

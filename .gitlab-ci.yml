@@ -1281,8 +1281,11 @@ clamav-scan:
       echo "clamscan exit: ${CLAM_EXIT}"
       set -e
       # clamscan exit codes: 0=clean 1=virus found 2=error.
-      INFECTED=$(grep " FOUND$" "${REPORTS_DIR}/clamav-model.log" 2>/dev/null | wc -l | tr -d ' ')
-      INFECTED="${INFECTED:-0}"
+      if [ -f "${REPORTS_DIR}/clamav-model.log" ]; then
+        INFECTED=$(awk '/ FOUND$/ { count++ } END { print count + 0 }' "${REPORTS_DIR}/clamav-model.log")
+      else
+        INFECTED=0
+      fi
       printf '{"scanned_dir":"%s","infected":%s,"exit_code":%s}\n' \
         "${MODEL_DIR}" "${INFECTED}" "${CLAM_EXIT}" \
         > "${REPORTS_DIR}/clamav-model.json"
@@ -1497,24 +1500,37 @@ dataset-scan:
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -type f -print -quit)
       [ -n "${DATASET_FILE}" ] || { echo "No dataset file found before ClamAV scan"; exit 1; }
+      echo "=== ClamAV dataset scan ==="
+      echo "user: $(id)"
+      echo "dataset-input listing:"
+      ls -la "${EVIDENCE_DIR}/dataset-input"
       set +e
       clamscan \
-        --no-summary \
         --infected \
+        --no-summary \
         --log="${REPORTS_DIR}/dataset-clamav.log" \
         "${DATASET_FILE}" \
-        > "${REPORTS_DIR}/clamav-dataset.txt" 2>&1
-      CLAM_EXIT=$?
+        2>&1 | tee "${REPORTS_DIR}/clamav-dataset.txt"
+      CLAM_EXIT=${PIPESTATUS[0]}
       set -e
-      cat "${REPORTS_DIR}/clamav-dataset.txt"
-      INFECTED=$(grep " FOUND$" "${REPORTS_DIR}/dataset-clamav.log" 2>/dev/null | wc -l | tr -d ' ')
-      INFECTED="${INFECTED:-0}"
+      echo "clamscan exit: ${CLAM_EXIT}"
+      if [ -f "${REPORTS_DIR}/dataset-clamav.log" ]; then
+        INFECTED=$(awk '/ FOUND$/ { count++ } END { print count + 0 }' "${REPORTS_DIR}/dataset-clamav.log")
+      else
+        INFECTED=0
+      fi
       printf '{"scanned_file":"%s","infected":%s,"exit_code":%s}\n' \
         "${DATASET_FILE}" "${INFECTED}" "${CLAM_EXIT}" \
         > "${REPORTS_DIR}/dataset-clamav.json"
       echo "ClamAV: ${INFECTED} infected file(s) | exit ${CLAM_EXIT}"
-      [ "${CLAM_EXIT}" -ne 1 ] || { echo "Infected dataset detected — failing pipeline"; exit 1; }
-      [ "${CLAM_EXIT}" -ne 2 ] || { echo "ClamAV dataset scan error — failing pipeline"; exit 1; }
+      if [ "${CLAM_EXIT}" -eq 1 ]; then
+        echo "INFECTED — see report above"
+        exit 1
+      elif [ "${CLAM_EXIT}" -ne 0 ]; then
+        echo "clamscan ERROR (exit ${CLAM_EXIT})"
+        exit "${CLAM_EXIT}"
+      fi
+      echo "clean"
     - |
       python3 - <<'PYEOF'
       import json, os, pathlib, sys

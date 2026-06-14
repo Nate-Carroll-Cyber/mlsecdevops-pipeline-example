@@ -156,3 +156,18 @@ match an internal mirror or bump a tool.
 blocks (GitLab ≥ 15.7). `CI_*` variables (`CI_PROJECT_DIR`, `CI_REGISTRY`,
 `CI_JOB_TOKEN`, `CI_COMMIT_SHA`, `CI_DEFAULT_BRANCH`, …) are predefined by GitLab.
 On GitLab < 15.7, the Vault jobs fall back to `CI_JOB_JWT_V2` (deprecated 16.x).
+
+`SIGSTORE_ID_TOKEN` is not a project secret and should not be added in
+GitLab Settings. Jobs that need keyless signing declare:
+
+```yaml
+id_tokens:
+  SIGSTORE_ID_TOKEN:
+    aud: "sigstore"
+```
+
+GitLab then injects a short-lived OIDC JWT into that job only. `model-sign`
+passes this token explicitly to `model_signing` with `--identity_token` so the
+Sigstore signer uses noninteractive GitLab OIDC instead of starting a browser
+OAuth flow. If a signing job logs an OAuth URL, the job is not using the minted
+token path.

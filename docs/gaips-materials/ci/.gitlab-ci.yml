@@ -881,6 +881,14 @@ modelscan:
     - pip install modelscan
     - mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"
     - |
+      MODEL_FILE=$(find "${MODEL_DIR}" -type f \( -name "*.pt" -o -name "*.pth" -o -name "*.bin" -o -name "*.ckpt" -o -name "*.pb" -o -name "*.h5" -o -name "*.keras" -o -name "*.npy" -o -name "*.pkl" -o -name "*.pickle" -o -name "*.joblib" -o -name "*.dill" \) 2>/dev/null | head -1)
+      if [ -z "${MODEL_FILE}" ]; then
+        echo "No modelscan-supported model files found under ${MODEL_DIR} — skipping modelscan"
+        echo '{"skipped":true,"reason":"no modelscan-supported model files found","summary":{"total_issues_by_severity":{"LOW":0,"MEDIUM":0,"HIGH":0,"CRITICAL":0},"total_issues":0,"scanned":{"total_scanned":0}},"issues":[],"errors":[]}' > "${REPORTS_DIR}/modelscan.json"
+        : > "${REPORTS_DIR}/modelscan.log"
+        exit 0
+      fi
+    - |
       set +e
       modelscan scan \
         --path "${MODEL_DIR}" \
@@ -888,8 +896,8 @@ modelscan:
         --output-file "${REPORTS_DIR}/modelscan.json" \
         2>&1 | tee "${REPORTS_DIR}/modelscan.log"; SCAN_EXIT=${PIPESTATUS[0]}
       set -e
-      # Exit >1 means tool error (not just findings); propagate it
-      [ "${SCAN_EXIT:-0}" -le 1 ] || exit "${SCAN_EXIT}"
+      # 0=clean, 1=findings, 3=no supported files. Propagate scan/usage errors.
+      [ "${SCAN_EXIT:-0}" -le 1 ] || [ "${SCAN_EXIT:-0}" -eq 3 ] || exit "${SCAN_EXIT}"
     - |
       python - <<'PYEOF'
       import json, sys, os

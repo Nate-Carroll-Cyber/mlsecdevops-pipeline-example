@@ -103,6 +103,11 @@ vault kv put secret/gaips/ci/registry-token        value="<registry_token_or_bla
 > the OIDC issuer (`https://<gitlab-host>` or `https://oauth2.sigstore.dev/auth`).
 > Confirm the exact values from a real `cosign`/`model_signing` signature before
 > hardening the verify job.
+>
+> Do **not** create a `SIGSTORE_ID_TOKEN` CI/CD variable. GitLab mints it
+> automatically from each signing job's `id_tokens:` block. The `model-sign` job
+> passes that short-lived token to `model_signing` with `--identity_token`; if the
+> log prints a browser OAuth URL, the token was not used.
 
 ### A6. (Optional) add the secrets Terraform does NOT seed
 `dt-api-url` and `dt-api-key` are read by `vault-secrets` but not created by
@@ -134,7 +139,7 @@ All optional — absent files make their jobs skip — but for a full run, provi
 | Path | Used by | Notes |
 | --- | --- | --- |
 | `requirements.txt` | `setup`, `pip-audit`, `pkg-integrity`, `conda-pkg-verify` | Your app deps. Absent → install/audit steps skip. |
-| `models/<name>/…` | `model-digest/sign`, `modelscan`, `clamav-scan` | One subdir per model; weights in `.pkl/.pt/.safetensors/.gguf/.bin/.h5/.onnx`. Absent → signing skips. |
+| `models/<name>/...` | `model-digest/sign`, `modelscan`, `clamav-scan` | One subdir per model; weights in `.pkl/.pt/.safetensors/.gguf/.bin/.h5/.onnx`. ModelScan only inspects supported serialized formats such as `.pt/.pth/.bin/.ckpt/.pb/.h5/.keras/.npy/.pkl/.pickle/.joblib/.dill`; GGUF, safetensors, and ONNX rely on digest/signature/tamper controls. Absent → signing skips. |
 | `evals/promptfoo.yaml` | `promptfoo-eval` | Already shipped in materials. |
 | `evals/eval-dataset.schema.json` | `eval-dataset-validate` | Already shipped. |
 | `guardrails/baseline.json` | `guardrail-regression` | Regression baseline. |

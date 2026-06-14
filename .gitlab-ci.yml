@@ -1273,7 +1273,8 @@ clamav-scan:
         "${MODEL_DIR}" \
         2>&1; CLAM_EXIT=$?
       # clamscan exit codes: 0=clean 1=virus found 2=error (e.g. empty dir — non-fatal)
-      INFECTED=$(grep -c " FOUND$" "${REPORTS_DIR}/clamav-model.log" 2>/dev/null || echo 0)
+      INFECTED=$(grep " FOUND$" "${REPORTS_DIR}/clamav-model.log" 2>/dev/null | wc -l | tr -d ' ')
+      INFECTED="${INFECTED:-0}"
       printf '{"scanned_dir":"%s","infected":%s,"exit_code":%s}\n' \
         "${MODEL_DIR}" "${INFECTED}" "${CLAM_EXIT}" \
         > "${REPORTS_DIR}/clamav-model.json"
@@ -1402,8 +1403,18 @@ dataset-download:
     - mkdir -p "${EVIDENCE_DIR}/dataset-input" "${REPORTS_DIR}"
     - |
       if [ -z "${DATASET_FILENAME}" ]; then
-        echo "DATASET_FILENAME not set — skipping dataset download"
-        echo '{"skipped":true}' > "${REPORTS_DIR}/dataset-download.json"
+        DATASET_FILENAME="ci-dataset.jsonl"
+        FIXTURE_DATASET="${GAIPS_MATERIALS_DIR}/evals/${DATASET_FILENAME}"
+        DATASET_PATH="${EVIDENCE_DIR}/dataset-input/${DATASET_FILENAME}"
+        echo "DATASET_FILENAME not set — using committed CI dataset fixture: ${FIXTURE_DATASET}"
+        cp "${FIXTURE_DATASET}" "${DATASET_PATH}"
+        DIGEST=$(sha256sum "${DATASET_PATH}" | awk '{print $1}')
+        SIZE_BYTES=$(wc -c < "${DATASET_PATH}" | tr -d ' ')
+        echo "${DATASET_FILENAME}  sha256:${DIGEST}" | tee "${EVIDENCE_DIR}/dataset-digest.txt"
+        printf '{"skipped":false,"fixture":true,"file":"%s","size_bytes":%s,"sha256":"%s"}\n' \
+          "${DATASET_FILENAME}" "${SIZE_BYTES}" "${DIGEST}" \
+          > "${REPORTS_DIR}/dataset-download.json"
+        echo "Dataset fixture staged: ${DATASET_FILENAME} (${SIZE_BYTES} bytes)"
         exit 0
       fi
     - |
@@ -1474,7 +1485,8 @@ dataset-scan:
         --infected \
         --log="${REPORTS_DIR}/dataset-clamav.log" \
         "${DATASET_FILE}"; CLAM_EXIT=$?
-      INFECTED=$(grep -c " FOUND$" "${REPORTS_DIR}/dataset-clamav.log" 2>/dev/null || echo 0)
+      INFECTED=$(grep " FOUND$" "${REPORTS_DIR}/dataset-clamav.log" 2>/dev/null | wc -l | tr -d ' ')
+      INFECTED="${INFECTED:-0}"
       echo "ClamAV: ${INFECTED} infected file(s) | exit ${CLAM_EXIT}"
       [ "${CLAM_EXIT}" -ne 1 ] || { echo "Infected dataset detected — failing pipeline"; exit 1; }
     - |
@@ -1557,7 +1569,7 @@ dataset-redact:
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/dataset-input"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
-        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
         echo "No dataset file present — redaction skipped"
         echo '{"skipped":true}' > "${REPORTS_DIR}/dataset-redact.json"
@@ -1577,7 +1589,7 @@ dataset-redact:
     - python -m spacy download en_core_web_sm
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
-        ! -name "dataset.sig" ! -name "dataset.pem" | head -1)
+        ! -name "dataset.sig" ! -name "dataset.pem" | head -1 || true)
       # Detect secrets (raw report stays internal — never published as an artifact)
       gitleaks detect --no-git --source "${DATASET_FILE}" \
         --report-format json --report-path /tmp/gitleaks-dataset.json --exit-code 0 || true
@@ -1608,7 +1620,7 @@ eval-dataset-validate:
     - mkdir -p "${REPORTS_DIR}"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
-        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
         echo "No eval dataset present — validation skipped (evals run on fixtures)"
         echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/eval-dataset-validation.json"
@@ -1640,7 +1652,7 @@ great-expectations-validate:
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/great-expectations"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
-        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
         echo "No dataset present — GX content gate skipped (evals run on fixtures)"
         echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/great-expectations.json"
@@ -1674,7 +1686,7 @@ ydata-profile:
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/ydata-profile"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
-        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
         echo "No dataset present — profiling skipped (evals run on fixtures)"
         echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/ydata-profile.json"
@@ -1708,7 +1720,7 @@ dataset-sign:
     - mkdir -p "${EVIDENCE_DIR}/dataset-input"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
-        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
         echo "No dataset file present — signing skipped"
         exit 0
@@ -1727,7 +1739,7 @@ dataset-sign:
       install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
-        ! -name "dataset.sig" ! -name "dataset.pem" | head -1)
+        ! -name "dataset.sig" ! -name "dataset.pem" | head -1 || true)
       if [ -n "${SIGSTORE_ID_TOKEN}" ]; then
         # SIGSTORE_ID_TOKEN is set by id_tokens above; cosign reads it automatically
         cosign sign-blob --yes \
@@ -1740,8 +1752,7 @@ dataset-sign:
       fi
   artifacts:
     paths:
-      - "${EVIDENCE_DIR}/dataset-input/dataset.sig"
-      - "${EVIDENCE_DIR}/dataset-input/dataset.pem"
+      - "${EVIDENCE_DIR}/dataset-input/"
     expire_in: 90 days
 
 artifact-signing-gate:
@@ -2266,7 +2277,7 @@ evidently-drift:
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/evidently"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
-        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
         echo "No dataset present — Evidently data-drift skipped (evals run on fixtures)"
         echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/evidently-drift.json"
@@ -2740,7 +2751,7 @@ publish-signed-artifacts:
       stage "${SBOM_DIR}/aibom-signing.pub"   "aibom-signing.pub"
       # Dataset cosign blob signature — normalise to dataset.dat|dataset.sig|dataset.pem
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
-        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1)
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       [ -n "${DATASET_FILE}" ] && stage "${DATASET_FILE}" "dataset.dat"
       stage "${EVIDENCE_DIR}/dataset-input/dataset.sig" "dataset.sig"
       stage "${EVIDENCE_DIR}/dataset-input/dataset.pem" "dataset.pem"

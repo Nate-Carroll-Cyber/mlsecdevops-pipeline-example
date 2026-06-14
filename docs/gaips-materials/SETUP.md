@@ -235,7 +235,7 @@ Each is independent; set the variable(s) and the corresponding job activates.
 
 | # | Integration | Set | Effect |
 | --- | --- | --- | --- |
-| D1 | **Dataset scan/redact/sign** | `DATASET_PACKAGE_NAME`, `DATASET_FILENAME` (+ `DATASET_EXPECTED_SHA256`) | Downloads from the Generic Package Registry, then AV+structural scan → secret/PII redaction → schema validate → cosign sign. |
+| D1 | **Dataset scan/redact/sign** | Optional: `DATASET_PACKAGE_NAME`, `DATASET_FILENAME` (+ `DATASET_EXPECTED_SHA256`) | Downloads from the Generic Package Registry when configured; otherwise uses the committed CI dataset fixture. Then AV+structural scan → secret/PII redaction → schema validate → cosign sign. |
 | D2 | **HF model scan** | `HF_MODEL_IDS="org/model-a,org/model-b"` (+ `HF_TOKEN` for gated) | ClamAV + ModelScan each HF repo. |
 | D3 | **Dependency-Track** | `DT_API_URL`, masked `DT_API_KEY` (+ `DT_FAIL_ON`, default `FAIL`) | Uploads SBOM + AI-BOM for continuous CVE/policy analysis; **hard policy gate**. |
 | D4 | **Stable AI-BOM signer** | masked `CYCLONEDX_SIGNING_KEY` + `CYCLONEDX_SIGNING_PUB` (RSA PEM) | Signs the AI-BOM with a persistent identity instead of an ephemeral per-run key. |

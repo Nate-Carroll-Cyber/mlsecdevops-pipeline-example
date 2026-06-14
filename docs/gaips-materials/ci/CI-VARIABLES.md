@@ -74,7 +74,7 @@ verification identifiers, not secrets; leave variable expansion off.
 | `MODEL_FIXTURE_SHA256` | default/you | No | `5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a` | Expected SHA-256 for `MODEL_FIXTURE_URL`; the download job fails if it does not match. |
 | `DATASET_PACKAGE_NAME` | you | No | `""` | Generic Package Registry package holding the dataset. |
 | `DATASET_PACKAGE_VERSION` | you | No | `latest` | Dataset package version tag. |
-| `DATASET_FILENAME` | you | No | `""` | Dataset filename to download. **Blank → the entire dataset chain skips.** |
+| `DATASET_FILENAME` | you | No | `""` | Dataset filename to download from the Generic Package Registry. Blank → use committed `evals/ci-dataset.jsonl` fixture so the dataset scan/sign/publish path still runs. |
 | `DATASET_EXPECTED_SHA256` | you | No | `""` | Optional integrity pin — `dataset-download` fails on mismatch. |
 | `REDACT_MAX_SECRETS` | default | No | `0` | `dataset-redact` hard-fails if secret findings exceed this (0 = zero tolerance). |
 | `REDACT_MAX_PII` | default | No | `-1` | PII-count gate; `-1` disables the gate (data is still redacted). |

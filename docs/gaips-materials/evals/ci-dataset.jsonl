@@ -1,0 +1,2 @@
+{"id":"ci-benign-001","question":"What is the approved use for the lab model fixture?","expected":"The fixture is approved for CI and GAIPS lab validation.","category":"ci-fixture"}
+{"id":"ci-benign-002","prompt":"Summarize the purpose of model artifact signing in one sentence.","expected":"Model artifact signing verifies that evaluated or deployed model bytes match the approved artifact.","category":"ci-fixture"}

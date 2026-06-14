@@ -68,10 +68,6 @@ variables:
   DT_API_URL: ""                    # e.g. https://dtrack.example.com (no trailing /api)
   DT_API_KEY: ""                    # masked; needs BOM_UPLOAD + VIEW perms
   DT_FAIL_ON: "FAIL"                # violationState(s) that fail the gate (comma list)
-  # ── Snyk Agent Scan — agent/MCP/skill supply-chain scan ───────────────────────
-  # Required to run snyk-agent-scan. Set as a MASKED CI/CD variable (or fetch from
-  # Vault). Blank = the snyk-agent-scan job skips cleanly.
-  SNYK_TOKEN: ""
   # ── DVC — data/model version lineage (optional) ───────────────────────────────
   # Set DVC_REMOTE_URL (s3://, gs://, azure://, ssh://…) to enable `dvc pull` in
   # dvc-verify. Without it, the job reports tracked-vs-workspace status only; with
@@ -233,7 +229,6 @@ vault-secrets:
           "gaips/ci/registry-token":       "CI_REGISTRY_TOKEN",
           "gaips/ci/dt-api-url":           "DT_API_URL",
           "gaips/ci/dt-api-key":           "DT_API_KEY",
-          "gaips/ci/snyk-token":           "SNYK_TOKEN",
       }
 
       lines = []
@@ -357,159 +352,6 @@ gitleaks-scan:
       - "${REPORTS_DIR}/gitleaks.log"
     expire_in: 7 days
   allow_failure: false
-
-# Snyk Agent Scan (github.com/snyk/agent-scan, Apache-2.0) — supply-chain scan of
-# this repo's AGENT components: the MCP server config and the agent skill files.
-# Detects prompt injection, tool poisoning/shadowing, toxic flows, and credential
-# issues that the code-level SAST (semgrep/gitleaks) does not look for.
-#
-# This job is STATIC ONLY: it parses the MCP config + skill files and never starts
-# the servers. Launching the servers (--dangerously-run-mcp-servers) executes the
-# config's `command`/`args` — arbitrary code on the runner — so it is FORBIDDEN
-# here and lives in the isolated snyk-agent-scan-live job instead. Skips cleanly
-# when SNYK_TOKEN is unset — same pattern as dependency-track-upload.
-snyk-agent-scan:
-  stage: sast
-  needs: ["setup"]
-  # New scanner introduced soft: --ci makes it EXIT 1 on findings, but allow_failure
-  # keeps the pipeline green while you triage the fixture's baseline. Flip to
-  # allow_failure: false to make agent-component findings a hard gate.
-  allow_failure: true
-  variables:
-    MCP_CONFIG: "${GAIPS_MATERIALS_DIR}/mcp/cline_mcp_settings.json"
-    SKILLS_PATH: "${GAIPS_MATERIALS_DIR}/agent"
-    # uvx resolves snyk-agent-scan from PyPI; pin the package index to the same
-    # vetted mirror the rest of the pipeline uses.
-    UV_INDEX_URL: "${PIP_INDEX_URL}"
-  script:
-    - |
-      if [ -z "${SNYK_TOKEN:-}" ]; then
-        echo "SNYK_TOKEN unset — agent-scan skipped (set it as a masked CI/CD variable to enable)"
-        exit 0
-      fi
-    - |
-      # Hard refusal: the dangerous flag must never run on the shared runner.
-      if [ "${AGENT_SCAN_RUN_MCP_SERVERS:-false}" = "true" ]; then
-        echo "ERROR: AGENT_SCAN_RUN_MCP_SERVERS=true is not allowed in this job — it would"
-        echo "       execute MCP server commands on the shared runner. Use the sandboxed,"
-        echo "       manual 'snyk-agent-scan-live' job instead."
-        exit 1
-      fi
-    - mkdir -p "${REPORTS_DIR}"
-    - pip install --quiet uv      # provides `uvx`; honours UV_INDEX_URL above
-    - |
-      # 1) Scan the MCP server configuration (static). --ci → exit 1 on findings;
-      #    --json → machine-readable evidence. Captured so the gate is explicit.
-      AS_EXIT=0
-      uvx snyk-agent-scan@latest "${MCP_CONFIG}" \
-        --json --ci \
-        > "${REPORTS_DIR}/agent-scan-mcp.json" 2> "${REPORTS_DIR}/agent-scan-mcp.log" \
-        || AS_EXIT=$?
-      echo "agent-scan (mcp config) exit=${AS_EXIT}"
-    - |
-      # 2) Scan the agent skill files (static; never starts servers).
-      SK_EXIT=0
-      uvx snyk-agent-scan@latest --skills "${SKILLS_PATH}" \
-        --json --ci \
-        > "${REPORTS_DIR}/agent-scan-skills.json" 2> "${REPORTS_DIR}/agent-scan-skills.log" \
-        || SK_EXIT=$?
-      echo "agent-scan (skills) exit=${SK_EXIT}"
-    - |
-      # Gate: any non-zero --ci exit means at least one risk was reported.
-      if [ "${AS_EXIT:-0}" -ne 0 ] || [ "${SK_EXIT:-0}" -ne 0 ]; then
-        echo "Snyk Agent Scan reported agent-component risks — see reports/agent-scan-*.json"
-        exit 1
-      fi
-      echo "Snyk Agent Scan: no agent-component risks detected"
-  artifacts:
-    when: always
-    paths:
-      - "${REPORTS_DIR}/agent-scan-mcp.json"
-      - "${REPORTS_DIR}/agent-scan-mcp.log"
-      - "${REPORTS_DIR}/agent-scan-skills.json"
-      - "${REPORTS_DIR}/agent-scan-skills.log"
-    expire_in: 7 days
-
-# LIVE introspection — actually starts the MCP servers so agent-scan can read each
-# server's real tool descriptions (catches tool poisoning/shadowing that a static
-# config read can't). Because that EXECUTES the config's command/args, it is fully
-# isolated and never runs automatically:
-#   • when: manual + a dedicated, DISPOSABLE runner (tags: [sandbox]) — a throwaway
-#     VM-backed/autoscaled runner reserved for untrusted execution, destroyed after.
-#   • the scan runs inside a NESTED rootless container that is locked down:
-#     --network none (the spawned servers get no egress — no exfiltration),
-#     --read-only rootfs + tmpfs scratch, --cap-drop ALL, no-new-privileges,
-#     non-root user, and pids/memory caps. The repo is mounted READ-ONLY.
-#   • the scanner is PRE-BAKED into SANDBOX_IMAGE (built from
-#     ci/sandbox/Containerfile), so the egress-less container runs it straight off
-#     PATH — no runtime install, no uv cache mount. --no-bootstrap skips the online
-#     verification call that --network none would block anyway.
-# NOTE: the fixture servers are `python3 -m gaips_*` modules that aren't installed,
-# so they will fail to start and be reported as errors — that is the contained,
-# expected outcome here. Point this at a config whose server modules ARE present
-# (and add their runtimes to the sandbox image) to get real live introspection.
-snyk-agent-scan-live:
-  stage: sast
-  needs: ["setup"]
-  rules:
-    - if: '$SNYK_TOKEN == ""'
-      when: never            # nothing to do without a token
-    - when: manual           # explicit human trigger only; never part of an auto run
-  allow_failure: true
-  tags:
-    - sandbox                # REQUIRED: an isolated, disposable runner for untrusted exec
-  variables:
-    MCP_CONFIG: "${GAIPS_MATERIALS_DIR}/mcp/cline_mcp_settings.json"
-    # Pre-baked scanner image (build + push from ci/sandbox/Containerfile, pinned
-    # to a real release tag). Must be pullable by the 'sandbox' runner.
-    SANDBOX_IMAGE: "registry.example.com/gaips/agent-scan-sandbox:latest"
-  before_script: []
-  script:
-    - |
-      command -v podman >/dev/null 2>&1 || {
-        echo "ERROR: this job requires a rootless-container-capable runner (podman)."
-        echo "       Provision the 'sandbox' runner with podman + user-namespace support."
-        exit 1
-      }
-    - mkdir -p "${REPORTS_DIR}"
-    - |
-      # Run the server-launching scan inside a locked-down, egress-less, rootless
-      # container. The scanner is already on PATH (ENTRYPOINT of SANDBOX_IMAGE), so
-      # we only append its arguments. The MCP servers start INSIDE this jail: no
-      # network, no caps, no privilege escalation, read-only repo, tmpfs scratch.
-      REL_CONFIG="${MCP_CONFIG#${CI_PROJECT_DIR}/}"
-      AS_EXIT=0
-      podman run --rm \
-        --network none \
-        --read-only \
-        --tmpfs /tmp:rw,size=256m \
-        --cap-drop ALL \
-        --security-opt no-new-privileges \
-        --pids-limit 256 \
-        --memory 1g \
-        --user 65534:65534 \
-        -e SNYK_TOKEN \
-        -e "HOME=/tmp" \
-        -v "${CI_PROJECT_DIR}:/work:ro" \
-        -w /work \
-        "${SANDBOX_IMAGE}" \
-          "/work/${REL_CONFIG}" \
-          --json --ci --no-bootstrap \
-          --storage-file /tmp/agent-scan-state \
-          --dangerously-run-mcp-servers --server-timeout 20 --suppress-mcpserver-io true \
-        > "${REPORTS_DIR}/agent-scan-live.json" 2> "${REPORTS_DIR}/agent-scan-live.log" \
-        || AS_EXIT=$?
-      echo "agent-scan (live, sandboxed) exit=${AS_EXIT}"
-      if [ "${AS_EXIT}" -ne 0 ]; then
-        echo "Live agent-scan reported risks (or a sandboxed server failed to start) — see reports/agent-scan-live.*"
-        exit 1
-      fi
-  artifacts:
-    when: always
-    paths:
-      - "${REPORTS_DIR}/agent-scan-live.json"
-      - "${REPORTS_DIR}/agent-scan-live.log"
-    expire_in: 7 days
 
 pip-audit:
   stage: sast

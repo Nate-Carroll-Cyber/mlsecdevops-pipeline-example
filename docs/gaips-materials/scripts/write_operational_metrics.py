@@ -169,19 +169,6 @@ def parse_security(reports: Path, sbom: Path, src: Sources, m: Metrics) -> None:
         m.metric("security.gitleaks.findings", count)
         m.gate("gitleaks-scan", count == 0, f"{count} leak(s)")
 
-    # Agent / MCP risk scans — capture status + finding count defensively.
-    agent: dict[str, Any] = {}
-    for fname in ("agent-scan-mcp.json", "agent-scan-skills.json", "agent-scan-live.json"):
-        doc = _load_json(reports / fname, src, fname)
-        if isinstance(doc, dict):
-            findings = doc.get("findings", doc.get("issues", [])) or []
-            agent[fname.replace("agent-scan-", "").replace(".json", "")] = {
-                "status": doc.get("status") or doc.get("risk"),
-                "findings": len(findings) if isinstance(findings, list) else findings,
-            }
-    if agent:
-        sec["agent_scans"] = agent
-
     pip_audit = _load_json(reports / "pip-audit.json", src, "pip-audit.json")
     if pip_audit is not None:
         deps = pip_audit.get("dependencies", []) if isinstance(pip_audit, dict) else pip_audit

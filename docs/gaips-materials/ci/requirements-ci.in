@@ -1,9 +1,7 @@
 # GAIPS CI Pipeline — Python dependency source file
 #
 # This file lists the pip packages the pipeline installs across its jobs.
-# NOT covered here (installed by other means): `uv` (via `pip install uv`,
-# bootstraps `uvx`) and `snyk-agent-scan` (resolved by `uvx` / pre-baked into
-# the agent-scan sandbox image) — see ci/SBOM.md → Python Packages for those.
+# NOT covered here: tools installed by container images or standalone binaries.
 # Run the following on a Python 3.11-slim Linux container to generate
 # a pinned, hash-verified requirements-ci.txt:
 #

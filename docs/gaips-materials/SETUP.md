@@ -22,7 +22,7 @@ in as you need them.
 | GitLab **≥ 15.7** | `id_tokens:` OIDC issuance (Vault + Sigstore keyless). Older → `CI_JOB_JWT_V2` fallback (deprecated 16.x). |
 | Terraform **≥ 1.6**, `vault` CLI | Provision Vault (Part A). |
 | An **HCP Vault Dedicated** cluster (or self-managed Vault ≥ 1.12) | Secrets backend. Optional — see Part B3 to skip Vault entirely. |
-| A GitLab runner | Default Docker runner is fine. The `snyk-agent-scan-live` job additionally needs a **`sandbox`-tagged, podman-capable** runner (Part D4) — optional. |
+| A GitLab runner | Default Docker runner is fine. |
 
 ---
 
@@ -105,13 +105,12 @@ vault kv put secret/gaips/ci/registry-token        value="<registry_token_or_bla
 > hardening the verify job.
 
 ### A6. (Optional) add the secrets Terraform does NOT seed
-`dt-api-url`, `dt-api-key`, and `snyk-token` are read by `vault-secrets` but not
-created by Terraform (the job just logs a WARN and continues). Add them only if
-you use those integrations (Parts D3 / D4):
+`dt-api-url` and `dt-api-key` are read by `vault-secrets` but not created by
+Terraform (the job just logs a WARN and continues). Add them only if you use the
+Dependency-Track integration (Part D3):
 ```bash
 vault kv put secret/gaips/ci/dt-api-url value="https://dtrack.<your-host>"
 vault kv put secret/gaips/ci/dt-api-key value="<dt-api-key>"
-vault kv put secret/gaips/ci/snyk-token value="<snyk-token>"
 ```
 
 ---
@@ -162,7 +161,7 @@ dotenv artifact.
 **If NOT using Vault:** leave `VAULT_ADDR` unset and set the secrets directly as
 CI/CD variables (mask the sensitive ones): `MODEL_ENDPOINT`,
 `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`,
-`CI_REGISTRY_TOKEN`, plus any of `DT_API_URL`, `DT_API_KEY`, `SNYK_TOKEN` you use.
+`CI_REGISTRY_TOKEN`, plus `DT_API_URL` and `DT_API_KEY` if you use Dependency-Track.
 
 ### B4. Confirm OIDC issuance
 The Vault/Sigstore jobs declare `id_tokens:` blocks (GitLab ≥ 15.7). Nothing to
@@ -219,18 +218,8 @@ Each is independent; set the variable(s) and the corresponding job activates.
 | D1 | **Dataset scan/redact/sign** | `DATASET_PACKAGE_NAME`, `DATASET_FILENAME` (+ `DATASET_EXPECTED_SHA256`) | Downloads from the Generic Package Registry, then AV+structural scan → secret/PII redaction → schema validate → cosign sign. |
 | D2 | **HF model scan** | `HF_MODEL_IDS="org/model-a,org/model-b"` (+ `HF_TOKEN` for gated) | ClamAV + ModelScan each HF repo. |
 | D3 | **Dependency-Track** | `DT_API_URL`, masked `DT_API_KEY` (+ `DT_FAIL_ON`, default `FAIL`) | Uploads SBOM + AI-BOM for continuous CVE/policy analysis; **hard policy gate**. |
-| D4 | **Snyk Agent Scan (live)** | masked `SNYK_TOKEN` + a **`sandbox`-tagged podman runner** + build/push `SANDBOX_IMAGE` from `ci/sandbox/Containerfile` | Static scan runs automatically; the server-launching **live** scan is `when: manual` only, in the locked-down sandbox. |
-| D5 | **Stable AI-BOM signer** | masked `CYCLONEDX_SIGNING_KEY` + `CYCLONEDX_SIGNING_PUB` (RSA PEM) | Signs the AI-BOM with a persistent identity instead of an ephemeral per-run key. |
-| D6 | **DVC lineage** | `DVC_REMOTE_URL` (+ `.dvc/` in repo) | Verifies workspace vs pinned dataset/model versions. |
-
-For **D4**, build the sandbox image once:
-```bash
-podman build --build-arg AGENT_SCAN_VERSION=<release-tag> \
-  -t registry.example.com/gaips/agent-scan-sandbox:<tag> \
-  -f docs/gaips-materials/ci/sandbox/Containerfile docs/gaips-materials/ci/sandbox
-podman push registry.example.com/gaips/agent-scan-sandbox:<tag>
-```
-then set `SANDBOX_IMAGE` (in the `snyk-agent-scan-live` job) to that ref.
+| D4 | **Stable AI-BOM signer** | masked `CYCLONEDX_SIGNING_KEY` + `CYCLONEDX_SIGNING_PUB` (RSA PEM) | Signs the AI-BOM with a persistent identity instead of an ephemeral per-run key. |
+| D5 | **DVC lineage** | `DVC_REMOTE_URL` (+ `.dvc/` in repo) | Verifies workspace vs pinned dataset/model versions. |
 
 ---
 
@@ -282,7 +271,7 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
       `secret/` mount in your namespace.
 - [ ] `vault kv get -mount=secret gaips/ci/model-endpoint` returns your real value
       (with `VAULT_NAMESPACE` exported).
-- [ ] Pipeline is green; `vault-secrets` log shows `N/9 secret(s) written`.
+- [ ] Pipeline is green; `vault-secrets` log shows `N/8 secret(s) written`.
 - [ ] `artifact-signing-gate` passed and `drift-gate` passed.
 - [ ] `evals/eval-baseline.json` committed (drift detection now active).
 - [ ] (If signing) `signature-verification` passed against your real
@@ -293,5 +282,5 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
 > **Hardening after first green run:** pin `gitleaks/gitleaks` and `clamav/clamav`
 > off `:latest` (see `ci/SBOM.md` remediation), generate
 > `ci/requirements-ci.txt` via `pip-compile --generate-hashes` and switch jobs to
-> it, pin `uv`/`snyk-agent-scan`, and flip soft gates (`garak`, `giskard`,
-> `modelscan`, GX) to `allow_failure: false` once baselines are stable.
+> it, and flip soft gates (`garak`, `giskard`, `modelscan`, GX) to
+> `allow_failure: false` once baselines are stable.

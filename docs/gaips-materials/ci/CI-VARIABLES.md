@@ -50,7 +50,6 @@ Each maps to a Vault path `secret/data/gaips/ci/<name>` (field `value`). If you'
 | `CI_REGISTRY_TOKEN` | `registry-token` | Yes | ✅ stub | Registry token (provisioned for app/registry use). |
 | `DT_API_URL` | `dt-api-url` | No | ❌ add manually | Dependency-Track base URL (see §4). |
 | `DT_API_KEY` | `dt-api-key` | Yes | ❌ add manually | Dependency-Track API key (needs BOM_UPLOAD + VIEW). |
-| `SNYK_TOKEN` | `snyk-token` | Yes | ❌ add manually | Enables `snyk-agent-scan` (static) + `snyk-agent-scan-live` (manual). |
 
 > **"Seeded by TF?"** Terraform (`deployment/vault/terraform/`) creates the first
 > six as fixture stubs (`ignore_changes`, so real values you `vault kv put` later
@@ -83,9 +82,6 @@ Each maps to a Vault path `secret/data/gaips/ci/<name>` (field `value`). If you'
 | `DT_API_URL` | vault/you | No | `""` | Dependency-Track URL (no trailing `/api`). Blank → `dependency-track-upload` skips. |
 | `DT_API_KEY` | vault/you | Yes | `""` | Dependency-Track API key. |
 | `DT_FAIL_ON` | default | No | `FAIL` | `violationState`(s) that fail the DT policy gate (comma list). |
-| `SNYK_TOKEN` | vault/you | Yes | `""` | Enables the agent/MCP supply-chain scans. Blank → both skip. |
-| `AGENT_SCAN_RUN_MCP_SERVERS` | — | — | `false` | **Do not set `true`** on the shared runner — `snyk-agent-scan` hard-refuses it (server launch is sandbox-only). |
-| `SANDBOX_IMAGE` | you (job var) | No | `registry.example.com/gaips/agent-scan-sandbox:latest` | Pre-baked scanner image for `snyk-agent-scan-live`; build/push from `ci/sandbox/Containerfile` and pin to a digest. |
 | `DVC_REMOTE_URL` | you | No | `""` | `s3://`/`gs://`/`azure://`/`ssh://` remote for `dvc-verify` to pull pinned data/models. Blank → reports status only. |
 | `GITLAB_API_TOKEN` | you | Yes | `""` | Project/group access token with **`read_api`** scope. Enables the operational block of `metrics-normalize` (pipeline/job duration, queue time, status by stage via the GitLab API). **Blank → the operational block skips cleanly; report-derived metrics + the Pages dashboard still render.** |
 
@@ -146,7 +142,6 @@ match an internal mirror or bump a tool.
 | `IMAGE_CLAMAV` | `clamav/clamav:1.4` | `clamav-scan` image (patch-floating line; append a digest to hard-pin). |
 | `PIP_INDEX_URL` | `https://pypi.org/simple/` | Swap for an internal Artifactory/Nexus/GitLab PyPI mirror. |
 | `PIP_TRUSTED_HOST` | `pypi.org files.pythonhosted.org` | Trusted hosts for the index above. |
-| `UV_INDEX_URL` | `${PIP_INDEX_URL}` | Mirror `uvx` uses to resolve `snyk-agent-scan`. |
 | `CONDA_CHANNEL` | `conda-forge` | Strict-priority conda channel for `conda-pkg-verify`. |
 
 > **All scanner images are now tag-pinned** via these `IMAGE_*` variables — no job

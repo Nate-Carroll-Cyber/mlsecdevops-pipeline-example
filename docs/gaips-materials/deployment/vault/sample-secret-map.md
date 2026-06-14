@@ -35,7 +35,6 @@ variables via a `reports: dotenv` artifact.
 | `secret/data/gaips/ci/registry-token` | `CI_REGISTRY_TOKEN` | `fixture-registry-token-not-real` | Read by CI role |
 | `secret/data/gaips/ci/dt-api-url` | `DT_API_URL` | `https://dtrack.example.invalid` | Read by CI role |
 | `secret/data/gaips/ci/dt-api-key` | `DT_API_KEY` | `fixture-dt-key-not-real` | Read by CI role |
-| `secret/data/gaips/ci/snyk-token` | `SNYK_TOKEN` | `fixture-snyk-token-not-real` | Read by CI role |
 
 ### Deploy-prep jobs — no Vault secret required
 

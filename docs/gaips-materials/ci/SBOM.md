@@ -19,7 +19,7 @@ The pipeline is a DAG across ten stages. `model-integrity` converges on `artifac
 flowchart TD
     setup[setup + vault-secrets]
     subgraph SAST [sast]
-      s1[semgrep · secret-detection · gitleaks<br/>pip-audit · pkg-integrity · conda-verify<br/>snyk-agent-scan · snyk-agent-scan-live ⟂sandbox⟂]
+      s1[semgrep · secret-detection · gitleaks<br/>pip-audit · pkg-integrity · conda-verify]
     end
     subgraph SBOM [sbom]
       s2[syft-cyclonedx · syft-spdx · dvc-verify]
@@ -81,7 +81,6 @@ flowchart TD
 | `aquasec/trivy` | `v0.71.0` | `trivy-scan` | ✅ Pinned |
 | `cyclonedx/cyclonedx-cli` | `0.32.0` | `ai-bom-validate`, `ai-bom-sign` | ✅ Pinned |
 | `node` | `20-slim` | `promptfoo-eval` | ⚠️ Unpinned minor |
-| `agent-scan-sandbox` (built from `ci/sandbox/Containerfile`, base `python:3.11-slim`) | `SANDBOX_IMAGE` | `snyk-agent-scan-live` (nested, rootless) | ⚠️ Pin to a digest; bakes `snyk-agent-scan` at a pinned `AGENT_SCAN_VERSION` |
 
 ---
 
@@ -92,8 +91,6 @@ flowchart TD
 | `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `dataset-sign`, `model-signing-evidence`, `image-sign` (4 install sites) | ✅ Pinned + checksum verified |
 | `gitleaks` | `8.30.1` | `github.com/gitleaks/gitleaks/releases` | `dataset-redact` | ✅ Pinned + checksum verified |
 | `promptfoo` | `0.121.15` | `npm install -g promptfoo` | `promptfoo-eval` | ✅ Pinned |
-| `uv` / `uvx` | latest | `pip install uv` (PyPI) | `snyk-agent-scan` (static) | ⚠️ Unpinned — pin `uv==x.y.z`; runs `snyk-agent-scan@latest`. The live job no longer uses `uv` at runtime (scanner pre-baked into `SANDBOX_IMAGE`) |
-| `podman` | runner-provided | sandbox runner image | `snyk-agent-scan-live` (rootless nested container) | ⚠️ Runner prerequisite — version set by the `sandbox`-tagged runner |
 
 ---
 
@@ -132,8 +129,6 @@ All packages below are installed fresh in each job container. None are pinned in
 | `requests` | — | `dependency-track-upload` (also `giskard-scan`) | ⚠️ Unpinned | HTTP client for the Dependency-Track REST API |
 | `pandas` | — | `great-expectations-validate`, `evidently-drift`, `ydata-profile` (also `giskard-scan`) | ⚠️ Unpinned | Dataset loading for the data-quality jobs |
 | `pip` / `setuptools` / `wheel` | — | All Python jobs (before_script) | ⚠️ Unpinned | Upgraded to latest in every job before_script |
-| `uv` | — | `snyk-agent-scan` (static job) | ⚠️ Unpinned | Provides `uvx`; resolves `snyk-agent-scan` from PyPI (honours `UV_INDEX_URL`). The **live** job no longer uses `uv` at runtime — the scanner is pre-baked into `SANDBOX_IMAGE` |
-| `snyk-agent-scan` | static job: `@latest` (uvx); live job: pinned in `ci/sandbox/Containerfile` (`AGENT_SCAN_VERSION`) | `snyk-agent-scan`, `snyk-agent-scan-live` | ⚠️ Unpinned `@latest` in the static job | Agent/MCP/skill supply-chain scanner (Apache-2.0, `github.com/snyk/agent-scan`); requires `SNYK_TOKEN`. The live job runs the pre-baked binary offline (`--no-bootstrap`) inside the egress-less sandbox |
 
 ---
 
@@ -162,5 +157,3 @@ All packages below are installed fresh in each job container. None are pinned in
 | Container images use `:latest` | ✅ Fixed | All scanner images pinned via `IMAGE_*` variables at top of CI file: `semgrep/semgrep:v1.165.0`, `continuumio/miniconda3:26.3.2`, `anchore/syft:v1.45.1`, `anchore/grype:v0.114.0`, `aquasec/trivy:v0.71.0`, `cyclonedx/cyclonedx-cli:0.32.0`, **`gitleaks/gitleaks:v8.30.1`** (`IMAGE_GITLEAKS`), and **`clamav/clamav:1.4`** (`IMAGE_CLAMAV`). No job uses `:latest` anymore. `registry.gitlab.com/security-products/secrets:4` is pinned at a major tag; `python:3.11-slim`/`python:3.10-slim`/`node:20-slim` remain unpinned at minor version. **Remaining hardening:** append `@sha256:…` digests for byte-exact reproducibility. |
 | All pip packages unpinned | ✅ Structured | `ci/requirements-ci.in` created listing all pipeline packages. **Remaining action:** run `pip-compile --generate-hashes requirements-ci.in` on a Python 3.11-slim Linux container to produce `requirements-ci.txt`, commit it, then switch each CI job from inline `pip install` to `pip install -r ci/requirements-ci.txt` |
 | Verify-at-deploy loop half-wired (image unsigned; PreSync hook had nothing to fetch) | ✅ Fixed | `deploy-prep` stage added: `image-sign` (Cosign keyless → matches the Kyverno policy identity) and `publish-signed-artifacts` (signed AI-BOM + dataset → Generic Package Registry, the path the Argo CD PreSync hook fetches). PreSync hook corrected to verify the model with `model_signing` (not `cosign verify-blob`). **Remaining action:** set `IMAGE_REF`, point the PreSync `ARTIFACT_BASE_URL` at the package path, and flip Kyverno to `Enforce` once a signed digest is confirmed. |
-| Agent/MCP components unscanned | ✅ Fixed | `snyk-agent-scan` (static) scans the MCP config + skills; `snyk-agent-scan-live` runs the dangerous server-launching scan only manually, in a locked-down rootless sandbox container built from `ci/sandbox/Containerfile` (scanner pre-baked, so no runtime install in the egress-less jail). Requires masked `SNYK_TOKEN`. |
-| `uv` / `snyk-agent-scan` / sandbox image / `podman` unpinned | ⚠️ Open | Pin `uv==x.y.z` and the static job's `snyk-agent-scan@<tag>`; build `SANDBOX_IMAGE` with a pinned `AGENT_SCAN_VERSION` and reference it by digest; record the `sandbox` runner's `podman` version once provisioned. |

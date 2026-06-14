@@ -63,10 +63,10 @@ Before conversion, verify the CSV contains only approved synthetic or sanitized 
 
 `ci/.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, prompt/eval config, and guardrail baselines.
 
-> **Full setup runbook:** [`SETUP.md`](SETUP.md) walks the entire path end to end — provisioning HCP Vault (or self-managed Vault) with Terraform, GitLab CI/CD variables, the first pipeline run, optional integrations (Dependency-Track, Snyk Agent Scan, HF/dataset scanning, DVC), and deploy-time Kyverno + Argo CD verification.
+> **Full setup runbook:** [`SETUP.md`](SETUP.md) walks the entire path end to end — provisioning HCP Vault (or self-managed Vault) with Terraform, GitLab CI/CD variables, the first pipeline run, optional integrations (Dependency-Track, HF/dataset scanning, DVC), and deploy-time Kyverno + Argo CD verification.
 > **CI/CD variable catalog:** [`ci/CI-VARIABLES.md`](ci/CI-VARIABLES.md) lists every variable the pipeline reads, its source (you / Vault / GitLab), masking, default, and what it gates. Terraform inputs: [`deployment/vault/terraform/terraform.tfvars.example`](deployment/vault/terraform/terraform.tfvars.example).
 
-The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, and `deploy-prep`. It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, agent/MCP supply-chain scanning (Snyk Agent Scan), Syft CycloneDX/SPDX, Grype, Trivy, ModelScan, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, Promptfoo, garak, Giskard, Inspect AI, MarkLLM watermark-readiness, PyRIT, guardrail-regression, model-drift detection, evidence, a consolidated CycloneDX 1.6 AI BOM artifact (also pushed to Dependency-Track), a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification.
+The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, and `deploy-prep`. It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, ModelScan, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, Promptfoo, garak, Giskard, Inspect AI, MarkLLM watermark-readiness, PyRIT, guardrail-regression, model-drift detection, evidence, a consolidated CycloneDX 1.6 AI BOM artifact (also pushed to Dependency-Track), a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification.
 
 Before copying this CI file into a student lab repository, add or adapt `requirements.txt`, `models/`, `evals/promptfoo.yaml`, `guardrails/baseline.json`, `scripts/rag_smoke_eval.py`, `scripts/pyrit_scan.py`, `scripts/run_guardrail_regression.py`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, `scripts/detect_model_drift.py`, the eval/data-quality collectors (`scripts/collect_garak_report.py`, `scripts/collect_inspect_report.py`, `scripts/run_giskard_live.py`, `scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/dependency_track_upload.py`), `evals/eval-dataset.schema.json`, and (after the first run seeds it) `evals/eval-baseline.json`. Configure endpoint, signing, and Hugging Face variables in GitLab CI/CD settings. Fixture files under `docs/gaips-materials/fixtures/` remain offline interpretation aids, not automatic CI pass-throughs.
 
@@ -83,7 +83,7 @@ flowchart TD
     setup[setup<br/>+ vault-secrets]
 
     subgraph SAST [sast]
-      sast_jobs[semgrep · secret-detection · gitleaks<br/>pip-audit · pkg-integrity · conda-verify<br/>snyk-agent-scan · snyk-agent-scan-live ⟂sandbox⟂]
+      sast_jobs[semgrep · secret-detection · gitleaks<br/>pip-audit · pkg-integrity · conda-verify]
     end
     subgraph SBOM [sbom]
       sbom_jobs[syft-cyclonedx · syft-spdx · dvc-verify]
@@ -133,7 +133,7 @@ flowchart TD
 | Job | What it does |
 | --- | --- |
 | `setup` | Installs Python dependencies, creates `evidence/`, `sbom/`, and `reports/` directories, stamps pipeline ID and commit SHA into `evidence/pipeline.env`, and records Git/CI version provenance (commit, `git describe`, tag, branch, dirty state) to `evidence/version-info.json` for traceability of every downstream artifact. |
-| `vault-secrets` | Authenticates to Vault using a GitLab OIDC JWT and fetches the CI secrets (`MODEL_ENDPOINT`, `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`, `CI_REGISTRY_TOKEN`, `DT_API_URL`, `DT_API_KEY`, `SNYK_TOKEN`) into a dotenv artifact injected as environment variables into all downstream jobs. Falls back to GitLab CI/CD variables if `VAULT_ADDR` is not set. Works against self-managed Vault or **HCP Vault Dedicated** — for HCP, set `VAULT_NAMESPACE` (`admin` or a child); see `deployment/vault/sample-secret-map.md`. |
+| `vault-secrets` | Authenticates to Vault using a GitLab OIDC JWT and fetches the CI secrets (`MODEL_ENDPOINT`, `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`, `CI_REGISTRY_TOKEN`, `DT_API_URL`, `DT_API_KEY`) into a dotenv artifact injected as environment variables into all downstream jobs. Falls back to GitLab CI/CD variables if `VAULT_ADDR` is not set. Works against self-managed Vault or **HCP Vault Dedicated** — for HCP, set `VAULT_NAMESPACE` (`admin` or a child); see `deployment/vault/sample-secret-map.md`. |
 
 ### Stage 2 — SAST
 
@@ -145,8 +145,6 @@ flowchart TD
 | `pip-audit` | Audits `requirements.txt` against OSV, PyPI advisory DB, and GitHub Advisory DB; outputs JSON and CycloneDX (use CycloneDX for CVSS score analysis). |
 | `pkg-integrity` | Checks for hash-pinning in `requirements.txt`; generates a hashed lockfile if absent; verifies no dependency conflicts in an isolated venv via `pip check`. |
 | `conda-pkg-verify` | Re-verifies the same packages in a `conda-forge`-only conda environment with strict channel priority; produces a reproducible environment manifest. |
-| `snyk-agent-scan` | Static supply-chain scan of the repo's **agent components** — the MCP server config (`mcp/cline_mcp_settings.json`) and agent skill files (`agent/`) — via `uvx snyk-agent-scan@latest … --json --ci`. Detects prompt injection, tool poisoning/shadowing, toxic flows, and credential issues that code-level SAST misses. Parses configs only; **never starts the servers** (hard-refuses `AGENT_SCAN_RUN_MCP_SERVERS=true`). Skips cleanly when `SNYK_TOKEN` is unset; soft (`allow_failure: true`) on introduction. |
-| `snyk-agent-scan-live` | Manual-only (`when: manual`), runs on a dedicated **disposable sandbox runner** (`tags: [sandbox]`). Performs the *live* scan that actually launches the MCP servers (`--dangerously-run-mcp-servers`) to read their real tool descriptions — confined inside a **locked-down rootless container** (`--network none`, read-only rootfs + tmpfs, `--cap-drop ALL`, `no-new-privileges`, non-root, pids/memory caps, repo mounted read-only). The scanner is **pre-baked into the sandbox image** (`SANDBOX_IMAGE`, built from `ci/sandbox/Containerfile`) so the egress-less container runs it straight off `PATH` — no runtime install, no cache mount; `--no-bootstrap` skips the online call `--network none` would block. This is the only place the dangerous flag is permitted. |
 
 ### Stage 3 — SBOM
 
@@ -171,7 +169,7 @@ This stage runs as a sequential chain that fans out into parallel checks before 
 **Sequential chain:**
 
 1. **`model-signing-install`** — Installs the `model-signing` and `sigstore` Python packages; downloads and installs the `cosign` Go binary from GitHub releases.
-2. **`model-fixture-download`** — Optionally downloads a checksum-pinned public model artifact into `models/` when `MODEL_FIXTURE_URL` is set. By default it skips cleanly, so model weights are never committed to Git.
+2. **`model-fixture-download`** — Downloads the checksum-pinned Qwen GGUF fixture into `models/` by default so the model-integrity jobs exercise real model bytes without committing weights to Git. Set `MODEL_FIXTURE_URL` to an empty value to skip the download.
 3. **`model-digest`** — SHA-256 hashes every model file (`.pkl`, `.pt`, `.safetensors`, `.gguf`, `.bin`, `.h5`, `.onnx`) under `models/` and writes the digest list to `evidence/model-digests.txt`.
 4. **`model-sign`** — Gets a `SIGSTORE_ID_TOKEN` OIDC JWT (audience `"sigstore"`) from GitLab and runs `python -m model_signing sign sigstore` on each subdirectory under `models/`, producing a `model.sig` Sigstore bundle inside each one. Publishes the `.sig` files as artifacts.
 

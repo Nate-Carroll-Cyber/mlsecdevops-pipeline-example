@@ -1,0 +1,31 @@
+# Argo CD Application — GitOps delivery of the GAIPS k8s manifests. Argo CD
+# continuously reconciles the cluster to the manifests in Git (drift detection +
+# self-heal for free), and the PreSync hook (verify-signatures-presync-hook.yaml,
+# applied from the same path) verifies the model/dataset/AI-BOM signatures this
+# pipeline generates BEFORE the new revision rolls out — closing the sign→verify
+# loop at deploy time. Image-signature enforcement is handled separately by the
+# Kyverno policy at admission (deployment/kubernetes/policies/).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gaips
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: gaips
+  source:
+    # Replace with your GitLab project URL; path points at the k8s manifests.
+    repoURL: https://gitlab.example.com/your-group/gaips.git
+    targetRevision: main
+    path: docs/gaips-materials/deployment/kubernetes
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gaips
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ApplyOutOfSyncOnly=true

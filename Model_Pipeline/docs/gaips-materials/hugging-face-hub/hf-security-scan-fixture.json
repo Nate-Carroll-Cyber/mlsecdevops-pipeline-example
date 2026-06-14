@@ -1,0 +1,38 @@
+{
+  "repository": "gaips-fixture/safe-policy-model",
+  "mode": "fixture",
+  "settings": {
+    "private": true,
+    "two_factor_required": true,
+    "fine_grained_token": true,
+    "resource_group": "gaips-lab"
+  },
+  "scan_results": [
+    {
+      "scanner": "malware",
+      "status": "passed",
+      "findings": 0
+    },
+    {
+      "scanner": "pickle_import",
+      "status": "warning",
+      "findings": 1,
+      "detail": "Fixture model contains pickle-style artifact for review; do not load without sandbox."
+    },
+    {
+      "scanner": "secrets",
+      "status": "passed",
+      "findings": 0
+    },
+    {
+      "scanner": "protect_ai_guardian",
+      "status": "passed",
+      "findings": 0
+    },
+    {
+      "scanner": "jfrog_model_security",
+      "status": "passed",
+      "findings": 0
+    }
+  ]
+}

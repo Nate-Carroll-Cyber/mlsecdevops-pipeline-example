@@ -1264,6 +1264,9 @@ clamav-scan:
       freshclam --quiet 2>&1 | tail -3 || echo "WARNING: freshclam update failed — using cached DB"
     - |
       set +e
+      echo "=== ClamAV model scan ==="
+      id
+      ls -la "${MODEL_DIR}"
       clamscan \
         --recursive \
         --infected \
@@ -1272,11 +1275,12 @@ clamav-scan:
         --max-scansize=2047M \
         --log="${REPORTS_DIR}/clamav-model.log" \
         "${MODEL_DIR}" \
-        2>&1
+        > "${REPORTS_DIR}/clamav-model.txt" 2>&1
       CLAM_EXIT=$?
+      cat "${REPORTS_DIR}/clamav-model.txt"
+      echo "clamscan exit: ${CLAM_EXIT}"
       set -e
-      cat "${REPORTS_DIR}/clamav-model.log" || true
-      # clamscan exit codes: 0=clean 1=virus found 2=error (e.g. empty dir — non-fatal)
+      # clamscan exit codes: 0=clean 1=virus found 2=error.
       INFECTED=$(grep " FOUND$" "${REPORTS_DIR}/clamav-model.log" 2>/dev/null | wc -l | tr -d ' ')
       INFECTED="${INFECTED:-0}"
       printf '{"scanned_dir":"%s","infected":%s,"exit_code":%s}\n' \
@@ -1284,13 +1288,17 @@ clamav-scan:
         > "${REPORTS_DIR}/clamav-model.json"
       echo "ClamAV: ${INFECTED} infected file(s) | exit ${CLAM_EXIT}"
       if [ "${CLAM_EXIT}" -eq 1 ]; then
-        echo "ClamAV signature matched model artifact bytes; recording finding as advisory for model-weight blobs."
-        exit 0
+        echo "INFECTED — see report"
+        exit 1
+      elif [ "${CLAM_EXIT}" -ne 0 ]; then
+        echo "clamscan ERROR (exit ${CLAM_EXIT})"
+        exit "${CLAM_EXIT}"
       fi
-      [ "${CLAM_EXIT}" -ne 2 ] || { echo "ClamAV scan error — failing pipeline"; exit 1; }
+      echo "clean"
   artifacts:
     paths:
       - "${REPORTS_DIR}/clamav-model.log"
+      - "${REPORTS_DIR}/clamav-model.txt"
       - "${REPORTS_DIR}/clamav-model.json"
     expire_in: 7 days
   allow_failure: false

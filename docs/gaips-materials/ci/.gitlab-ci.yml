@@ -724,6 +724,7 @@ model-sign:
         SIG_COUNT=$((SIG_COUNT + 1))
         echo "Signing: ${model_dir}"
         python -m model_signing sign sigstore "${model_dir}" \
+          --identity_token "${SIGSTORE_ID_TOKEN}" \
           --signature "${model_dir}/model.sig"
       done < <(find "${MODEL_DIR}" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
       if [ "${SIG_COUNT}" -eq 0 ]; then

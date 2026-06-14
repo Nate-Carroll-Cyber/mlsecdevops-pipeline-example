@@ -171,7 +171,7 @@ This stage runs as a sequential chain that fans out into parallel checks before 
 1. **`model-signing-install`** — Installs the `model-signing` and `sigstore` Python packages; downloads and installs the `cosign` Go binary from GitHub releases.
 2. **`model-fixture-download`** — Downloads the checksum-pinned Qwen GGUF fixture into `models/` by default so the model-integrity jobs exercise real model bytes without committing weights to Git. Set `MODEL_FIXTURE_URL` to an empty value to skip the download.
 3. **`model-digest`** — SHA-256 hashes every model file (`.pkl`, `.pt`, `.safetensors`, `.gguf`, `.bin`, `.h5`, `.onnx`) under `models/` and writes the digest list to `evidence/model-digests.txt`.
-4. **`model-sign`** — Gets a `SIGSTORE_ID_TOKEN` OIDC JWT (audience `"sigstore"`) from GitLab and runs `python -m model_signing sign sigstore` on each subdirectory under `models/`, producing a `model.sig` Sigstore bundle inside each one. Publishes the `.sig` files as artifacts.
+4. **`model-sign`** — Gets a `SIGSTORE_ID_TOKEN` OIDC JWT (audience `"sigstore"`) from GitLab and passes it to `python -m model_signing sign sigstore --identity_token` for each subdirectory under `models/`, producing a noninteractive `model.sig` Sigstore bundle inside each one. Publishes the `.sig` files as artifacts.
 
 **Parallel checks (run after `model-digest` or `model-sign`):**
 

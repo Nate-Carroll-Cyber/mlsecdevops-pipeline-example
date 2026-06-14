@@ -719,6 +719,16 @@ model-sign:
   script:
     - pip install model-signing sigstore
     - |
+      if [ -n "${MODEL_SIGNING_IDENTITY:-}" ]; then
+        echo "MODEL_SIGNING_IDENTITY is configured"
+      else
+        echo "MODEL_SIGNING_IDENTITY is not configured"
+      fi
+      if [ -n "${SIGSTORE_OIDC_ISSUER:-}" ]; then
+        echo "SIGSTORE_OIDC_ISSUER is configured"
+      else
+        echo "SIGSTORE_OIDC_ISSUER is not configured"
+      fi
       SIG_COUNT=0
       while IFS= read -r -d '' model_dir; do
         SIG_COUNT=$((SIG_COUNT + 1))
@@ -736,12 +746,84 @@ model-sign:
     expire_in: 30 days
   allow_failure: true  # skips gracefully when MODEL_DIR is empty; remove once models are present
 
+sigstore-identity-discover:
+  stage: model-integrity
+  image: python:3.11-slim
+  needs: []
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+    - when: never
+  allow_failure: true
+  # id_tokens issues the same per-job OIDC JWT shape used by model-sign.
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: "sigstore"
+  script:
+    - pip install --quiet model-signing sigstore cryptography
+    - mkdir -p .sigstore-identity-discover/probe
+    - echo "sigstore identity probe" > .sigstore-identity-discover/probe/probe.txt
+    - |
+      python -m model_signing sign sigstore .sigstore-identity-discover/probe \
+        --identity-token "${SIGSTORE_ID_TOKEN}" \
+        --signature .sigstore-identity-discover/probe/model.sig
+    - |
+      python3 - <<'PYEOF'
+      import base64
+      import json
+      from cryptography import x509
+      from cryptography.x509.oid import ObjectIdentifier
+
+      bundle = json.load(open(".sigstore-identity-discover/probe/model.sig"))
+      vm = bundle.get("verificationMaterial", {})
+
+      if "certificate" in vm:
+          der = base64.b64decode(vm["certificate"]["rawBytes"])
+      else:
+          der = base64.b64decode(vm["x509CertificateChain"]["certificates"][0]["rawBytes"])
+
+      cert = x509.load_der_x509_certificate(der)
+      san = cert.extensions.get_extension_for_class(x509.SubjectAlternativeName)
+      identity = san.value.get_values_for_type(x509.UniformResourceIdentifier)
+
+      issuer = None
+      for oid in ("1.3.6.1.4.1.57264.1.8", "1.3.6.1.4.1.57264.1.1"):
+          try:
+              raw = cert.extensions.get_extension_for_oid(ObjectIdentifier(oid)).value.value
+          except x509.ExtensionNotFound:
+              continue
+          issuer = raw[2:].decode() if oid.endswith(".1.8") and raw[:1] == b"\x0c" else raw.decode()
+          break
+
+      print()
+      print("==================== COPY THESE ====================")
+      print("MODEL_SIGNING_IDENTITY =", identity[0] if identity else "<none found>")
+      print("SIGSTORE_OIDC_ISSUER   =", issuer or "<none found>")
+      print("====================================================")
+      print()
+      PYEOF
+  artifacts:
+    when: always
+    paths:
+      - .sigstore-identity-discover/probe/model.sig
+    expire_in: 1 hour
+
 signature-verification:
   stage: model-integrity
   needs: ["model-sign", "model-fixture-download", "vault-secrets"]
   script:
     - pip install model-signing sigstore
     - |
+      if [ -n "${MODEL_SIGNING_IDENTITY:-}" ]; then
+        echo "MODEL_SIGNING_IDENTITY is configured"
+      else
+        echo "MODEL_SIGNING_IDENTITY is not configured"
+      fi
+      if [ -n "${SIGSTORE_OIDC_ISSUER:-}" ]; then
+        echo "SIGSTORE_OIDC_ISSUER is configured"
+      else
+        echo "SIGSTORE_OIDC_ISSUER is not configured"
+      fi
       SIG_COUNT=0
       while IFS= read -r -d '' sig_file; do
         model_dir=$(dirname "${sig_file}")
@@ -926,16 +1008,17 @@ modelscan:
 
 modelaudit-scan:
   stage: model-integrity
-  image: node:20-slim
+  image: python:3.11-slim
   before_script: []
   needs: ["modelscan", "model-fixture-download"]
+  variables:
+    DO_NOT_TRACK: "1"
+    PROMPTFOO_DISABLE_TELEMETRY: "1"
   script:
-    - apt-get update -qq && apt-get install -y -qq python3 python3-pip python3-venv
-    - npm install -g "promptfoo@${PROMPTFOO_VERSION}"
-    - python3 -m venv /tmp/modelaudit-venv
-    - . /tmp/modelaudit-venv/bin/activate
+    - python3 -c "import sys; assert sys.version_info >= (3, 10), 'modelaudit requires Python >=3.10'"
     - pip install --quiet --upgrade pip setuptools wheel
-    - pip install --quiet "modelaudit[all,cloud,mlflow,numpy1]" || pip install --quiet "modelaudit[all,cloud,mlflow]"
+    - pip install --quiet "modelaudit[all]>=0.2.47"
+    - python3 -c "import importlib.metadata as m; print('modelaudit', m.version('modelaudit'))"
     - mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"
     - |
       MODEL_FILE=$(find "${MODEL_DIR}" -type f 2>/dev/null | head -1)
@@ -948,15 +1031,16 @@ modelaudit-scan:
       fi
     - |
       set +e
-      promptfoo scan-model "${MODEL_DIR}" \
-        --no-write \
+      modelaudit scan "${MODEL_DIR}" \
         --format json \
         --output "${REPORTS_DIR}/modelaudit.json" \
-        2>&1 | tee "${REPORTS_DIR}/modelaudit.log"; AUDIT_EXIT=${PIPESTATUS[0]}
+        > "${REPORTS_DIR}/modelaudit.log" 2>&1
+      AUDIT_EXIT=$?
+      cat "${REPORTS_DIR}/modelaudit.log"
       export AUDIT_EXIT
       set -e
       if [ ! -f "${REPORTS_DIR}/modelaudit.json" ]; then
-        printf '{"tool":"modelaudit","status":"failed","exit_code":%s,"reason":"promptfoo scan-model did not produce an output report"}\n' \
+        printf '{"tool":"modelaudit","status":"failed","exit_code":%s,"reason":"modelaudit scan did not produce an output report"}\n' \
           "${AUDIT_EXIT:-2}" > "${REPORTS_DIR}/modelaudit.json"
       fi
     - |

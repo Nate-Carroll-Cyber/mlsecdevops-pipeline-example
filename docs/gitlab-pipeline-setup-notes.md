@@ -1,164 +1,65 @@
 # GitLab Pipeline Setup Notes
 
-These are the steps used to connect the existing local Counter Spy repository to
-GitLab and push the GAIPS pipeline.
+These notes describe how to publish and run the standalone model security pipeline in GitLab.
+They intentionally avoid references to any application repository; this project should contain
+only the pipeline definition, CI helper scripts, fixtures, and pipeline-specific docs.
 
-## Local Project
+## Repository Layout
 
-Repository path:
-
-```bash
-/Users/nate/Documents/Counter-Spy Claude.ai
-```
-
-Docs path:
-
-```bash
-/Users/nate/Documents/Counter-Spy Claude.ai/docs
-```
-
-GitLab project:
+The pipeline expects this layout at the repository root:
 
 ```text
-https://gitlab.com/natecarrollfilms/counter-spy
+.gitlab-ci.yml
+docs/gaips-materials/ci/
+docs/gaips-materials/deployment/
+docs/gaips-materials/evals/
+docs/gaips-materials/fixtures/
+docs/gaips-materials/guardrails/
+docs/gaips-materials/hugging-face-hub/
+docs/gaips-materials/model-signing/
+docs/gaips-materials/scripts/
 ```
 
-## Steps Taken
-
-1. Copy the GitLab CI pipeline into the project root.
-
-```bash
-cp "/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/ci/.gitlab-ci.yml" \
-   "/Users/nate/Documents/Counter-Spy Claude.ai/.gitlab-ci.yml"
-```
-
-2. Stage the pipeline file.
-
-```bash
-git -C "/Users/nate/Documents/Counter-Spy Claude.ai" add .gitlab-ci.yml
-```
-
-3. Set the local Git author identity for this repository.
-
-```bash
-git -C "/Users/nate/Documents/Counter-Spy Claude.ai" config --local user.name "Nate Carroll"
-git -C "/Users/nate/Documents/Counter-Spy Claude.ai" config --local user.email "nate.carroll@veteranfilmproductions.com"
-```
-
-4. Check existing remotes before adding GitLab.
-
-```bash
-git -C "/Users/nate/Documents/Counter-Spy Claude.ai" remote -v
-```
-
-The existing `origin` remote pointed to GitHub, so it was left intact:
+The CI variable `GAIPS_MATERIALS_DIR` defaults to:
 
 ```text
-origin  https://github.com/Nate-Carroll-Cyber/Counter-Spy.ai.git
+${CI_PROJECT_DIR}/docs/gaips-materials
 ```
 
-5. Add GitLab as a second remote named `gitlab`.
+Keep that variable aligned with the repository layout if files are moved later.
 
-```bash
-git -C "/Users/nate/Documents/Counter-Spy Claude.ai" remote add gitlab git@gitlab.com:natecarrollfilms/counter-spy.git
-```
+## Initial GitLab Setup
 
-6. Rename the local branch to `main`.
-
-```bash
-git -C "/Users/nate/Documents/Counter-Spy Claude.ai" branch -M main
-```
-
-7. Commit the GitLab pipeline.
-
-```bash
-git -C "/Users/nate/Documents/Counter-Spy Claude.ai" commit -m "ci: add GAIPS pipeline"
-```
-
-Commit created:
+1. Create or choose a GitLab project for the standalone model pipeline.
+2. Add this repository as the GitLab remote.
+3. Push the pipeline contents to the default branch.
+4. Configure the required and optional CI/CD variables documented in:
 
 ```text
-fa04752 ci: add GAIPS pipeline
+docs/gaips-materials/ci/CI-VARIABLES.md
 ```
 
-8. First push attempt failed because GitLab SSH host trust was not configured.
+5. Run a pipeline from the default branch and review the setup, SAST, SBOM,
+   vulnerability scan, model-integrity, evaluation, evidence, AI BOM, and deploy-prep stages.
+
+## Required Project Variables
+
+The pipeline can run in fixture mode with many integrations unset, but production-style model
+signing and verification should configure these project variables:
 
 ```text
-Host key verification failed.
+MODEL_SIGNING_IDENTITY
+SIGSTORE_OIDC_ISSUER
 ```
 
-9. Add GitLab to SSH known hosts.
+Additional optional variables for model, dataset, registry, Vault, Dependency-Track, and image
+signing workflows are documented in `docs/gaips-materials/ci/CI-VARIABLES.md` and in the
+comments at the top of `.gitlab-ci.yml`.
 
-```bash
-mkdir -p ~/.ssh
-ssh-keyscan gitlab.com >> ~/.ssh/known_hosts
-```
+## Operational Notes
 
-10. Second push attempt failed because no GitLab SSH key was registered.
-
-```text
-git@gitlab.com: Permission denied (publickey).
-```
-
-11. Generate a dedicated GitLab SSH key.
-
-```bash
-ssh-keygen -t ed25519 \
-  -C "nate.carroll@veteranfilmproductions.com" \
-  -f ~/.ssh/id_ed25519_gitlab \
-  -N ""
-```
-
-12. Add the generated public key to GitLab.
-
-GitLab SSH key settings:
-
-```text
-https://gitlab.com/-/user_settings/ssh_keys
-```
-
-Public key that was added:
-
-```text
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKEoeqsbkL5WGIffkl0M5T3KGYRqP5oPNgC/t1HZTJxF nate.carroll@veteranfilmproductions.com
-```
-
-13. Configure SSH to use the dedicated key for GitLab.
-
-```bash
-printf '\nHost gitlab.com\n  HostName gitlab.com\n  User git\n  IdentityFile ~/.ssh/id_ed25519_gitlab\n  IdentitiesOnly yes\n' >> ~/.ssh/config
-chmod 600 ~/.ssh/config
-```
-
-14. Test GitLab SSH authentication.
-
-```bash
-ssh -T git@gitlab.com
-```
-
-Successful result:
-
-```text
-Welcome to GitLab, @nate.carroll!
-```
-
-15. Push the local `main` branch to GitLab.
-
-```bash
-git -C "/Users/nate/Documents/Counter-Spy Claude.ai" push --set-upstream gitlab main
-```
-
-Successful result:
-
-```text
-To gitlab.com:natecarrollfilms/counter-spy.git
- * [new branch]      main -> main
-branch 'main' set up to track 'gitlab/main'.
-```
-
-## Notes
-
-- The GitHub remote named `origin` was preserved.
-- The GitLab remote was added as `gitlab`.
-- The GitLab project was created as a private project during the push.
-- The first pipeline run should be checked in GitLab after the push.
+- A push to the default branch starts the pipeline.
+- Use commit message marker `[sigstore-discovery]` only when running the discovery-only workflow.
+- Keep secrets in GitLab CI/CD variables or an approved secret manager; do not commit tokens.
+- The pipeline publishes reports and evidence as GitLab job artifacts.
+- Review `docs/gaips-materials/ci/SBOM.md` for the intended SBOM and vulnerability scanning flow.

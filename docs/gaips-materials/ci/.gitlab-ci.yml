@@ -904,7 +904,7 @@ signature-verification:
         python -m model_signing verify sigstore "${model_dir}" \
           --signature "${sig_file}" \
           --identity "${MODEL_SIGNING_IDENTITY}" \
-          --identity-provider "${SIGSTORE_OIDC_ISSUER}"
+          --identity_provider "${SIGSTORE_OIDC_ISSUER}"
       done < <(find "${MODEL_DIR}" -name "model.sig" -print0 2>/dev/null)
       if [ "${SIG_COUNT}" -eq 0 ]; then
         echo "No model.sig files found — signature verification skipped"

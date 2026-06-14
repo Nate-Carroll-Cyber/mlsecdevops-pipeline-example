@@ -111,7 +111,7 @@ spec:
                   python3 -m model_signing verify sigstore "${dir}" \
                     --signature "${sig}" \
                     --identity "${MODEL_SIGNING_IDENTITY}" \
-                    --identity-provider "${SIGSTORE_OIDC_ISSUER}"
+                    --identity_provider "${SIGSTORE_OIDC_ISSUER}"
                 done < <(find model-bundle -name model.sig)
                 echo "Model bundle signatures verified"
               else

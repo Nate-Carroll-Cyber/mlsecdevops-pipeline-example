@@ -364,16 +364,6 @@ def parse_data(reports: Path, src: Sources, m: Metrics) -> None:
 def parse_ai_eval(reports: Path, src: Sources, m: Metrics) -> None:
     ev: dict[str, Any] = {}
 
-    rag = _load_json(reports / "local-target-results.json", src, "local-target-results.json")
-    if isinstance(rag, dict):
-        r = _rate(rag.get("results", []), "pass")
-        if r is None and isinstance(rag.get("passed"), bool):
-            r = 1.0 if rag["passed"] else 0.0
-        if r is not None:
-            ev["rag_smoke"] = {"pass_rate": r}
-            m.metric("ai_eval.rag.pass_rate", r)
-            m.gate("rag-smoke-eval", r >= 1.0, f"pass_rate={r}")
-
     pf = _load_json(reports / "promptfoo-results.json", src, "promptfoo-results.json")
     if isinstance(pf, dict):
         stats = (pf.get("results", {}) or {}).get("stats", {}) if isinstance(pf.get("results"), dict) else {}

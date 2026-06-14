@@ -4,7 +4,6 @@ import argparse
 from pathlib import Path
 
 EXPECTED = [
-    "local-target-results.json",
     "semgrep.json",
     "promptfoo-results.json",
     "garak-results.json",

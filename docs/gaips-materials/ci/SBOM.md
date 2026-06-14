@@ -33,7 +33,7 @@ flowchart TD
       s4 --> g
     end
     subgraph EVAL [ai-eval]
-      s5[rag-smoke · promptfoo · garak · giskard<br/>inspect-ai · markllm · pyrit]
+      s5[promptfoo · garak · giskard<br/>inspect-ai · markllm · pyrit]
     end
     subgraph GUARD [guardrail]
       s6[guardrail-regression · model-drift-detection<br/>model-baseline-commit · evidently-drift]

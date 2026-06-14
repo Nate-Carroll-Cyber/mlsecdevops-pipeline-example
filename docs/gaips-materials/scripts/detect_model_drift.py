@@ -70,7 +70,7 @@ def extract_metrics(reports: Path) -> dict[str, float]:
             sum(1 for f in findings if isinstance(f, dict) and f.get("severity") == "high")
         )
 
-    for name, key in (("local-target-results.json", "rag"), ("guardrail-regression.json", "guardrail")):
+    for name, key in (("guardrail-regression.json", "guardrail"),):
         doc = _load(reports / name)
         if isinstance(doc, dict):
             for list_key in ("results", "checks"):

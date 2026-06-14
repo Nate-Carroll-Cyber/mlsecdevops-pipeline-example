@@ -1,7 +1,6 @@
 # Python dependencies for GAIPS materials evaluation pipeline.
-# Keep this file present — CI setup, pip-audit, rag-smoke-eval, and
-# guardrail-regression all require it to exist even when the scripts
-# themselves use only the standard library.
+# Keep this file present — CI setup, pip-audit, and guardrail-regression
+# require it to exist even when scripts themselves use only the standard library.
 
 pandas>=2.0.0
 requests>=2.31.0

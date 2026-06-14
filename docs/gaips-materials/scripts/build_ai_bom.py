@@ -262,7 +262,6 @@ EVAL_REPORTS = {
     "promptfoo": "promptfoo-results.json",
     "guardrail-regression": "guardrail-regression.json",
     "pyrit": "pyrit-results.json",
-    "rag-smoke": "local-target-results.json",
 }
 
 

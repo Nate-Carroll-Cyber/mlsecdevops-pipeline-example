@@ -1861,27 +1861,6 @@ artifact-signing-gate:
 
 # ─── AI EVALUATION ───────────────────────────────────────────────────────────
 
-rag-smoke-eval:
-  stage: ai-eval
-  rules:
-    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
-      when: never
-    - when: on_success
-  needs: ["artifact-signing-gate"]
-  allow_failure: true
-  script:
-    - !reference [.resolve-reqs, script]
-    - '[ -n "${REQ_FILE}" ] && pip install -r "${REQ_FILE}" || echo "No requirements file — skipping install"'
-    - mkdir -p "${REPORTS_DIR}"
-    - |
-      python "${GAIPS_MATERIALS_DIR}/scripts/rag_smoke_eval.py" \
-        --materials "${GAIPS_MATERIALS_DIR}" \
-        --output "${REPORTS_DIR}/local-target-results.json"
-  artifacts:
-    paths:
-      - "${REPORTS_DIR}/local-target-results.json"
-    expire_in: 7 days
-
 promptfoo-eval:
   stage: ai-eval
   rules:
@@ -2230,7 +2209,6 @@ model-drift-detection:
       when: never
     - when: on_success
   needs:
-    - rag-smoke-eval
     - promptfoo-eval
     - garak-scan
     - giskard-scan
@@ -2379,7 +2357,6 @@ evidence-summary:
     - evidently-drift
     - tamper-verification
     - model-drift-detection
-    - rag-smoke-eval
     - promptfoo-eval
     - garak-scan
     - giskard-scan
@@ -2509,7 +2486,6 @@ ai-bom-assemble:
     - promptfoo-eval
     - pyrit-scan
     - guardrail-regression
-    - rag-smoke-eval
     - model-drift-detection
     - evidence-summary
   script:

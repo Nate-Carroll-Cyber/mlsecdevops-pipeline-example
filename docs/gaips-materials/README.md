@@ -6,9 +6,7 @@ This directory contains the concrete starter artifacts and fixtures used by the 
 
 | Directory | Purpose |
 | --- | --- |
-| `starter-rag-app/` | Minimal capstone RAG app used when no class app exists. |
 | `model-gateway/` | Reference provider wrapper and model-call evidence logging contract. |
-| `data/` | Approved documents plus a benign malicious test document. |
 | `evals/` | Promptfoo, garak, Giskard, Inspect AI, MarkLLM, and PyRIT lab instructions/config. |
 | `evals/markllm.md` | MarkLLM watermark-readiness lab guidance for CI evidence and model-output provenance review. |
 | `fixtures/` | Static red-team and eval outputs for fixture-mode labs. |
@@ -32,8 +30,6 @@ For a standalone lab repository, copy the needed subdirectories into the lab roo
 
 ```bash
 mkdir -p gaips-labs
-cp -R docs/gaips-materials/starter-rag-app gaips-labs/app
-cp -R docs/gaips-materials/data gaips-labs/data
 cp -R docs/gaips-materials/evals gaips-labs/evals
 cp -R docs/gaips-materials/fixtures gaips-labs/fixtures
 cp -R docs/gaips-materials/guardrails gaips-labs/guardrails
@@ -68,7 +64,7 @@ Before conversion, verify the CSV contains only approved synthetic or sanitized 
 
 The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, and `deploy-prep`. It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, ModelScan, ModelAudit, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, Promptfoo, garak, Giskard, Inspect AI, MarkLLM watermark-readiness, PyRIT, guardrail-regression, model-drift detection, evidence, a consolidated CycloneDX 1.6 AI BOM artifact (also pushed to Dependency-Track), a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification.
 
-Before copying this CI file into a student lab repository, add or adapt `requirements.txt`, `models/`, `evals/promptfoo.yaml`, `guardrails/baseline.json`, `scripts/rag_smoke_eval.py`, `scripts/pyrit_scan.py`, `scripts/run_guardrail_regression.py`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, `scripts/detect_model_drift.py`, the eval/data-quality collectors (`scripts/collect_garak_report.py`, `scripts/collect_inspect_report.py`, `scripts/run_giskard_live.py`, `scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/dependency_track_upload.py`), `evals/eval-dataset.schema.json`, and (after the first run seeds it) `evals/eval-baseline.json`. Configure endpoint, signing, and Hugging Face variables in GitLab CI/CD settings. Fixture files under `docs/gaips-materials/fixtures/` remain offline interpretation aids, not automatic CI pass-throughs.
+Before copying this CI file into a student lab repository, add or adapt `requirements.txt`, `models/`, `evals/promptfoo.yaml`, `guardrails/baseline.json`, `scripts/pyrit_scan.py`, `scripts/run_guardrail_regression.py`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, `scripts/detect_model_drift.py`, the eval/data-quality collectors (`scripts/collect_garak_report.py`, `scripts/collect_inspect_report.py`, `scripts/run_giskard_live.py`, `scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/dependency_track_upload.py`), `evals/eval-dataset.schema.json`, and (after the first run seeds it) `evals/eval-baseline.json`. Configure endpoint, signing, and Hugging Face variables in GitLab CI/CD settings. Fixture files under `docs/gaips-materials/fixtures/` remain offline interpretation aids, not automatic CI pass-throughs.
 
 ## Pipeline Walkthrough
 
@@ -97,7 +93,7 @@ flowchart TD
       mi_jobs --> gate
     end
     subgraph EVAL [ai-eval]
-      eval_jobs[rag-smoke · promptfoo · garak<br/>giskard · inspect-ai · markllm · pyrit]
+      eval_jobs[promptfoo · garak<br/>giskard · inspect-ai · markllm · pyrit]
     end
     subgraph GUARD [guardrail]
       guard_jobs[guardrail-regression · model-drift-detection<br/>model-baseline-commit · evidently-drift]
@@ -206,7 +202,6 @@ All jobs run in parallel after the gate passes.
 
 | Job | What it does |
 | --- | --- |
-| `rag-smoke-eval` | Runs a local RAG smoke test against the GAIPS course materials. |
 | `promptfoo-eval` | Runs adversarial prompt evaluations defined in `evals/promptfoo.yaml` only when `MODEL_ENDPOINT` is configured; otherwise it writes a skipped `promptfoo-results.json` artifact. Advisory failures still upload `promptfoo-results.json`; if Promptfoo exits before writing a report, the job writes a minimal failure JSON for downstream evidence. |
 | `garak-scan` | Probes the live model endpoint (from `MODEL_ENDPOINT`) with all Garak probe modules to test for jailbreaks, extraction, and unsafe outputs. |
 | `giskard-scan` | Runs Giskard's LLM scan against the live model for bias, hallucination, and prompt injection. |

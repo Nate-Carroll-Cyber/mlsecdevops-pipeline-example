@@ -728,7 +728,7 @@ model-sign:
         SIG_COUNT=$((SIG_COUNT + 1))
         echo "Signing: ${model_dir}"
         python -m model_signing sign sigstore "${model_dir}" \
-          --identity_token "${SIGSTORE_ID_TOKEN}" \
+          --identity-token "${SIGSTORE_ID_TOKEN}" \
           --signature "${model_dir}/model.sig"
       done < <(find "${MODEL_DIR}" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
       if [ "${SIG_COUNT}" -eq 0 ]; then
@@ -925,6 +925,94 @@ modelscan:
     paths:
       - "${REPORTS_DIR}/modelscan.json"
       - "${REPORTS_DIR}/modelscan.log"
+    expire_in: 7 days
+  allow_failure: true
+
+modelaudit-scan:
+  stage: model-integrity
+  image: node:20-slim
+  before_script: []
+  needs: ["modelscan", "model-fixture-download"]
+  script:
+    - apt-get update -qq && apt-get install -y -qq python3 python3-pip python3-venv
+    - npm install -g "promptfoo@${PROMPTFOO_VERSION}"
+    - python3 -m venv /tmp/modelaudit-venv
+    - . /tmp/modelaudit-venv/bin/activate
+    - pip install --quiet --upgrade pip setuptools wheel
+    - pip install --quiet "modelaudit[all,cloud,mlflow,numpy1]" || pip install --quiet "modelaudit[all,cloud,mlflow]"
+    - mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"
+    - |
+      MODEL_FILE=$(find "${MODEL_DIR}" -type f 2>/dev/null | head -1)
+      if [ -z "${MODEL_FILE}" ]; then
+        echo "No model files found under ${MODEL_DIR} — skipping ModelAudit"
+        echo '{"tool":"modelaudit","skipped":true,"reason":"no model files found"}' > "${REPORTS_DIR}/modelaudit.json"
+        echo '{"tool":"modelaudit","skipped":true,"critical":0,"warning":0,"info":0,"findings":0,"exit_code":0}' > "${REPORTS_DIR}/modelaudit-summary.json"
+        : > "${REPORTS_DIR}/modelaudit.log"
+        exit 0
+      fi
+    - |
+      set +e
+      promptfoo scan-model "${MODEL_DIR}" \
+        --no-write \
+        --format json \
+        --output "${REPORTS_DIR}/modelaudit.json" \
+        2>&1 | tee "${REPORTS_DIR}/modelaudit.log"; AUDIT_EXIT=${PIPESTATUS[0]}
+      export AUDIT_EXIT
+      set -e
+      if [ ! -f "${REPORTS_DIR}/modelaudit.json" ]; then
+        printf '{"tool":"modelaudit","status":"failed","exit_code":%s,"reason":"promptfoo scan-model did not produce an output report"}\n' \
+          "${AUDIT_EXIT:-2}" > "${REPORTS_DIR}/modelaudit.json"
+      fi
+    - |
+      python3 - <<'PYEOF'
+      import json, os, sys
+
+      report_path = os.path.join(os.environ["REPORTS_DIR"], "modelaudit.json")
+      summary_path = os.path.join(os.environ["REPORTS_DIR"], "modelaudit-summary.json")
+      audit_exit = int(os.environ.get("AUDIT_EXIT", "0") or 0)
+
+      data = json.load(open(report_path))
+      severities = []
+
+      def walk(value):
+          if isinstance(value, dict):
+              sev = value.get("severity") or value.get("level")
+              if isinstance(sev, str):
+                  severities.append(sev.upper())
+              for child in value.values():
+                  walk(child)
+          elif isinstance(value, list):
+              for child in value:
+                  walk(child)
+
+      walk(data)
+      critical = sum(1 for sev in severities if sev == "CRITICAL")
+      warning = sum(1 for sev in severities if sev in ("WARNING", "WARN", "HIGH", "MEDIUM"))
+      info = sum(1 for sev in severities if sev == "INFO")
+      failed = data.get("status") == "failed" if isinstance(data, dict) else False
+      summary = {
+          "tool": "modelaudit",
+          "skipped": bool(data.get("skipped", False)) if isinstance(data, dict) else False,
+          "exit_code": audit_exit,
+          "critical": critical,
+          "warning": warning,
+          "info": info,
+          "findings": len(severities),
+          "failed": failed or audit_exit == 2,
+      }
+      with open(summary_path, "w") as f:
+          json.dump(summary, f, indent=2)
+      print(f"ModelAudit: CRITICAL={critical} WARNING={warning} INFO={info} exit={audit_exit}")
+      if audit_exit == 2:
+          print("ModelAudit operational failure — failing job")
+          sys.exit(2)
+      PYEOF
+  artifacts:
+    when: always
+    paths:
+      - "${REPORTS_DIR}/modelaudit.json"
+      - "${REPORTS_DIR}/modelaudit-summary.json"
+      - "${REPORTS_DIR}/modelaudit.log"
     expire_in: 7 days
   allow_failure: true
 
@@ -1434,7 +1522,7 @@ dataset-sign:
         ! -name "dataset.sig" ! -name "dataset.pem" | head -1)
       if [ -n "${SIGSTORE_ID_TOKEN}" ]; then
         # SIGSTORE_ID_TOKEN is set by id_tokens above; cosign reads it automatically
-        cosign sign-blob \
+        cosign sign-blob --yes \
           --output-signature "${EVIDENCE_DIR}/dataset-input/dataset.sig" \
           --output-certificate "${EVIDENCE_DIR}/dataset-input/dataset.pem" \
           "${DATASET_FILE}"
@@ -1450,7 +1538,7 @@ dataset-sign:
 
 artifact-signing-gate:
   stage: model-integrity
-  needs: ["signature-verification", "tamper-verification", "modelscan", "modelfile-audit", "clamav-scan", "hf-artifact-scan", "dataset-scan", "eval-dataset-validate"]
+  needs: ["signature-verification", "tamper-verification", "modelscan", "modelaudit-scan", "modelfile-audit", "clamav-scan", "hf-artifact-scan", "dataset-scan", "eval-dataset-validate"]
   # Enforcing chokepoint: no eval job runs unless model integrity passed. The
   # tamper job is allow_failure so it stays green and THIS gate makes the call —
   # but on a real tamper it never writes integrity.env, so a missing file here
@@ -1486,8 +1574,21 @@ artifact-signing-gate:
       scanned = int((summary.get("scanned", {}) or {}).get("total_scanned", 0))
       if scanned == 0:
           print("ModelScan gate check PASSED: no supported artifacts scanned")
-          sys.exit(0)
       print("ModelScan gate check PASSED")
+      path = os.path.join(os.environ["REPORTS_DIR"], "modelaudit-summary.json")
+      if not os.path.exists(path):
+          print("GATE FAILED: ModelAudit summary missing")
+          sys.exit(1)
+
+      audit = json.load(open(path))
+      if audit.get("failed"):
+          print("GATE FAILED: ModelAudit had an operational scan failure")
+          sys.exit(1)
+      critical = int(audit.get("critical", 0))
+      if critical > 0:
+          print(f"GATE FAILED: ModelAudit reported {critical} CRITICAL issue(s)")
+          sys.exit(1)
+      print("ModelAudit gate check PASSED")
       PYEOF
       echo "Artifact signing gate PASSED — proceeding to evaluation"
 
@@ -1946,6 +2047,7 @@ evidence-summary:
     - grype-scan
     - trivy-scan
     - modelscan
+    - modelaudit-scan
     - modelfile-audit
     - clamav-scan
     - hf-artifact-scan
@@ -2030,7 +2132,7 @@ model-signing-evidence:
       BUNDLE="${EVIDENCE_DIR}/model-signing-evidence.json"
       if [ -n "${SIGSTORE_ID_TOKEN}" ]; then
         # SIGSTORE_ID_TOKEN is set by id_tokens above; cosign reads it automatically
-        cosign sign-blob \
+        cosign sign-blob --yes \
           --output-signature "${EVIDENCE_DIR}/model-signing-evidence.sig" \
           --output-certificate "${EVIDENCE_DIR}/model-signing-evidence.pem" \
           "${BUNDLE}"
@@ -2064,6 +2166,7 @@ ai-bom-assemble:
     - model-sign
     - modelfile-audit
     - modelscan
+    - modelaudit-scan
     - clamav-scan
     - hf-artifact-scan
     - dataset-download

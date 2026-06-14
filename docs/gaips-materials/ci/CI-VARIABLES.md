@@ -167,7 +167,7 @@ id_tokens:
 ```
 
 GitLab then injects a short-lived OIDC JWT into that job only. `model-sign`
-passes this token explicitly to `model_signing` with `--identity_token` so the
+passes this token explicitly to `model_signing` with `--identity-token` so the
 Sigstore signer uses noninteractive GitLab OIDC instead of starting a browser
 OAuth flow. If a signing job logs an OAuth URL, the job is not using the minted
 token path.

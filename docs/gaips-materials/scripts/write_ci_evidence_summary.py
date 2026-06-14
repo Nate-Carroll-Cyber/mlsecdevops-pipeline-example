@@ -18,6 +18,7 @@ EXPECTED = [
 # Advisory artifacts — displayed for completeness but NOT gated (they skip
 # cleanly when their input is absent, so missing ≠ failure).
 ADVISORY = [
+    "modelaudit-summary.json",
     "great-expectations.json",
     "ydata-profile.json",
     "evidently-drift.json",

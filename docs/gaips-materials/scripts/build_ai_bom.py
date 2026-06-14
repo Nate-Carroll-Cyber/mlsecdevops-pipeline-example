@@ -7,7 +7,7 @@ Two modes:
     CycloneDX document:
       - software components  ← syft software SBOM (sbom.cyclonedx.json)
       - machine-learning-model components ← model-digests.txt + model.sig +
-            modelscan / ClamAV verdicts + HuggingFace card metadata
+            ModelScan / ModelAudit / ClamAV verdicts + HuggingFace card metadata
       - data components      ← dataset-digest.txt + dataset-download/scan
             reports + dataset.sig (signed training data)
       - AI evaluation evidence ← garak / giskard / inspect-ai / promptfoo /
@@ -138,6 +138,7 @@ def _model_components(
         if isinstance(modelscan, dict)
         else {}
     )
+    modelaudit = _load_json(reports_dir / "modelaudit-summary.json") or {}
     clamav = _load_json(reports_dir / "clamav-model.json") or {}
     hf = _load_json(reports_dir / "hf-scan" / "summary.json") or {}
     hf_by_id = {
@@ -162,6 +163,8 @@ def _model_components(
             _prop("artifact.path", path),
             _prop("modelscan.critical", scan_summary.get("CRITICAL", 0)),
             _prop("modelscan.high", scan_summary.get("HIGH", 0)),
+            _prop("modelaudit.critical", modelaudit.get("critical", 0)),
+            _prop("modelaudit.findings", modelaudit.get("findings", 0)),
             _prop("clamav.infected", clamav.get("infected", "unknown")),
             _prop("signed", "true" if signed else "false"),
         ]

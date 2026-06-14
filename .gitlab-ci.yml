@@ -1267,8 +1267,8 @@ clamav-scan:
         --recursive \
         --infected \
         --no-summary \
-        --max-filesize=4000M \
-        --max-scansize=4000M \
+        --max-filesize=2047M \
+        --max-scansize=2047M \
         --log="${REPORTS_DIR}/clamav-model.log" \
         "${MODEL_DIR}" \
         2>&1; CLAM_EXIT=$?
@@ -1344,7 +1344,7 @@ hf-artifact-scan:
               # ClamAV: malware signature scan of downloaded files
               clam = subprocess.run(
                   ["clamscan", "--recursive", "--infected", "--no-summary",
-                   "--max-filesize=4000M", "--max-scansize=4000M", str(local_dir)],
+                   "--max-filesize=2047M", "--max-scansize=2047M", str(local_dir)],
                   capture_output=True, text=True,
               )
               clam_infected = clam.stdout.count(" FOUND")

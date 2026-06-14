@@ -792,6 +792,13 @@ tamper-verification:
 
       current = current_file.read_text() if current_file.exists() else ""
 
+      def is_empty_model_placeholder(text):
+          stripped = (text or "").strip()
+          return stripped.startswith("WARNING: No model files found under ")
+
+      def has_real_model_digest(text):
+          return any("  sha256:" in line for line in (text or "").splitlines())
+
       # ── Vault-backed baseline (preferred) ───────────────────────────────────
       if vault_addr:
           # namespace="" is harmless on OSS Vault; REQUIRED on HCP Vault / Enterprise.
@@ -843,6 +850,10 @@ tamper-verification:
           if baseline is None:
               print("No file baseline — seeding from current digests")
               baseline = current
+
+      if is_empty_model_placeholder(baseline) and has_real_model_digest(current):
+          print("Cached tamper baseline only recorded an empty model directory — reseeding with current model digests")
+          baseline = current
 
       # Always write the file copy (fallback + local diff evidence)
       baseline_file.write_text(baseline or "")

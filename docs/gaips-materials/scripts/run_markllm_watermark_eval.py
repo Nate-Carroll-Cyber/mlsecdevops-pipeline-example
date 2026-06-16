@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import importlib
 import json
 import os
 import platform
+import traceback
 from pathlib import Path
+from typing import Any
 
 
 PROMPTS = [
@@ -14,54 +15,130 @@ PROMPTS = [
 ]
 
 
-def module_available(name: str) -> bool:
+def json_safe(value: Any) -> Any:
     try:
-        importlib.import_module(name)
-    except Exception:
-        return False
-    return True
+        json.dumps(value)
+    except TypeError:
+        if isinstance(value, dict):
+            return {str(k): json_safe(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [json_safe(v) for v in value]
+        return str(value)
+    return value
+
+
+def write_report(path: Path, report: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(json_safe(report), indent=2) + "\n", encoding="utf-8")
+
+
+def fail(out: Path, report: dict[str, Any], reason: str, exc: Exception | None = None) -> None:
+    report["status"] = "failed"
+    report["failure_reason"] = reason
+    if exc is not None:
+        report["exception"] = {
+            "type": type(exc).__name__,
+            "message": str(exc),
+            "traceback": traceback.format_exc(),
+        }
+    write_report(out, report)
+    raise SystemExit(reason)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Emit a MarkLLM CI evidence report.")
+    parser = argparse.ArgumentParser(description="Run a live MarkLLM watermark eval and emit CI evidence.")
     parser.add_argument("--output", required=True)
     parser.add_argument("--algorithm", default=os.environ.get("MARKLLM_ALGORITHM", "KGW"))
     parser.add_argument("--config", default=os.environ.get("MARKLLM_CONFIG", "config/KGW.json"))
-    parser.add_argument("--model-id", default=os.environ.get("MARKLLM_MODEL_ID", "facebook/opt-125m"))
+    parser.add_argument("--model-id", default=os.environ.get("MARKLLM_MODEL_ID", ""))
+    parser.add_argument("--model-revision", default=os.environ.get("MARKLLM_MODEL_REVISION", ""))
+    parser.add_argument("--max-new-tokens", type=int, default=int(os.environ.get("MARKLLM_MAX_NEW_TOKENS", "128")))
+    parser.add_argument("--min-length", type=int, default=int(os.environ.get("MARKLLM_MIN_LENGTH", "160")))
     args = parser.parse_args()
 
-    live_eval = os.environ.get("MARKLLM_LIVE_EVAL", "false").lower() == "true"
-    markllm_ready = module_available("watermark.auto_watermark")
-    torch_ready = module_available("torch")
-    transformers_ready = module_available("transformers")
+    out = Path(args.output)
+    model_id = args.model_id.strip()
+    model_revision = args.model_revision.strip() or None
 
-    report = {
+    report: dict[str, Any] = {
         "tool": "markllm",
-        "mode": "ci-advisory",
-        "status": "configured" if markllm_ready else "markllm-import-unavailable",
-        "live_eval_enabled": live_eval,
+        "mode": "live-eval",
+        "status": "running",
         "algorithm": args.algorithm,
         "algorithm_config": args.config,
-        "model_id": args.model_id,
+        "model_id": model_id,
+        "model_revision": model_revision,
         "python": platform.python_version(),
-        "checks": {
-            "markllm_import": markllm_ready,
-            "torch_import": torch_ready,
-            "transformers_import": transformers_ready,
-        },
-        "prompts": [{"id": f"markllm-{idx}", "prompt": prompt} for idx, prompt in enumerate(PROMPTS, start=1)],
-        "notes": [
-            "This job records MarkLLM readiness and intended watermark prompts for CI evidence.",
-            "Enable live generation/detection after the lab repository defines approved model-cache and runtime policies.",
-        ],
+        "prompts": [],
     }
 
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    if not model_id:
+        fail(out, report, "MARKLLM_MODEL_ID is required for markllm-watermark-eval")
 
-    if live_eval and not markllm_ready:
-        raise SystemExit("MarkLLM import failed; see markllm-results.json for readiness details.")
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        from watermark.auto_watermark import AutoWatermark
+        from utils.transformers_config import TransformersConfig
+    except Exception as exc:
+        fail(out, report, "MarkLLM, torch, and transformers must import successfully for live eval", exc)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    report["device"] = device
+
+    revision_kwargs = {"revision": model_revision} if model_revision else {}
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(model_id, **revision_kwargs)
+        model = AutoModelForCausalLM.from_pretrained(model_id, **revision_kwargs).to(device)
+        vocab_size = len(tokenizer)
+        transformers_config = TransformersConfig(
+            model=model,
+            tokenizer=tokenizer,
+            vocab_size=vocab_size,
+            device=device,
+            max_new_tokens=args.max_new_tokens,
+            min_length=args.min_length,
+            do_sample=True,
+            no_repeat_ngram_size=4,
+        )
+        watermark = AutoWatermark.load(
+            args.algorithm,
+            algorithm_config=args.config,
+            transformers_config=transformers_config,
+        )
+    except Exception as exc:
+        fail(
+            out,
+            report,
+            f"Could not load MARKLLM_MODEL_ID={model_id!r} as a MarkLLM-compatible causal LM",
+            exc,
+        )
+
+    results: list[dict[str, Any]] = []
+    try:
+        for idx, prompt in enumerate(PROMPTS, start=1):
+            watermarked_text = watermark.generate_watermarked_text(prompt)
+            detection = watermark.detect_watermark(watermarked_text)
+            results.append(
+                {
+                    "id": f"markllm-{idx}",
+                    "prompt": prompt,
+                    "watermarked_text": watermarked_text,
+                    "watermarked_text_length": len(watermarked_text),
+                    "detection": detection,
+                }
+            )
+    except Exception as exc:
+        report["prompts"] = results
+        fail(out, report, "MarkLLM live generation/detection failed", exc)
+
+    report["status"] = "passed"
+    report["prompts"] = results
+    report["metrics"] = {
+        "prompt_count": len(results),
+        "detections_completed": sum(1 for item in results if item.get("detection") is not None),
+    }
+    write_report(out, report)
 
 
 if __name__ == "__main__":

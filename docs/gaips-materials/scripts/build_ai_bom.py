@@ -201,6 +201,31 @@ def _model_components(
     return components
 
 
+def _dataset_contents(evidence_dir: Path, name: str, download: dict) -> dict[str, str] | None:
+    """Return a schema-valid CycloneDX data contents reference, never an empty attachment."""
+    candidates: list[str] = []
+    for key in ("path", "filepath", "source", "url"):
+        value = download.get(key)
+        if isinstance(value, str) and value.strip():
+            candidates.append(value.strip())
+
+    if name and name != "dataset":
+        candidates.append(f"evidence/dataset-input/{name}")
+
+    for candidate in candidates:
+        if candidate.startswith(("http://", "https://", "file://")):
+            return {"url": candidate}
+        path = Path(candidate)
+        if path.is_absolute():
+            try:
+                candidate = str(path.relative_to(evidence_dir.parent))
+            except ValueError:
+                candidate = path.name
+        return {"url": f"file://{candidate}"}
+
+    return None
+
+
 def _data_components(evidence_dir: Path, reports_dir: Path) -> list[dict]:
     """`data` components for datasets, with scan verdicts and signature."""
     components: list[dict] = []
@@ -237,17 +262,21 @@ def _data_components(evidence_dir: Path, reports_dir: Path) -> list[dict]:
             _prop("dataset.redaction.secrets", redact.get("secret_redactions", 0)),
             _prop("dataset.redaction.pii", redact.get("pii_redactions", 0)),
         ])
+    data_entry = {
+        "type": "dataset",
+        "name": name,
+    }
+    contents = _dataset_contents(evidence_dir, name, download)
+    if contents:
+        data_entry["contents"] = contents
+
     components.append({
         "type": "data",
         "bom-ref": f"dataset:{name}",
         "name": name,
         "hashes": [_sha256_hash(sha)] if sha else [],
         "externalReferences": ext_refs,
-        "data": [{
-            "type": "dataset",
-            "name": name,
-            "contents": {"attachment": {"contentType": "application/octet-stream"}},
-        }],
+        "data": [data_entry],
         "properties": props,
     })
     return components

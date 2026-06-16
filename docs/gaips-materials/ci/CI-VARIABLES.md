@@ -137,7 +137,8 @@ match an internal mirror or bump a tool.
 | `COSIGN_VERSION` | `v2.4.1` | cosign release (checksum-verified at install). |
 | `GITLEAKS_VERSION` | `8.30.1` | gitleaks **binary** for `dataset-redact` (checksum-verified). |
 | `PROMPTFOO_VERSION` | `0.121.15` | `npm install -g promptfoo@…`. |
-| `MARKLLM_LIVE_EVAL` | `false` | Keep MarkLLM in readiness-only mode by default. Set to `true` only after approving model download/cache policy and making watermark runtime failures meaningful. |
+| `MARKLLM_MODEL_ID` | `""` (derived) | Hugging Face **transformers** repo id for `markllm-watermark-eval`. Leave empty and the job derives it from `MODEL_FIXTURE_URL` at runtime — the HF GGUF repo (e.g. `Qwen/Qwen2.5-1.5B-Instruct-GGUF`) is mapped to its transformers repo (`Qwen/Qwen2.5-1.5B-Instruct`), since `AutoModelForCausalLM` can't load GGUF. Set explicitly to override. The job fails only if no id can be resolved (empty and no `MODEL_FIXTURE_URL`). |
+| `MARKLLM_MODEL_REVISION` | `""` | Optional pinned branch, tag, or commit for the model loaded by MarkLLM. Recommended for reproducible evidence. |
 | `IMAGE_SEMGREP` | `semgrep/semgrep:v1.165.0` | SAST image. |
 | `IMAGE_MINICONDA` | `continuumio/miniconda3:26.3.2` | conda verify image. |
 | `IMAGE_SYFT` | `anchore/syft:v1.45.1` | SBOM image. |

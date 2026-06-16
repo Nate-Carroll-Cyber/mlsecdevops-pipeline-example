@@ -52,7 +52,12 @@ variables:
   IMAGE_GITLEAKS: "zricethezav/gitleaks:latest"       # gitleaks-scan SAST job image
   IMAGE_CLAMAV: "clamav/clamav:1.4"                   # clamav-scan job — pinned off :latest (patch-floating line)
   PROMPTFOO_VERSION: "0.121.15"
-  MARKLLM_LIVE_EVAL: "false"
+  # Live MarkLLM eval model. Leave empty to derive it dynamically from
+  # MODEL_FIXTURE_URL at job time (the HF GGUF repo is mapped to its
+  # transformers repo, since AutoModelForCausalLM can't load GGUF). Set this
+  # explicitly to override and point the eval at any transformers repo id.
+  MARKLLM_MODEL_ID: ""
+  MARKLLM_MODEL_REVISION: ""  # optional pinned HF revision (recommended for reproducibility)
   # ── Dataset download — Generic Package Registry ───────────────────────────────
   # Set these in GitLab Settings → CI/CD → Variables (or fetch from Vault).
   # Leave DATASET_FILENAME blank to skip the download/scan jobs entirely.
@@ -2138,21 +2143,34 @@ markllm-watermark-eval:
     - pip install --quiet markllm torch transformers
     - mkdir -p "${REPORTS_DIR}"
     - |
-      MARKLLM_EXIT=0
+      # Resolve the model id dynamically from the model download. If
+      # MARKLLM_MODEL_ID is set, it wins (explicit override). Otherwise derive
+      # it from MODEL_FIXTURE_URL: pull "<org>/<repo>" out of the Hugging Face
+      # URL and drop a trailing -GGUF/-GGML suffix so the integrity-path GGUF
+      # fixture maps to the transformers repo MarkLLM actually loads.
+      MODEL_ID="${MARKLLM_MODEL_ID}"
+      if [ -z "${MODEL_ID}" ] && [ -n "${MODEL_FIXTURE_URL}" ]; then
+        repo="$(printf '%s\n' "${MODEL_FIXTURE_URL}" \
+          | sed -n 's#^https*://huggingface.co/\([^/][^/]*/[^/][^/]*\).*#\1#p')"
+        case "${repo}" in
+          *-GGUF|*-gguf|*-GGML|*-ggml) repo="${repo%-*}" ;;
+        esac
+        MODEL_ID="${repo}"
+      fi
+      test -n "${MODEL_ID}" || {
+        echo "MARKLLM_MODEL_ID is empty and could not be derived from MODEL_FIXTURE_URL"
+        echo "Set MARKLLM_MODEL_ID to a Hugging Face transformers repo id explicitly."
+        exit 1
+      }
+      echo "MarkLLM model id (resolved): ${MODEL_ID}"
+      export MARKLLM_MODEL_ID="${MODEL_ID}"
       python "${GAIPS_MATERIALS_DIR}/scripts/run_markllm_watermark_eval.py" \
-        --output "${REPORTS_DIR}/markllm-results.json" || MARKLLM_EXIT=$?
-      if [ "${MARKLLM_LIVE_EVAL:-false}" = "true" ]; then
-        exit "${MARKLLM_EXIT}"
-      fi
-      if [ "${MARKLLM_EXIT}" -ne 0 ]; then
-        echo "MarkLLM live eval disabled — preserving readiness report and not failing advisory job"
-      fi
+        --output "${REPORTS_DIR}/markllm-results.json"
   artifacts:
     when: always
     paths:
       - "${REPORTS_DIR}/markllm-results.json"
     expire_in: 7 days
-  allow_failure: true   # advisory until a watermark baseline and model-cache policy are established
 
 pyrit-scan:
   stage: ai-eval
@@ -2519,7 +2537,6 @@ ai-bom-validate:
     entrypoint: [""]
   before_script: []          # cyclonedx-cli image has no Python
   needs: ["ai-bom-assemble"]
-  allow_failure: true        # advisory: a schema slip should not block delivery of the BOM artifact
   script:
     - |
       # Hard-validate the AI BOM against the CycloneDX 1.6 JSON schema.

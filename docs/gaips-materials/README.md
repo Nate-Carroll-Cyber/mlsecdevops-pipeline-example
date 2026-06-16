@@ -9,6 +9,7 @@ This directory contains the concrete starter artifacts and fixtures used by the 
 | `model-gateway/` | Reference provider wrapper and model-call evidence logging contract. |
 | `evals/` | Promptfoo, garak, Giskard, Inspect AI, MarkLLM, and PyRIT lab instructions/config. |
 | `evals/markllm.md` | MarkLLM live watermark evaluation lab guidance for CI evidence and model-output provenance review. |
+| `evals/model-baseline.json` | Approved model identity (path + sha256) and the CI variables it implies (`MODEL_FIXTURE_*`, MarkLLM stack); imported by the `model-manifest` job as a dotenv manifest and the reviewed source of truth for the model-integrity baseline. |
 | `fixtures/` | Static red-team and eval outputs for fixture-mode labs. |
 | `guardrails/` | Prompt Guard, Llama Guard 3, Model Armor, and regression fixtures. |
 | `mcp/` | Lab-safe Cline MCP configuration. |
@@ -129,6 +130,7 @@ flowchart TD
 | Job | What it does |
 | --- | --- |
 | `setup` | Installs Python dependencies, creates `evidence/`, `sbom/`, and `reports/` directories, stamps pipeline ID and commit SHA into `evidence/pipeline.env`, and records Git/CI version provenance (commit, `git describe`, tag, branch, dirty state) to `evidence/version-info.json` for traceability of every downstream artifact. |
+| `model-manifest` | Validates `evals/model-baseline.json` (the approved model source of truth) with `scripts/build_model_baseline.py` and emits its `variables` map as a GitLab **dotenv report**, so `model-fixture-download`, `markllm-deps-audit`, and `markllm-watermark-eval` inherit `MODEL_FIXTURE_*` / `MARKLLM_*` from one reviewed file. Per GitLab variable precedence, the dotenv **overrides** the inline `variables:` defaults but is itself overridable by a Project/manual CI variable. Not `allow_failure`: a malformed or internally-inconsistent baseline fails fast at this cheap stage rather than after the expensive scans. |
 | `vault-secrets` | Authenticates to Vault using a GitLab OIDC JWT and fetches the CI secrets (`MODEL_ENDPOINT`, `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`, `CI_REGISTRY_TOKEN`, `DT_API_URL`, `DT_API_KEY`) into a dotenv artifact injected as environment variables into all downstream jobs. Falls back to GitLab CI/CD variables if `VAULT_ADDR` is not set. Works against self-managed Vault or **HCP Vault Dedicated** — for HCP, set `VAULT_NAMESPACE` (`admin` or a child); see `deployment/vault/sample-secret-map.md`. |
 
 ### Stage 2 — SAST
@@ -146,7 +148,7 @@ flowchart TD
 
 | Job | What it does |
 | --- | --- |
-| `syft-cyclonedx` | Generates a Software Bill of Materials in CycloneDX JSON and XML formats. |
+| `syft-cyclonedx` | Generates a Software Bill of Materials in CycloneDX JSON and XML formats. `requirements.txt` is pinned to exact versions so Syft's Python cataloger emits components for them — Syft skips unpinned (`>=`) requirements, which would otherwise leave the SBOM with zero components and make the downstream Grype scan vacuous. Transitive dependencies are not pinned here, so the authoritative dependency-vulnerability gate remains `pip-audit` over the installed set. |
 | `syft-spdx` | Generates a Software Bill of Materials in SPDX JSON and tag-value formats. |
 
 ### Stage 4 — Vulnerability Scan
@@ -192,6 +194,8 @@ MODEL_FIXTURE_PATH=qwen2.5-1.5b-instruct-gguf/qwen2.5-1.5b-instruct-q2_k.gguf
 MODEL_FIXTURE_SHA256=5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a
 ```
 
+These three values — plus the MarkLLM stack pins and `MARKLLM_MODEL_ID` — are defined canonically in `evals/model-baseline.json` and imported by the `model-manifest` job (above); the matching `variables:` entries in `.gitlab-ci.yml` are kept only as a fallback. `model-fixture-download` checksum-verifies the downloaded fixture against `MODEL_FIXTURE_SHA256` (now manifest-sourced) with `sha256sum --check --strict`, so the approved baseline governs model integrity for every subsequent run — roll the model forward by editing `model-baseline.json`.
+
 **Gate:**
 
 **`artifact-signing-gate`** — Waits for all nine integrity checks (`signature-verification`, `tamper-verification`, `modelscan`, `modelaudit-scan`, `modelfile-audit`, `clamav-scan`, `hf-artifact-scan`, `dataset-scan`, `eval-dataset-validate`). Confirms `tamper_check_passed=true`. Nothing in the AI evaluation stage runs until this gate passes.
@@ -207,7 +211,7 @@ All jobs run in parallel after the gate passes. **The entire AI-evaluation stage
 | `giskard-scan` | Runs a real Giskard LLM scan, but against a **local deterministic stub** (a hardcoded `prediction_function`, not a live model — `MODEL_ENDPOINT` is not consulted). It exercises the Giskard tooling and produces an HTML/JSON report; it does not assess your actual model. Advisory (`allow_failure: true`). |
 | `inspect-ai-eval` | Runs structured capability and safety evaluations using `inspect-ai` only when `MODEL_ENDPOINT` is configured (else writes a skipped artifact and exits 0). Uses project task files if present; otherwise runs MMLU (knowledge), TruthfulQA (honesty), WMDP bio/chem/cyber (hazard refusal), and GDM in-house CTF (agent safety). Advisory (`allow_failure: true`): it computes a pass/fail and even calls `sys.exit(1)` below threshold, but `allow_failure` means that never blocks the pipeline. |
 | `markllm-deps-audit` | Runs `pip-audit` against `torch`, `transformers`, and `markllm` (the heavy watermark stack) on `python:3.10-slim` before `markllm-watermark-eval`. Advisory (`allow_failure: true`). |
-| `markllm-watermark-eval` | Runs a live MarkLLM generation/detection eval. Resolves the model id from `MARKLLM_MODEL_ID`, or — when that is empty — derives it dynamically from `MODEL_FIXTURE_URL` (the HF GGUF repo is mapped to its transformers repo, since `AutoModelForCausalLM` can't load GGUF). Advisory (`allow_failure: true`): a missing model id, an unloadable model, or a generation/detection error records the failure in `markllm-results.json` without blocking the pipeline. Artifacts always include `markllm-results.json` when the helper starts. |
+| `markllm-watermark-eval` | Runs a live MarkLLM generation/detection eval. Resolves the model id from `MARKLLM_MODEL_ID` — now set explicitly (`Qwen/Qwen2.5-1.5B-Instruct`) by the `model-manifest` dotenv from `evals/model-baseline.json` — or, when that is empty (manifest unavailable), derives it dynamically from `MODEL_FIXTURE_URL` (the HF GGUF repo is mapped to its transformers repo, since `AutoModelForCausalLM` can't load GGUF). Advisory (`allow_failure: true`): a missing model id, an unloadable model, or a generation/detection error records the failure in `markllm-results.json` without blocking the pipeline. Artifacts always include `markllm-results.json` when the helper starts. |
 | `pyrit-scan` | Advisory (`allow_failure: true`). Does **not** run PyRIT itself: it runs the shell command in `PYRIT_RUN_COMMAND` if that is set (failing on non-zero), else copies the static `fixtures/pyrit-results.json` if `GAIPS_USE_FIXTURES=true`, else writes a `not-configured`/`skipped` stub. Out of the box (neither variable set) it produces only the skipped stub — wire `PYRIT_RUN_COMMAND` to a real PyRIT invocation to actually probe a model. |
 
 #### What the MarkLLM watermark eval actually does
@@ -242,7 +246,7 @@ So in this pipeline it is a **demonstrative capability check + evidence artifact
 
 | Job | What it does |
 | --- | --- |
-| `evidence-summary` | Collects all reports from every prior job and renders a human-readable Markdown evidence summary to `evidence/evidence-summary.md`. Retained for 90 days. |
+| `evidence-summary` | Collects all reports from every prior job and renders a human-readable Markdown evidence summary to `evidence/evidence-summary.md`. Also bundles the approved `model-baseline.json` (and a freshly-seeded `eval-baseline.seed.json`, when present) into the final-report artifacts, so the run records the exact model identity and variable manifest it was pinned to. Retained for 90 days. |
 | `model-signing-evidence` | Builds a JSON bundle containing pipeline ID, commit SHA, branch, timestamp, and the full model digest list. Signs it with `cosign sign-blob` using the GitLab `SIGSTORE_ID_TOKEN`, producing a `.sig` and `.pem` certificate — a tamper-evident, publicly-verifiable record of the pipeline run. |
 
 ### Stage 9 — AI BOM

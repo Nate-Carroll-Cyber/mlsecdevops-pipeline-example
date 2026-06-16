@@ -2400,9 +2400,18 @@ evidence-summary:
         --reports "${REPORTS_DIR}" \
         --out "${EVIDENCE_DIR}/evidence-summary.md"
     - cat "${EVIDENCE_DIR}/evidence-summary.md"
+    - |
+      # If this run seeded a drift baseline (none committed yet), bundle it with
+      # the end-of-pipeline evidence so the maintainer can grab it from one place
+      # and commit it to evals/eval-baseline.json to activate drift detection.
+      if [ -f "${REPORTS_DIR}/eval-baseline.seed.json" ]; then
+        cp -f "${REPORTS_DIR}/eval-baseline.seed.json" "${EVIDENCE_DIR}/eval-baseline.seed.json"
+        echo "Seeded drift baseline bundled at ${EVIDENCE_DIR}/eval-baseline.seed.json — commit it to evals/eval-baseline.json to activate drift detection."
+      fi
   artifacts:
     paths:
       - "${EVIDENCE_DIR}/evidence-summary.md"
+      - "${EVIDENCE_DIR}/eval-baseline.seed.json"
     expire_in: 90 days
 
 model-signing-evidence:

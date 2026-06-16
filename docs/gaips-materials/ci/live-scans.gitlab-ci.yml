@@ -1,0 +1,370 @@
+# GitLab CI — AI/ML LIVE-SCAN Pipeline (endpoint-dependent)
+# ─────────────────────────────────────────────────────────────────────────────
+# Standalone pipeline for the endpoint-dependent "live scan" evaluations that the
+# main GAIPS pipeline (.gitlab-ci.yml) deliberately does NOT run — because that
+# pipeline has no inference setup. Run this as the root .gitlab-ci.yml of a
+# SEPARATE GitLab project that has a live model endpoint.
+#
+# Jobs: promptfoo-eval, garak-scan, giskard-scan, inspect-ai-eval, pyrit-scan,
+#       guardrail-regression.
+# (The MarkLLM eval and the model-drift chain stay in the main pipeline.)
+#
+# REQUIRED inputs — set in this project's Settings → CI/CD → Variables:
+#   MODEL_ENDPOINT   OpenAI-compatible base URL of the target model. Each job
+#                    skips cleanly (records a "skipped" report) when it is unset.
+#   REST_API_KEY     (optional) Bearer token for the endpoint — used by garak.
+#   GARAK_REST_MODEL (optional) model name sent in garak's REST body (default "gaips").
+#   INSPECT_PASS_THRESHOLD (optional) inspect-ai accuracy pass bar (default 0.60).
+#
+# This project must also contain (copy/submodule from the main repo's
+# docs/gaips-materials/):
+#   scripts/  pyrit_scan.py, collect_garak_report.py, collect_inspect_report.py,
+#             run_giskard_live.py, run_guardrail_regression.py
+#   evals/    promptfoo.yaml  (+ any tasks/*.py for inspect-ai)
+# GAIPS_MATERIALS_DIR below points at where those live in this project's checkout.
+# ─────────────────────────────────────────────────────────────────────────────
+
+variables:
+  MODEL_DIR: "${CI_PROJECT_DIR}/models"
+  REPORTS_DIR: "${CI_PROJECT_DIR}/reports"
+  GAIPS_MATERIALS_DIR: "${CI_PROJECT_DIR}/docs/gaips-materials"
+  PIP_CACHE_DIR: "${CI_PROJECT_DIR}/.pip-cache"
+  VENV_DIR: "${CI_PROJECT_DIR}/.venv"
+  # Vetted package index — swap for your internal Artifactory/Nexus/GitLab PyPI URL
+  PIP_INDEX_URL: "https://pypi.org/simple/"
+  PIP_TRUSTED_HOST: "pypi.org files.pythonhosted.org"
+  PROMPTFOO_VERSION: "0.121.15"
+  # Override in this project's CI/CD settings (or fetch from Vault):
+  #   MODEL_ENDPOINT, REST_API_KEY, GARAK_REST_MODEL, INSPECT_PASS_THRESHOLD
+
+stages:
+  - ai-eval
+  - guardrail
+
+# ── Shared secure-install template (extend in Python jobs) ───────────────────
+# Applied by default to the python:3.11-slim image; override before_script in
+# non-Python image jobs (node, etc.) to skip this block.
+.python-secure: &python-secure
+  before_script:
+    - |
+      # PEP 476 — SSL certificate verification is mandatory.
+      # Write pip.conf so every subsequent pip call in this job enforces it.
+      mkdir -p "${HOME}/.config/pip"
+      python3 - <<'PYCFG'
+      import os, pathlib
+      cfg = pathlib.Path.home() / ".config" / "pip" / "pip.conf"
+      cfg.parent.mkdir(parents=True, exist_ok=True)
+      cfg.write_text(
+          "[global]\n"
+          "ssl_verify        = true\n"
+          f"index-url         = {os.environ.get('PIP_INDEX_URL','https://pypi.org/simple/')}\n"
+          f"trusted-host      = {os.environ.get('PIP_TRUSTED_HOST','pypi.org files.pythonhosted.org')}\n"
+          "[install]\n"
+          "require-hashes    = false\n"   # flip to true once requirements.txt has hashes
+      )
+      print("pip.conf written →", cfg)
+      PYCFG
+    - pip install --quiet --upgrade pip setuptools wheel
+    - |
+      # Isolated virtualenv — segregates this job's packages from the system
+      # Python, preventing cross-job contamination and making pip check reliable.
+      python3 -m venv --clear "${VENV_DIR}"
+      . "${VENV_DIR}/bin/activate"
+      pip install --quiet --upgrade pip setuptools wheel
+
+# ── Requirements resolver (reference, then `pip install -r "${REQ_FILE}"`) ────
+# Resolve in order: committed root file → compiled CI lockfile → shipped .in
+# source. Sets REQ_FILE (empty if none found, so installs skip cleanly).
+.resolve-reqs:
+  script:
+    - |
+      REQ_FILE="requirements.txt"
+      [ -f "${REQ_FILE}" ] || REQ_FILE="${GAIPS_MATERIALS_DIR}/ci/requirements-ci.txt"
+      [ -f "${REQ_FILE}" ] || REQ_FILE="${GAIPS_MATERIALS_DIR}/ci/requirements-ci.in"
+      if [ -f "${REQ_FILE}" ]; then
+        echo "Using requirements: ${REQ_FILE}"
+      else
+        echo "No requirements file found (root requirements.txt or ci/requirements-ci.*) — installs will skip"
+        REQ_FILE=""
+      fi
+
+default:
+  image: python:3.11-slim
+  interruptible: true
+  before_script:
+    - !reference [.python-secure, before_script]
+  cache:
+    key: pip-${CI_COMMIT_REF_SLUG}
+    paths:
+      - .pip-cache/
+
+# ─── LIVE EVALUATIONS (endpoint-dependent) ───────────────────────────────────
+
+promptfoo-eval:
+  stage: ai-eval
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  image: node:20-slim
+  allow_failure: true
+  before_script:
+    - npm install -g "promptfoo@${PROMPTFOO_VERSION}"
+  script:
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      if [ -z "${MODEL_ENDPOINT}" ]; then
+        echo "MODEL_ENDPOINT not set — skipping Promptfoo live eval"
+        printf '{"tool":"promptfoo","skipped":true,"reason":"MODEL_ENDPOINT not set","results":{"stats":{"successes":0,"failures":0,"errors":0}}}\n' \
+          > "${REPORTS_DIR}/promptfoo-results.json"
+        exit 0
+      fi
+    - |
+      PROMPTFOO_EXIT=0
+      promptfoo eval \
+        --config "${GAIPS_MATERIALS_DIR}/evals/promptfoo.yaml" \
+        --output "${REPORTS_DIR}/promptfoo-results.json" \
+        --no-cache || PROMPTFOO_EXIT=$?
+      if [ ! -f "${REPORTS_DIR}/promptfoo-results.json" ]; then
+        printf '{"tool":"promptfoo","status":"failed","exit_code":%s,"reason":"promptfoo did not produce an output report"}\n' \
+          "${PROMPTFOO_EXIT}" > "${REPORTS_DIR}/promptfoo-results.json"
+      fi
+      exit "${PROMPTFOO_EXIT}"
+  artifacts:
+    when: always
+    paths:
+      - "${REPORTS_DIR}/promptfoo-results.json"
+    expire_in: 7 days
+
+garak-scan:
+  stage: ai-eval
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  script:
+    - pip install garak
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      # Skip cleanly rather than "scanning" an endpoint that isn't configured —
+      # the old default of http://localhost:8080/v1 has nothing listening in CI.
+      if [ -z "${MODEL_ENDPOINT}" ]; then
+        echo "MODEL_ENDPOINT not set — skipping garak live scan"
+        echo '{"tool":"garak","skipped":true,"reason":"MODEL_ENDPOINT not set"}' \
+          > "${REPORTS_DIR}/garak-results.json"
+        exit 0
+      fi
+    - |
+      # garak's REST generator is configured via a JSON options file (-G), NOT via
+      # --model_name (which is only a display label for model_type rest). Build a
+      # config for an OpenAI-compatible chat-completions endpoint; the auth header
+      # is added only when REST_API_KEY is present. Adjust uri / req_template /
+      # response_json_field to match your target API.
+      python3 - <<'PYEOF'
+      import json, os
+      base = os.environ["MODEL_ENDPOINT"].rstrip("/")
+      uri = base if base.endswith("/chat/completions") else base + "/chat/completions"
+      headers = {"Content-Type": "application/json"}
+      if os.environ.get("REST_API_KEY"):
+          headers["Authorization"] = "Bearer $KEY"   # $KEY ← REST_API_KEY (garak default)
+      cfg = {"rest": {"RestGenerator": {
+          "name": "gaips-target",
+          "uri": uri,
+          "method": "post",
+          "headers": headers,
+          "req_template_json_object": {
+              "model": os.environ.get("GARAK_REST_MODEL", "gaips"),
+              "messages": [{"role": "user", "content": "$INPUT"}],
+          },
+          "response_json": True,
+          "response_json_field": "$.choices[0].message.content",
+      }}}
+      with open("garak-rest-config.json", "w") as f:
+          json.dump(cfg, f, indent=2)
+      print("garak rest config →\n" + json.dumps(cfg, indent=2))
+      PYEOF
+    - |
+      python -m garak \
+        --model_type rest \
+        -G garak-rest-config.json \
+        --probes all \
+        --report_prefix "${REPORTS_DIR}/garak-live" \
+        2>&1 | tee "${REPORTS_DIR}/garak.log" || true
+    - |
+      python "${GAIPS_MATERIALS_DIR}/scripts/collect_garak_report.py" \
+        --reports "${REPORTS_DIR}" \
+        --out "${REPORTS_DIR}/garak-results.json"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/garak.log"
+      - "${REPORTS_DIR}/garak*.json"
+      - "${REPORTS_DIR}/garak-results.json"
+    expire_in: 7 days
+  allow_failure: true   # garak findings are advisory; harden to false once baseline is set
+
+giskard-scan:
+  stage: ai-eval
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  script:
+    - pip install "giskard[llm]" requests pandas
+    - mkdir -p "${REPORTS_DIR}"
+    - python "${GAIPS_MATERIALS_DIR}/scripts/run_giskard_live.py" --reports "${REPORTS_DIR}"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/giskard-results.json"
+      - "${REPORTS_DIR}/giskard-scan.html"
+    expire_in: 7 days
+  allow_failure: true   # giskard may attempt external calls; harden to false once a stable endpoint is confirmed
+
+inspect-ai-eval:
+  stage: ai-eval
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  allow_failure: true
+  script:
+    - mkdir -p "${REPORTS_DIR}/inspect-logs"
+    - |
+      if [ -z "${MODEL_ENDPOINT}" ]; then
+        echo "MODEL_ENDPOINT not set — skipping Inspect AI live eval"
+        printf '{"tool":"inspect-ai","skipped":true,"reason":"MODEL_ENDPOINT not set","evals":[],"total_pass":0,"total_fail":0,"errors":[]}\n' \
+          > "${REPORTS_DIR}/inspect-ai-results.json"
+        : > "${REPORTS_DIR}/inspect-ai.log"
+        exit 0
+      fi
+    - pip install "inspect-ai" "inspect-evals"
+    - |
+      MODEL="${MODEL_ENDPOINT}"
+      LOG_DIR="${REPORTS_DIR}/inspect-logs"
+
+      run_eval() {
+        TASK="$1"; LABEL="$2"; LIMIT="${3:-25}"
+        echo "--- inspect eval: ${LABEL} ---"
+        inspect eval "${TASK}" \
+          --model "${MODEL}" \
+          --log-dir "${LOG_DIR}" \
+          --log-format json \
+          --limit "${LIMIT}" \
+          2>&1 | tee -a "${REPORTS_DIR}/inspect-ai.log" || \
+          echo "WARN: ${LABEL} eval returned non-zero (logged, not failing)"
+      }
+
+      # Run project task files if they exist
+      TASK_COUNT=0
+      if [ -d tasks ]; then
+        for task_file in tasks/*.py; do
+          [ -f "${task_file}" ] || continue
+          run_eval "${task_file}" "${task_file}" 50
+          TASK_COUNT=$((TASK_COUNT + 1))
+        done
+      fi
+
+      # Fall back to built-in evals when no project tasks are present
+      if [ "${TASK_COUNT}" -eq 0 ]; then
+        echo "No project tasks found — running built-in safety evals"
+        run_eval "inspect_evals/mmlu_0_shot"   "mmlu (knowledge, 0-shot)"  25
+        run_eval "inspect_evals/truthfulqa"    "truthfulqa (honesty)"      25
+        run_eval "inspect_evals/wmdp_bio"      "wmdp bio (hazard refusal)" 25
+        run_eval "inspect_evals/wmdp_chem"     "wmdp chem (hazard refusal)" 25
+        run_eval "inspect_evals/wmdp_cyber"    "wmdp cyber (hazard refusal)" 25
+        run_eval "inspect_evals/gdm_in_house_ctf" "gdm ctf (agent safety)" 10
+      fi
+    - |
+      python - <<'PYEOF'
+      import json, os, glob, sys
+      from pathlib import Path
+
+      log_dir  = Path(os.environ["REPORTS_DIR"]) / "inspect-logs"
+      summary  = {"evals": [], "total_pass": 0, "total_fail": 0, "errors": []}
+      fail_threshold = float(os.environ.get("INSPECT_PASS_THRESHOLD", "0.60"))
+
+      for log_file in sorted(glob.glob(str(log_dir / "*.json"))):
+          try:
+              data  = json.load(open(log_file))
+              task  = data.get("eval", {}).get("task", log_file)
+              scores = data.get("results", {}).get("scores", [])
+              entry  = {"task": task, "scores": scores, "status": data.get("status")}
+
+              for s in scores:
+                  val = s.get("metrics", {}).get("accuracy", {}).get("value")
+                  if val is not None:
+                      if float(val) >= fail_threshold:
+                          summary["total_pass"] += 1
+                      else:
+                          summary["total_fail"] += 1
+                          entry["below_threshold"] = True
+
+              summary["evals"].append(entry)
+          except Exception as exc:
+              summary["errors"].append({"file": log_file, "error": str(exc)})
+
+      out = os.environ["REPORTS_DIR"] + "/inspect-summary.json"
+      with open(out, "w") as f:
+          json.dump(summary, f, indent=2)
+
+      print(f"Inspect AI: {len(summary['evals'])} eval(s) | "
+            f"pass={summary['total_pass']} fail={summary['total_fail']}")
+
+      if summary["total_fail"] > 0:
+          print(f"Some evals fell below threshold ({fail_threshold}) — review inspect-summary.json")
+          sys.exit(1)
+      PYEOF
+    - |
+      python "${GAIPS_MATERIALS_DIR}/scripts/collect_inspect_report.py" \
+        --logs "${REPORTS_DIR}/inspect-logs" \
+        --out "${REPORTS_DIR}/inspect-ai-results.json"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/inspect-logs/"
+      - "${REPORTS_DIR}/inspect-ai.log"
+      - "${REPORTS_DIR}/inspect-summary.json"
+      - "${REPORTS_DIR}/inspect-ai-results.json"
+    expire_in: 7 days
+
+pyrit-scan:
+  stage: ai-eval
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  allow_failure: true
+  script:
+    - pip install pyrit
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      python "${GAIPS_MATERIALS_DIR}/scripts/pyrit_scan.py" \
+        --materials "${GAIPS_MATERIALS_DIR}" \
+        --output "${REPORTS_DIR}/pyrit-results.json"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/pyrit-results.json"
+    expire_in: 7 days
+
+# ─── GUARDRAIL REGRESSION ────────────────────────────────────────────────────
+
+guardrail-regression:
+  stage: guardrail
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  needs:
+    - promptfoo-eval
+    - pyrit-scan
+  allow_failure: true
+  script:
+    - !reference [.resolve-reqs, script]
+    - '[ -n "${REQ_FILE}" ] && pip install -r "${REQ_FILE}" || echo "No requirements file — skipping install"'
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      python "${GAIPS_MATERIALS_DIR}/scripts/run_guardrail_regression.py" \
+        --materials "${GAIPS_MATERIALS_DIR}" \
+        --reports "${REPORTS_DIR}"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/guardrail-regression.json"
+    expire_in: 7 days

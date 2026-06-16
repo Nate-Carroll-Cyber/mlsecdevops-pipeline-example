@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import shutil
 import subprocess
 from pathlib import Path
@@ -20,7 +21,12 @@ def main() -> None:
 
     run_command = os.environ.get("PYRIT_RUN_COMMAND", "").strip()
     if run_command:
-        proc = subprocess.run(run_command, shell=True, text=True, capture_output=True, check=False)
+        # Parse the operator-supplied command without a shell to avoid shell
+        # injection (CWE-78). For shell features, set e.g. PYRIT_RUN_COMMAND
+        # to: bash -c "<your pipeline>".
+        proc = subprocess.run(
+            shlex.split(run_command), text=True, capture_output=True, check=False
+        )
         report = {
             "tool": "pyrit",
             "mode": "live-command",

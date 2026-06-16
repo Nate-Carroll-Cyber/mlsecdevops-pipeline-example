@@ -5,13 +5,11 @@ from pathlib import Path
 
 EXPECTED = [
     "semgrep.json",
-    "promptfoo-results.json",
-    "garak-results.json",
-    "giskard-results.json",
-    "inspect-ai-results.json",
     "markllm-results.json",
-    "pyrit-results.json",
-    "guardrail-regression.json",
+    # The endpoint-dependent live evals (promptfoo/garak/giskard/inspect-ai/pyrit/
+    # guardrail-regression) were split into the separate live-scan pipeline
+    # (docs/gaips-materials/ci/live-scans.gitlab-ci.yml) — they no longer run here,
+    # so they are not gated as required artifacts in this static pipeline.
 ]
 
 # Advisory artifacts — displayed for completeness but NOT gated (they skip

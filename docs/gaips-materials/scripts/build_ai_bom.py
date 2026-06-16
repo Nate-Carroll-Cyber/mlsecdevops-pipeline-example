@@ -128,6 +128,44 @@ def _software_components(sbom_dir: Path, reports_dir: Path) -> list[dict]:
     return []
 
 
+def _watermark_stack_components(reports_dir: Path, existing: list[dict]) -> list[dict]:
+    """Inventory the MarkLLM watermark stack (markllm/torch/transformers) from the
+    markllm-deps-audit report. These are installed only in the eval jobs, so they
+    never reach the Syft software SBOM — without this the AI BOM omits them. Deduped
+    against the existing software components by purl/name."""
+    audit = _load_json(reports_dir / "markllm-deps-audit.json")
+    if not audit or not isinstance(audit.get("dependencies"), list):
+        return []
+
+    seen: set[str] = set()
+    for c in existing:
+        if c.get("purl"):
+            seen.add(c["purl"].lower())
+        if c.get("name"):
+            seen.add(c["name"].lower())
+
+    extra: list[dict] = []
+    for dep in audit["dependencies"]:
+        name = dep.get("name")
+        if not name:
+            continue
+        version = dep.get("version")
+        purl = f"pkg:pypi/{name}@{version}" if version else f"pkg:pypi/{name}"
+        if purl.lower() in seen or name.lower() in seen:
+            continue
+        seen.add(purl.lower())
+        seen.add(name.lower())
+        props = [_prop("source", "markllm-deps-audit")]
+        vulns = dep.get("vulns") or []
+        if vulns:
+            props.append(_prop("vulns.count", len(vulns)))
+        comp = {"type": "library", "name": name, "purl": purl, "properties": props}
+        if version:
+            comp["version"] = version
+        extra.append(comp)
+    return extra
+
+
 def _model_components(
     evidence_dir: Path, reports_dir: Path, model_dir: Path
 ) -> list[dict]:
@@ -412,6 +450,7 @@ def build_bom(
     timestamp: str,
 ) -> dict:
     software = _software_components(sbom_dir, reports_dir)
+    software = software + _watermark_stack_components(reports_dir, software)
     models = _model_components(evidence_dir, reports_dir, model_dir)
     data = _data_components(evidence_dir, reports_dir)
     eval_props, eval_refs = _eval_evidence(reports_dir)

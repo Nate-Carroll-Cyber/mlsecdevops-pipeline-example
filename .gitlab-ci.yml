@@ -2512,6 +2512,7 @@ ai-bom-assemble:
     - giskard-scan
     - inspect-ai-eval
     - promptfoo-eval
+    - markllm-deps-audit
     - pyrit-scan
     - guardrail-regression
     - model-drift-detection

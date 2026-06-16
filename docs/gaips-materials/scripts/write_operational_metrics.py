@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -260,19 +261,32 @@ def parse_supply_chain(reports: Path, sbom: Path, src: Sources, m: Metrics) -> N
 
 # ── parsers: model & dataset integrity ─────────────────────────────────────────
 
+# Canonical model-digest line: "<path>  sha256:<64-hex>" — kept in sync with
+# DIGEST_RE in build_ai_bom.py so the metrics and the AI BOM count digests alike.
+_MODEL_DIGEST_RE = re.compile(r"^.+?\s+sha256:[0-9a-f]{64}\s*$")
+
+
 def parse_model_integrity(reports: Path, evidence: Path, src: Sources, m: Metrics) -> None:
     mi: dict[str, Any] = {}
 
     digests = _load_lines(evidence / "model-digests.txt", src, "model-digests.txt")
     if digests:
-        with_sha = sum(1 for ln in digests if len(ln.split()[0]) in (40, 64))
-        mi["model_digests"] = {"count": len(digests), "sha_coverage": with_sha}
-        m.metric("model.digests.count", len(digests))
+        # Lines are "<path>  sha256:<64-hex>" (see .gitlab-ci.yml model-digest job);
+        # a "WARNING: No model files found" line is written when MODEL_DIR is empty.
+        # Count only real digest entries — the old check looked at the filepath token
+        # (split()[0]) and never stripped the "sha256:" prefix, so it always reported
+        # sha_coverage=0 and would miscount the warning line as a digest. Mirror the
+        # canonical DIGEST_RE in build_ai_bom.py so both consumers agree.
+        hashed = [ln for ln in digests if _MODEL_DIGEST_RE.match(ln.strip())]
+        mi["model_digests"] = {"count": len(hashed), "sha_coverage": len(hashed)}
+        m.metric("model.digests.count", len(hashed))
 
     integ = _load_env(evidence / "integrity.env", src, "integrity.env")
     if integ:
-        raw = " ".join(integ.values()).upper()
-        passed = "PASS" in raw and "FAIL" not in raw
+        # The tamper job writes `tamper_check_passed=true` (see .gitlab-ci.yml).
+        # Read that key directly — the old substring scan for "PASS"/"FAIL" never
+        # matched the literal "true" value, so it always reported a false failure.
+        passed = integ.get("tamper_check_passed", "").strip().lower() == "true"
         mi["tamper_check"] = {"raw": integ, "passed": passed}
         m.gate("tamper-verification", passed, str(integ))
 

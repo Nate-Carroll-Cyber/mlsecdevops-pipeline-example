@@ -49,7 +49,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run a live MarkLLM watermark eval and emit CI evidence.")
     parser.add_argument("--output", required=True)
     parser.add_argument("--algorithm", default=os.environ.get("MARKLLM_ALGORITHM", "KGW"))
-    parser.add_argument("--config", default=os.environ.get("MARKLLM_CONFIG", "config/KGW.json"))
+    parser.add_argument("--config", default=os.environ.get("MARKLLM_CONFIG", ""))
     parser.add_argument("--model-id", default=os.environ.get("MARKLLM_MODEL_ID", ""))
     parser.add_argument("--model-revision", default=os.environ.get("MARKLLM_MODEL_REVISION", ""))
     parser.add_argument("--max-new-tokens", type=int, default=int(os.environ.get("MARKLLM_MAX_NEW_TOKENS", "128")))
@@ -60,12 +60,19 @@ def main() -> None:
     model_id = args.model_id.strip()
     model_revision = args.model_revision.strip() or None
 
+    # Resolve the algorithm config. A real file path wins; otherwise pass None so
+    # MarkLLM loads the config bundled inside the installed package for the chosen
+    # algorithm (markllm/config/<ALGORITHM>.json), rather than a relative path that
+    # does not exist in CI.
+    config_arg = args.config.strip()
+    algorithm_config = config_arg if config_arg and Path(config_arg).is_file() else None
+
     report: dict[str, Any] = {
         "tool": "markllm",
         "mode": "live-eval",
         "status": "running",
         "algorithm": args.algorithm,
-        "algorithm_config": args.config,
+        "algorithm_config": algorithm_config or f"<bundled markllm/config/{args.algorithm}.json>",
         "model_id": model_id,
         "model_revision": model_revision,
         "python": platform.python_version(),
@@ -78,8 +85,8 @@ def main() -> None:
     try:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
-        from watermark.auto_watermark import AutoWatermark
-        from utils.transformers_config import TransformersConfig
+        from markllm.watermark.auto_watermark import AutoWatermark
+        from markllm.utils.transformers_config import TransformersConfig
     except Exception as exc:
         fail(out, report, "MarkLLM, torch, and transformers must import successfully for live eval", exc)
 
@@ -103,7 +110,7 @@ def main() -> None:
         )
         watermark = AutoWatermark.load(
             args.algorithm,
-            algorithm_config=args.config,
+            algorithm_config=algorithm_config,
             transformers_config=transformers_config,
         )
     except Exception as exc:

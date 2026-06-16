@@ -1,0 +1,20 @@
+{
+  "schema_version": "1.0",
+  "kind": "model-baseline",
+  "description": "Approved model identity and the CI variables it implies. The model-manifest job imports the variables map as a dotenv report so downstream jobs inherit them (dotenv overrides the inline defaults in .gitlab-ci.yml but is itself overridable by Project/manual CI variables). The live fixture is verified against model.sha256 by model-fixture-download. This file is the single source of truth for the approved model — change it (and re-run) to roll the model forward.",
+  "model": {
+    "name": "Qwen2.5-1.5B-Instruct (Q2_K GGUF)",
+    "path": "qwen2.5-1.5b-instruct-gguf/qwen2.5-1.5b-instruct-q2_k.gguf",
+    "sha256": "5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a"
+  },
+  "variables": {
+    "MODEL_FIXTURE_URL": "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q2_k.gguf",
+    "MODEL_FIXTURE_PATH": "qwen2.5-1.5b-instruct-gguf/qwen2.5-1.5b-instruct-q2_k.gguf",
+    "MODEL_FIXTURE_SHA256": "5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a",
+    "MARKLLM_MODEL_ID": "Qwen/Qwen2.5-1.5B-Instruct",
+    "MARKLLM_MODEL_REVISION": "",
+    "MARKLLM_VERSION": "0.1.5",
+    "TORCH_VERSION": "2.12.0",
+    "TRANSFORMERS_VERSION": "4.57.6"
+  }
+}

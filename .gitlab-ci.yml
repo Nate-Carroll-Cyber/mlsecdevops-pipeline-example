@@ -36,6 +36,13 @@ variables:
   # Public model fixture downloaded into MODEL_DIR by default so the primary
   # digest/sign/scan jobs exercise real model bytes without committing weights.
   # Override to an empty value to skip the download.
+  #
+  # Canonical source of the model identity + these MODEL_FIXTURE_*/MARKLLM_*
+  # values is evals/model-baseline.json, imported by the model-manifest job as a
+  # dotenv report (which overrides these inline defaults for the fixture + MarkLLM
+  # jobs, but is itself overridable by a Project/manual CI variable). The inline
+  # values below are the fallback when the manifest is unavailable — keep them in
+  # sync with model-baseline.json.
   MODEL_FIXTURE_URL: "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q2_k.gguf"
   MODEL_FIXTURE_PATH: "qwen2.5-1.5b-instruct-gguf/qwen2.5-1.5b-instruct-q2_k.gguf"
   MODEL_FIXTURE_SHA256: "5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a"
@@ -202,6 +209,32 @@ setup:
       - "${EVIDENCE_DIR}/pipeline.env"
       - "${EVIDENCE_DIR}/version-info.json"
     expire_in: 1 day
+
+# Import the approved model baseline (evals/model-baseline.json) as a dotenv
+# report so the model-fixture + MarkLLM jobs inherit MODEL_FIXTURE_*/MARKLLM_*
+# from one reviewed source of truth. dotenv variables override the inline
+# variables: defaults but are themselves overridable by Project/manual CI
+# variables. NOT allow_failure: a malformed baseline fails fast here at the cheap
+# setup stage instead of after the expensive scans. build_model_baseline.py is
+# stdlib-only, so skip the venv bootstrap.
+model-manifest:
+  stage: setup
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  needs: []
+  before_script: []
+  script:
+    - |
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/build_model_baseline.py" \
+        --baseline "${GAIPS_MATERIALS_DIR}/evals/model-baseline.json" \
+        --emit-dotenv "model-baseline.env"
+    - cat "model-baseline.env"
+  artifacts:
+    reports:
+      dotenv: "model-baseline.env"
+    expire_in: 90 days
 
 vault-secrets:
   stage: setup
@@ -726,7 +759,7 @@ model-fixture-download:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  needs: ["setup"]
+  needs: ["setup", "model-manifest"]
   before_script: []          # curl-only job; skip Python venv bootstrap
   script:
     - apt-get update -qq && apt-get install -y -qq curl ca-certificates
@@ -2108,7 +2141,7 @@ markllm-deps-audit:
       when: never
     - when: on_success
   image: python:3.10-slim
-  needs: ["artifact-signing-gate"]
+  needs: ["artifact-signing-gate", "model-manifest"]
   allow_failure: true
   script:
     - pip install --quiet --upgrade pip pip-audit
@@ -2143,7 +2176,7 @@ markllm-watermark-eval:
       when: never
     - when: on_success
   image: python:3.10-slim
-  needs: ["artifact-signing-gate"]
+  needs: ["artifact-signing-gate", "model-manifest"]
   # Advisory: the live eval pulls a multi-GB transformers model and a heavy
   # watermark stack onto a small runner, so a load/runtime failure records
   # evidence (markllm-results.json) without blocking the security pipeline.
@@ -2408,10 +2441,16 @@ evidence-summary:
         cp -f "${REPORTS_DIR}/eval-baseline.seed.json" "${EVIDENCE_DIR}/eval-baseline.seed.json"
         echo "Seeded drift baseline bundled at ${EVIDENCE_DIR}/eval-baseline.seed.json — commit it to evals/eval-baseline.json to activate drift detection."
       fi
+    - |
+      # Capture the approved model baseline (committed + reviewed) with the
+      # end-of-pipeline evidence so the final report records the exact model
+      # identity and variable manifest this run was pinned to.
+      cp -f "${GAIPS_MATERIALS_DIR}/evals/model-baseline.json" "${EVIDENCE_DIR}/model-baseline.json"
   artifacts:
     paths:
       - "${EVIDENCE_DIR}/evidence-summary.md"
       - "${EVIDENCE_DIR}/eval-baseline.seed.json"
+      - "${EVIDENCE_DIR}/model-baseline.json"
     expire_in: 90 days
 
 model-signing-evidence:

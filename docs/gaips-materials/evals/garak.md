@@ -1,5 +1,9 @@
 # garak Lab
 
+> **CI location:** `garak-scan` runs in the separate live-scan pipeline
+> ([`../ci/live-scans.md`](../ci/live-scans.md)) — not the main pipeline, which does
+> no inference. The lab steps below are unchanged.
+
 Live CI runs garak against the configured model REST endpoint:
 
 ```bash

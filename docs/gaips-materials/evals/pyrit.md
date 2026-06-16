@@ -1,5 +1,9 @@
 # PyRIT Lab
 
+> **CI location:** `pyrit-scan` runs in the separate live-scan pipeline
+> ([`../ci/live-scans.md`](../ci/live-scans.md)) — not the main pipeline, which does
+> no inference. The lab steps below are unchanged.
+
 PyRIT target setup is environment-specific. Live CI must provide an approved target command through `PYRIT_RUN_COMMAND`:
 
 ```bash

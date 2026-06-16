@@ -33,11 +33,12 @@ flowchart TD
       s4 --> g
     end
     subgraph EVAL [ai-eval]
-      s5[promptfoo · garak · giskard<br/>inspect-ai · markllm · pyrit]
+      s5[markllm-deps-audit · markllm-watermark-eval]
     end
     subgraph GUARD [guardrail]
-      s6[guardrail-regression · model-drift-detection<br/>model-baseline-commit · evidently-drift]
+      s6[model-drift-detection · model-baseline-commit<br/>evidently-drift]
     end
+    s_live[[separate live-scan pipeline<br/>ci/live-scans.gitlab-ci.yml<br/>promptfoo · garak · giskard · inspect-ai · pyrit · guardrail-regression]]
     subgraph EVID [evidence]
       s7[evidence-summary · model-signing-evidence]
     end
@@ -65,6 +66,11 @@ flowchart TD
 
 ---
 
+> **Live-scan pipeline dependencies.** Rows marked **(live-scan)** below are pulled
+> only by the endpoint-dependent evals, which now run in the separate
+> [`ci/live-scans.gitlab-ci.yml`](live-scans.gitlab-ci.yml) pipeline — not this one.
+> They are listed here for completeness; this pipeline no longer installs them.
+
 ## Container Images
 
 | Image | Tag | Used by | Pin status |
@@ -80,7 +86,7 @@ flowchart TD
 | `anchore/grype` | `v0.114.0` | `grype-scan` | ✅ Pinned |
 | `aquasec/trivy` | `v0.71.0` | `trivy-scan` | ✅ Pinned |
 | `cyclonedx/cyclonedx-cli` | `0.32.0` | `ai-bom-validate`, `ai-bom-sign` | ✅ Pinned |
-| `node` | `20-slim` | `promptfoo-eval` | ⚠️ Unpinned minor |
+| `node` | `20-slim` | `promptfoo-eval` **(live-scan)** | ⚠️ Unpinned minor |
 
 ---
 
@@ -90,7 +96,7 @@ flowchart TD
 | --- | --- | --- | --- | --- |
 | `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `dataset-sign`, `model-signing-evidence`, `image-sign` (4 install sites) | ✅ Pinned + checksum verified |
 | `gitleaks` | `8.30.1` | `github.com/gitleaks/gitleaks/releases` | `dataset-redact` | ✅ Pinned + checksum verified |
-| `promptfoo` | `0.121.15` | `npm install -g promptfoo` | `promptfoo-eval` | ✅ Pinned |
+| `promptfoo` | `0.121.15` | `npm install -g promptfoo` | `promptfoo-eval` **(live-scan)** | ✅ Pinned |
 
 ---
 
@@ -107,16 +113,16 @@ All packages below are installed fresh in each job container. None are pinned in
 | `pip-tools` | — | `pkg-integrity` | ⚠️ Unpinned | `pip-compile` for generating hashed lockfiles |
 | `modelscan` | — | `modelscan`, `hf-artifact-scan` | ⚠️ Unpinned | Detects malicious serialization payloads in model files |
 | `huggingface_hub` | — | `hf-artifact-scan` | ⚠️ Unpinned | Downloads HuggingFace model snapshots for scanning |
-| `garak` | — | `garak-scan` | ⚠️ Unpinned | Adversarial LLM probe framework |
-| `giskard` | `[llm]` | `giskard-scan` | ⚠️ Unpinned | LLM vulnerability scanner (bias, hallucination, injection) |
-| `requests` | — | `giskard-scan` | ⚠️ Unpinned | HTTP client (transitive dep; listed explicitly) |
-| `pandas` | — | `giskard-scan` | ⚠️ Unpinned | Data manipulation (required by giskard) |
-| `inspect-ai` | — | `inspect-ai-eval` | ⚠️ Unpinned | Structured AI evaluation framework |
-| `inspect-evals` | — | `inspect-ai-eval` | ⚠️ Unpinned | Built-in eval tasks (MMLU, TruthfulQA, WMDP, GDM CTF) |
+| `garak` | — | `garak-scan` **(live-scan)** | ⚠️ Unpinned | Adversarial LLM probe framework |
+| `giskard` | `[llm]` | `giskard-scan` **(live-scan)** | ⚠️ Unpinned | LLM vulnerability scanner (bias, hallucination, injection) |
+| `requests` | — | `giskard-scan` **(live-scan)** | ⚠️ Unpinned | HTTP client (transitive dep; listed explicitly) |
+| `pandas` | — | `giskard-scan` **(live-scan)** | ⚠️ Unpinned | Data manipulation (required by giskard) |
+| `inspect-ai` | — | `inspect-ai-eval` **(live-scan)** | ⚠️ Unpinned | Structured AI evaluation framework |
+| `inspect-evals` | — | `inspect-ai-eval` **(live-scan)** | ⚠️ Unpinned | Built-in eval tasks (MMLU, TruthfulQA, WMDP, GDM CTF) |
 | `markllm` | — | `markllm-watermark-eval` | ⚠️ Unpinned | LLM watermark detection |
 | `torch` | — | `markllm-watermark-eval` | ⚠️ Unpinned | PyTorch (required by markllm) |
 | `transformers` | — | `markllm-watermark-eval` | ⚠️ Unpinned | Hugging Face Transformers (required by markllm) |
-| `pyrit` | — | `pyrit-scan` | ⚠️ Unpinned | Microsoft PyRIT adversarial red-teaming framework |
+| `pyrit` | — | `pyrit-scan` **(live-scan)** | ⚠️ Unpinned | Microsoft PyRIT adversarial red-teaming framework |
 | `jsonschema` | — | `eval-dataset-validate` | ⚠️ Unpinned | Draft-07 validation of eval dataset records against `evals/eval-dataset.schema.json` |
 | `presidio-analyzer` | — | `dataset-redact` | ⚠️ Unpinned | Microsoft Presidio PII detection (pulls in `spacy`) |
 | `presidio-anonymizer` | — | `dataset-redact` | ⚠️ Unpinned | Presidio PII redaction/anonymization |
@@ -126,8 +132,8 @@ All packages below are installed fresh in each job container. None are pinned in
 | `evidently` | — | `evidently-drift` | ⚠️ Unpinned | Data/feature drift (DataDriftPreset/PSI) + LLM TextEvals over the dataset |
 | `ydata-profiling` | — | `ydata-profile` | ⚠️ Unpinned | Advisory dataset profile; pins narrow numpy/pandas/matplotlib ranges |
 | `dvc` | `[all]` | `dvc-verify` | ⚠️ Unpinned | Data/model version lineage; verifies workspace vs pinned versions |
-| `requests` | — | `dependency-track-upload` (also `giskard-scan`) | ⚠️ Unpinned | HTTP client for the Dependency-Track REST API |
-| `pandas` | — | `great-expectations-validate`, `evidently-drift`, `ydata-profile` (also `giskard-scan`) | ⚠️ Unpinned | Dataset loading for the data-quality jobs |
+| `requests` | — | `dependency-track-upload` | ⚠️ Unpinned | HTTP client for the Dependency-Track REST API |
+| `pandas` | — | `great-expectations-validate`, `evidently-drift`, `ydata-profile` | ⚠️ Unpinned | Dataset loading for the data-quality jobs |
 | `pip` / `setuptools` / `wheel` | — | All Python jobs (before_script) | ⚠️ Unpinned | Upgraded to latest in every job before_script |
 
 ---
@@ -149,10 +155,10 @@ All packages below are installed fresh in each job container. None are pinned in
 | Risk | Status | Notes |
 | --- | --- | --- |
 | `cosign` binary downloaded with no checksum verification | ✅ Fixed | All four install sites (`model-signing-install`, `dataset-sign`, `model-signing-evidence`, `image-sign`) download `cosign_checksums.txt` and verify via `sha256sum --check --strict` before installing |
-| `promptfoo` unpinned | ✅ Fixed | Pinned to `0.121.15` via `PROMPTFOO_VERSION` variable at top of CI file |
+| `promptfoo` unpinned | ✅ Fixed | Pinned to `0.121.15` via `PROMPTFOO_VERSION` (now in the separate [live-scan pipeline](live-scans.gitlab-ci.yml)) |
 | `torch` + `transformers` unaudited | ✅ Fixed | New `markllm-deps-audit` job runs `pip-audit` against `torch`, `transformers`, and `markllm` before `markllm-watermark-eval` |
 | Current CI blocked by historic secret fixtures | ✅ Scoped | GitLab native `secret-detection` remains a hard gate, but runs against the current HEAD checkout (`GIT_DEPTH: 1`, `SECRET_DETECTION_LOG_OPTIONS="--max-count=1"`). Use one-off historic scans/history cleanup for old fixtures instead of blocking every current pipeline. |
-| Advisory eval failures discarded evidence | ✅ Fixed | `promptfoo-eval` and `markllm-watermark-eval` upload artifacts with `when: always`; Promptfoo also writes a minimal failure JSON when the tool exits before producing its report. |
+| Advisory eval failures discarded evidence | ✅ Fixed | `markllm-watermark-eval` uploads artifacts with `when: always`. `promptfoo-eval` (now in the separate [live-scan pipeline](live-scans.gitlab-ci.yml)) does the same and writes a minimal failure JSON when the tool exits before producing its report. |
 | Superseded pipelines consuming runner minutes | ✅ Mitigated | Pipeline jobs are `interruptible: true`. Enable GitLab project auto-cancel redundant pipelines so newer pushes cancel obsolete jobs during debugging. |
 | Container images use `:latest` | ✅ Fixed | All scanner images pinned via `IMAGE_*` variables at top of CI file: `semgrep/semgrep:v1.165.0`, `continuumio/miniconda3:26.3.2`, `anchore/syft:v1.45.1`, `anchore/grype:v0.114.0`, `aquasec/trivy:v0.71.0`, `cyclonedx/cyclonedx-cli:0.32.0`, **`gitleaks/gitleaks:v8.30.1`** (`IMAGE_GITLEAKS`), and **`clamav/clamav:1.4`** (`IMAGE_CLAMAV`). No job uses `:latest` anymore. `registry.gitlab.com/security-products/secrets:4` is pinned at a major tag; `python:3.11-slim`/`python:3.10-slim`/`node:20-slim` remain unpinned at minor version. **Remaining hardening:** append `@sha256:…` digests for byte-exact reproducibility. |
 | All pip packages unpinned | ✅ Structured | `ci/requirements-ci.in` created listing all pipeline packages. **Remaining action:** run `pip-compile --generate-hashes requirements-ci.in` on a Python 3.11-slim Linux container to produce `requirements-ci.txt`, commit it, then switch each CI job from inline `pip install` to `pip install -r ci/requirements-ci.txt` |

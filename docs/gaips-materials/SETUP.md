@@ -140,9 +140,9 @@ All optional — absent files make their jobs skip — but for a full run, provi
 | --- | --- | --- |
 | `requirements.txt` | `setup`, `pip-audit`, `pkg-integrity`, `conda-pkg-verify` | Your app deps. Absent → install/audit steps skip. |
 | `models/<name>/...` | `model-digest/sign`, `modelscan`, `modelaudit-scan`, `clamav-scan` | One subdir per model; weights in `.pkl/.pt/.safetensors/.gguf/.bin/.h5/.onnx`. ModelScan inspects unsafe serialization formats; ModelAudit adds static coverage for GGUF/GGML, safetensors, ONNX, manifests, archives, and related model artifacts, with broad optional dependencies installed for future formats and remote sources. Absent → signing skips. |
-| `evals/promptfoo.yaml` | `promptfoo-eval` | Already shipped in materials. |
+| `evals/promptfoo.yaml` | `promptfoo-eval` (live-scan pipeline) | Already shipped in materials. See [`ci/live-scans.md`](ci/live-scans.md). |
 | `evals/eval-dataset.schema.json` | `eval-dataset-validate` | Already shipped. |
-| `guardrails/baseline.json` | `guardrail-regression` | Regression baseline. |
+| `guardrails/baseline.json` | `guardrail-regression` (live-scan pipeline) | Regression baseline. See [`ci/live-scans.md`](ci/live-scans.md). |
 | `evals/eval-baseline.json` | `model-drift-detection`, `drift-gate` | **Seeded on first run** — see Part C2. |
 
 The collector/runner scripts (`build_ai_bom.py`, `run_guardrail_regression.py`,
@@ -164,9 +164,11 @@ That's it — `vault-secrets` fetches the rest into later jobs via a short-lived
 dotenv artifact.
 
 **If NOT using Vault:** leave `VAULT_ADDR` unset and set the secrets directly as
-CI/CD variables (mask the sensitive ones): `MODEL_ENDPOINT`,
+CI/CD variables (mask the sensitive ones):
 `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`,
 `CI_REGISTRY_TOKEN`, plus `DT_API_URL` and `DT_API_KEY` if you use Dependency-Track.
+(`MODEL_ENDPOINT` is **not** needed by this pipeline — it does no inference. It
+belongs to the separate live-scan pipeline; see [`ci/live-scans.md`](ci/live-scans.md).)
 
 For GitLab keyless model signing, first discover the exact verification inputs:
 
@@ -302,5 +304,6 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
 > **Hardening after first green run:** pin `gitleaks/gitleaks` and `clamav/clamav`
 > off `:latest` (see `ci/SBOM.md` remediation), generate
 > `ci/requirements-ci.txt` via `pip-compile --generate-hashes` and switch jobs to
-> it, and flip soft gates (`garak`, `giskard`, GX) to
-> `allow_failure: false` once baselines are stable.
+> it, and flip the staying soft gates (Great Expectations / Evidently data-drift) to
+> `allow_failure: false` once baselines are stable. (The live-eval soft gates
+> `garak`/`giskard` now live in the separate [live-scan pipeline](ci/live-scans.md).)

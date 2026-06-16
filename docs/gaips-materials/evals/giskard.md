@@ -1,5 +1,9 @@
 # Giskard Lab
 
+> **CI location:** `giskard-scan` runs in the separate live-scan pipeline
+> ([`../ci/live-scans.md`](../ci/live-scans.md)) — not the main pipeline, which does
+> no inference. The lab steps below are unchanged.
+
 Live CI wraps the configured chat-completions endpoint and runs selected Giskard LLM detectors:
 
 ```bash

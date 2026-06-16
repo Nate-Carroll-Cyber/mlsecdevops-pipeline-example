@@ -137,6 +137,9 @@ match an internal mirror or bump a tool.
 | `COSIGN_VERSION` | `v2.4.1` | cosign release (checksum-verified at install). |
 | `GITLEAKS_VERSION` | `8.30.1` | gitleaks **binary** for `dataset-redact` (checksum-verified). |
 | `PROMPTFOO_VERSION` | `0.121.15` | `npm install -g promptfoo@…`. |
+| `MARKLLM_VERSION` | `0.1.5` | Pinned `markllm` for `markllm-deps-audit` + `markllm-watermark-eval`. |
+| `TORCH_VERSION` | `2.12.0` | Pinned `torch` for the MarkLLM watermark stack. |
+| `TRANSFORMERS_VERSION` | `4.57.6` | Pinned `transformers` for the MarkLLM stack — held on the **4.x** line because markllm 0.1.5 predates the transformers 5.x major release. |
 | `MARKLLM_MODEL_ID` | `""` (derived) | Hugging Face **transformers** repo id for `markllm-watermark-eval`. Leave empty and the job derives it from `MODEL_FIXTURE_URL` at runtime — the HF GGUF repo (e.g. `Qwen/Qwen2.5-1.5B-Instruct-GGUF`) is mapped to its transformers repo (`Qwen/Qwen2.5-1.5B-Instruct`), since `AutoModelForCausalLM` can't load GGUF. Set explicitly to override. The job fails only if no id can be resolved (empty and no `MODEL_FIXTURE_URL`). |
 | `MARKLLM_MODEL_REVISION` | `""` | Optional pinned branch, tag, or commit for the model loaded by MarkLLM. Recommended for reproducible evidence. |
 | `IMAGE_SEMGREP` | `semgrep/semgrep:v1.165.0` | SAST image. |

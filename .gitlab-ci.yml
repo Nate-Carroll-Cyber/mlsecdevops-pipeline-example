@@ -52,6 +52,12 @@ variables:
   IMAGE_GITLEAKS: "zricethezav/gitleaks:latest"       # gitleaks-scan SAST job image
   IMAGE_CLAMAV: "clamav/clamav:1.4"                   # clamav-scan job — pinned off :latest (patch-floating line)
   PROMPTFOO_VERSION: "0.121.15"
+  # MarkLLM watermark stack — pinned to current, markllm-compatible versions and
+  # shared by markllm-deps-audit and markllm-watermark-eval. transformers stays on
+  # the 4.x line because markllm 0.1.5 predates the transformers 5.x major release.
+  MARKLLM_VERSION: "0.1.5"
+  TORCH_VERSION: "2.12.0"
+  TRANSFORMERS_VERSION: "4.57.6"
   # Live MarkLLM eval model. Leave empty to derive it dynamically from
   # MODEL_FIXTURE_URL at job time (the HF GGUF repo is mapped to its
   # transformers repo, since AutoModelForCausalLM can't load GGUF). Set this
@@ -2109,7 +2115,7 @@ markllm-deps-audit:
     - mkdir -p "${REPORTS_DIR}"
     - |
       pip-audit \
-        --requirement <(echo -e "torch\ntransformers\nmarkllm") \
+        --requirement <(printf 'torch==%s\ntransformers==%s\nmarkllm==%s\n' "${TORCH_VERSION}" "${TRANSFORMERS_VERSION}" "${MARKLLM_VERSION}") \
         --format json \
         --output "${REPORTS_DIR}/markllm-deps-audit.json" \
         --progress-spinner off || true
@@ -2138,9 +2144,13 @@ markllm-watermark-eval:
     - when: on_success
   image: python:3.10-slim
   needs: ["artifact-signing-gate"]
+  # Advisory: the live eval pulls a multi-GB transformers model and a heavy
+  # watermark stack onto a small runner, so a load/runtime failure records
+  # evidence (markllm-results.json) without blocking the security pipeline.
+  allow_failure: true
   script:
     - pip install --quiet --upgrade pip setuptools wheel
-    - pip install --quiet markllm torch transformers
+    - pip install --quiet "markllm==${MARKLLM_VERSION}" "torch==${TORCH_VERSION}" "transformers==${TRANSFORMERS_VERSION}"
     - mkdir -p "${REPORTS_DIR}"
     - |
       # Resolve the model id dynamically from the model download. If

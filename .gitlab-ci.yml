@@ -1001,15 +1001,36 @@ signature-verification:
       # Explainability (was: only "is configured"). Log the ACTUAL identity/issuer
       # we verify against — these are public OIDC URIs, not secrets — so a
       # too-permissive MODEL_SIGNING_IDENTITY is visible in the evidence.
+      # Always create the evidence files first so `artifacts: when: always` never
+      # warns "no matching files", regardless of which branch below we take.
+      : > "${EVIDENCE_DIR}/signature-verification.txt"
+      : > "${EVIDENCE_DIR}/signature-verification.jsonl"
       echo "Verifying against:"
       echo "  MODEL_SIGNING_IDENTITY = ${MODEL_SIGNING_IDENTITY:-<unset>}"
       echo "  SIGSTORE_OIDC_ISSUER   = ${SIGSTORE_OIDC_ISSUER:-<unset>}"
+      echo "  CI_COMMIT_REF_PROTECTED = ${CI_COMMIT_REF_PROTECTED:-unknown} (branch ${CI_COMMIT_REF_NAME:-?})"
       if [ -z "${MODEL_SIGNING_IDENTITY:-}" ] || [ -z "${SIGSTORE_OIDC_ISSUER:-}" ]; then
-        echo "GATE FAILED: MODEL_SIGNING_IDENTITY / SIGSTORE_OIDC_ISSUER must be set to verify against a pinned identity"
-        exit 1
+        # The pinned identity/issuer are PROTECTED CI/CD variables — GitLab injects
+        # them only on protected branches/tags. Distinguish the two cases:
+        if [ "${CI_COMMIT_REF_PROTECTED}" = "true" ]; then
+          # Protected (enforcing) context with no identity = real misconfiguration.
+          echo "GATE FAILED: protected ref but MODEL_SIGNING_IDENTITY / SIGSTORE_OIDC_ISSUER are unset"
+          echo "  — these must be set to verify signatures against a pinned identity here."
+          exit 1
+        fi
+        # Unprotected branch: protected vars are not injected by design, so the
+        # pinned identity is genuinely unavailable. Signing still happened
+        # (model-sign uses the per-job id_token); real verification is enforced on
+        # the protected branch. This is NOT the vacuous-pass hole — it is explicitly
+        # gated on ref protection, and model.sig presence is recorded below.
+        SIG_PRESENT=$(find "${MODEL_DIR}" -name "model.sig" -print -quit 2>/dev/null)
+        printf '{"skipped":true,"reason":"unprotected-ref: pinned identity (protected vars) not injected","ref":"%s","model_sig_present":%s}\n' \
+          "${CI_COMMIT_REF_NAME:-}" "$( [ -n "${SIG_PRESENT}" ] && echo true || echo false )" \
+          | tee "${EVIDENCE_DIR}/signature-verification.jsonl"
+        echo "Signature verification DEFERRED to a protected-branch run (model.sig present: $( [ -n "${SIG_PRESENT}" ] && echo yes || echo no ))." \
+          | tee -a "${EVIDENCE_DIR}/signature-verification.txt"
+        exit 0
       fi
-      : > "${EVIDENCE_DIR}/signature-verification.txt"
-      : > "${EVIDENCE_DIR}/signature-verification.jsonl"
       SIG_COUNT=0
       while IFS= read -r -d '' sig_file; do
         model_dir=$(dirname "${sig_file}")

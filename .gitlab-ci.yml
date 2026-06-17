@@ -1892,7 +1892,10 @@ dataset-redact:
       tar -xzf "/tmp/${TGZ}" -C /tmp gitleaks
       install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
       gitleaks version
-    - pip install "presidio-analyzer" "presidio-anonymizer"
+    # `click` is installed explicitly: spaCy's CLI imports it directly, but the
+    # presidio dependency tree pulls typer 0.26.x, which no longer hard-depends on
+    # click — so `python -m spacy download` would die with ModuleNotFoundError.
+    - pip install "presidio-analyzer" "presidio-anonymizer" "click"
     - python -m spacy download en_core_web_sm
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \

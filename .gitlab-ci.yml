@@ -2007,7 +2007,10 @@ ydata-profile:
   needs: ["dataset-redact"]
   allow_failure: true   # advisory profiling — never blocks
   script:
-    - pip install ydata-profiling pandas
+    # Pin setuptools<81: it removed the bundled pkg_resources, which ydata-profiling
+    # still imports (the shared before_script upgrades setuptools to 82). Install it
+    # first so pkg_resources is present.
+    - pip install "setuptools<81" ydata-profiling pandas
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/ydata-profile"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
@@ -2040,7 +2043,11 @@ dataset-sign:
     - when: on_success
   # Sign only AFTER scan + redaction + schema validation — attest clean, redacted,
   # on-contract data (signs the redacted bytes, never the raw download).
-  needs: ["eval-dataset-validate"]
+  # needs BOTH: eval-dataset-validate is the ordering edge (validation must pass);
+  # dataset-redact carries the actual evidence/dataset-input/ (the redacted bytes) —
+  # eval-dataset-validate republishes only its report, so without dataset-redact
+  # here this job sees no dataset and trips the broken-chain guard.
+  needs: ["eval-dataset-validate", "dataset-redact"]
   allow_failure: true   # skips gracefully when no dataset is present
   # aud "sigstore" is required by Fulcio for keyless signing (same as model-sign).
   id_tokens:

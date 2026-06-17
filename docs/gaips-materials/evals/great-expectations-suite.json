@@ -6,6 +6,6 @@
     {"type": "ExpectColumnValuesToBeUnique", "kwargs": {"column": "id"}},
     {"type": "ExpectColumnValueLengthsToBeBetween", "kwargs": {"column": "question", "min_value": 1, "max_value": 8000, "mostly": 0.95}},
     {"type": "ExpectColumnValueLengthsToBeBetween", "kwargs": {"column": "expected", "min_value": 1, "mostly": 0.9}},
-    {"type": "ExpectColumnValuesToBeInSet", "kwargs": {"column": "category", "value_set": ["benign", "malicious", "ambiguous", "jailbreak", "pii", "refusal"], "mostly": 0.9}}
+    {"type": "ExpectColumnValuesToBeInSet", "kwargs": {"column": "category", "value_set": ["benign", "malicious", "ambiguous", "jailbreak", "pii", "refusal", "ci-fixture"], "mostly": 0.9}}
   ]
 }

@@ -1625,6 +1625,9 @@ dataset-download:
         echo "       an unverified download (NOT recommended)."
         exit 1
       fi
+    # python:3.11-slim ships no curl — install it before the registry download.
+    # (Only reached in download mode; the fixture path above uses cp and exits first.)
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
     - |
       DOWNLOAD_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${DATASET_PACKAGE_NAME}/${DATASET_PACKAGE_VERSION}/${DATASET_FILENAME}"
       echo "Downloading: ${DOWNLOAD_URL}"
@@ -1848,6 +1851,9 @@ dataset-redact:
         echo '{"skipped":false,"error":"expected-but-missing dataset (broken chain)"}' > "${REPORTS_DIR}/dataset-redact.json"
         exit 1
       fi
+    # python:3.11-slim ships no curl — install it (+ CA certs) before fetching the
+    # gitleaks release. Runs only after the skip guard so a disabled chain pays nothing.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
     - |
       # Install gitleaks (Go binary) — checksum-verified against the official
       # release checksums file, same trust model as the cosign install.
@@ -2023,6 +2029,8 @@ dataset-sign:
         exit 1
       fi
       echo "Signing dataset: ${DATASET_FILE}"
+    # python:3.11-slim ships no curl — install it (+ CA certs) before fetching cosign.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
     - |
       # Install cosign (Go binary, not on PyPI) — checksum-verified, as elsewhere.
       curl -sSfL \

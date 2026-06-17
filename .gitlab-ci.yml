@@ -576,29 +576,22 @@ conda-pkg-verify:
       # ── Secure conda configuration ────────────────────────────────────────
       conda config --set ssl_verify true
       conda config --set channel_priority strict
-      # Remove defaults channel — conda-forge has a rigorous vetting process. The
-      # remove can no-op (defaults not listed yet); that's fine. What matters is the
-      # END STATE, so we ASSERT below rather than trusting `|| true`.
-      conda config --remove channels defaults 2>/dev/null || true
-      # Also drop Anaconda's built-in default_channels so strict priority can't fall
-      # back to them for packages conda-forge doesn't carry.
-      conda config --remove-key default_channels 2>/dev/null || true
       conda config --add channels "${CONDA_CHANNEL}"
-      conda config --show channels
-      # Assert the isolation actually holds — the previous `|| true` could hide a
-      # failed removal, leaving 'defaults' silently active.
-      if conda config --show channels | grep -Eqw 'defaults|pkgs/main|pkgs/r'; then
-        echo "ERROR: an Anaconda default channel is still active — conda-forge-only isolation not guaranteed"
-        conda config --show channels
-        exit 1
-      fi
-      echo "Channel isolation verified — conda-forge only"
+      # NOTE: the base image keeps 'defaults' in the merged channel list, and
+      # `conda config --remove channels defaults` cannot reliably drop it (it lives
+      # in the system condarc). Rather than trust the config list, we enforce
+      # isolation at RESOLUTION time with --override-channels below, then VERIFY it
+      # from the resolved package set (the real proof) instead of grepping config.
+      conda config --show channels || true
     - |
-      # ── Isolated conda environment ────────────────────────────────────────
-      conda create -n ci-verify python=3.11 --yes --quiet
+      # ── Isolated conda environment (conda-forge ONLY) ─────────────────────
+      # --override-channels ignores every configured channel (incl. defaults) and
+      # uses only the --channel(s) given, so packages provably come from conda-forge.
+      conda create -n ci-verify python=3.11 --yes --quiet \
+        --override-channels --channel "${CONDA_CHANNEL}"
       # Attempt to install packages via conda-forge; fall back gracefully for pip-only pkgs
       conda run -n ci-verify conda install --yes --quiet \
-        --channel "${CONDA_CHANNEL}" \
+        --override-channels --channel "${CONDA_CHANNEL}" \
         --file requirements.txt 2>/dev/null \
         || echo "NOTE: some packages are pip-only; conda coverage is partial"
       conda run -n ci-verify pip check || true
@@ -607,9 +600,23 @@ conda-pkg-verify:
       conda env export -n ci-verify --json > "${REPORTS_DIR}/conda/env-manifest.json"
       conda run -n ci-verify conda list --json > "${REPORTS_DIR}/conda/installed-packages.json"
       python3 - <<'PYEOF'
-      import json, os
+      import json, os, re, sys
       pkgs = json.load(open(os.environ["REPORTS_DIR"] + "/conda/installed-packages.json"))
-      print(f"conda-forge environment: {len(pkgs)} package(s) resolved")
+      # Real isolation check: flag any package that resolved from an Anaconda default
+      # channel. Denial-based (not an allowlist) so channel-string variants like
+      # "conda-forge/linux-64" or a full conda-forge URL don't false-fail this gate.
+      BAD = re.compile(r"(^|/|\.)(defaults|pkgs/main|pkgs/r|main|free|anaconda)(/|$)|repo\.anaconda\.com", re.I)
+      leaked = sorted(
+          f"{p.get('name')}@{p.get('channel')}"
+          for p in pkgs
+          if p.get("channel") and BAD.search(str(p.get("channel")))
+      )
+      print(f"conda environment: {len(pkgs)} package(s) resolved")
+      if leaked:
+          print(f"ERROR: {len(leaked)} package(s) resolved from an Anaconda default "
+                f"channel (isolation leak): {leaked[:10]}")
+          sys.exit(1)
+      print("Channel isolation verified — no package resolved from a defaults/anaconda channel")
       PYEOF
   artifacts:
     paths:

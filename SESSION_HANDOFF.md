@@ -6,6 +6,57 @@
 
 ---
 
+# ▶️ STATUS (2026-06-18, session 4): ALL OPEN REQUIRED-FIXES APPLIED + validated + committed locally (UNPUSHED). RESUME AT: one billable re-run to validate the deferred legs + this work.
+
+> **Session 4 = the fix-application session.** The walkthrough was complete; this session **applied every
+> remaining open fix** in one sweep and committed it. **Nothing is pushed** (cost deferred per user).
+>
+> **Git state (newest first, all UNPUSHED — branch `gaips-pipeline-required-fixes`, ahead of remote by 4):**
+> ```
+> 459a562  ci(gaips): apply open required-fixes #0,#23,#24a/b,#25,#26,#27,#28   ← THIS session's fix sweep
+> 7cbcd01  ci(gaips): checkpoint session pipeline edits before fix sweep        ← backup/restore point
+> a113877  docs: update handoff — fixes done, resume documenting #29–#49
+> ff9bd7e  ci: fix dataset-sign needs, ydata pkg_resources, GX category set
+> 8061900  ci: dataset-redact — install click for the spaCy CLI                 ← last PUSHED tip
+> ```
+>
+> **What was applied (all in `459a562`; checkboxes flipped in the REQUIRED FIXES list below):**
+> - **#0 audit coverage (the big one).** (A) `default: after_script` + `.audit-env` anchor → **every job
+>   pip-audits its OWN installed environment** (model-signing/sigstore/presidio/evidently/modelaudit/…),
+>   advisory, no-ops on non-Python images. (B) new **`lockfile-audit`** job compiles `ci/requirements-ci.in`
+>   with `--generate-hashes` and audits the full stack the 3-pkg root `requirements.txt` shadowed.
+> - **#24b** — `model-baseline-commit` **repurposed → `data-drift-baseline-commit`**: **sanitizes** the
+>   evidently seed (drops null/non-finite, never a raw `cp`) and commits `evals/dataset-reference.jsonl`;
+>   seed source (`run_evidently_report.py`) fixed too. Unsticks `evidently-drift` from seed-mode.
+> - **#24a** — `model-drift-detection` **relocated into `ci/live-scans.gitlab-ci.yml`** (wired to its six
+>   eval inputs) and **deleted from the static pipeline**; dropped the now-dead `needs` edges in
+>   `evidence-summary` / `sign-evidence` / `ai-bom-assemble` (these caught a would-be pipeline-lint break).
+> - **#25** — `ai-bom-sign` → **cosign keyless** (Fulcio + Rekor), **hardened to a gate** (`allow_failure:false`);
+>   PreSync hook now `cosign verify-blob`s the BOM; dead cyclonedx-cli install + public-key Secret removed.
+> - **#23** — `markllm-deps-audit` → `stage: sast`, `needs: ["setup"]` (gating still deferred).
+> - **#26** — stale model-bundle comment rewritten (26a); per-file upload tracking + `publish-result.json`
+>   signal, non-green on partial upload (26b); branch-scoped `ARTIFACT_BASE_URL` guidance (26c);
+>   publishes `.sig`/`.pem` not `.pub`.
+> - **#27** — real markllm schema + `present-but-unparsed` state (27a); enforcing-vs-advisory gate flag from
+>   the job API (27b); `generated_at` → `pipeline_created_at`, schema `1.1` (27c).
+> - **#28** — polarity-aware boolean coloring (`drift_detected:false` is green, not red) (28a); `null` → `n/a`
+>   (28b); gate ledger shows enforcing/advisory.
+>
+> **Validated:** YAML parses (both pipelines + PreSync hook); **needs-graph integrity verified** on both;
+> all three edited Python scripts compile; **metrics/dashboard scripts smoke-tested** (assertions on every
+> #27/#28 behavior). Operator docs synced (README, SETUP, CI-VARIABLES, SBOM, live-scans);
+> `PIPELINE_JOB_VALIDATION.md` left as the historical audit record with a resolution banner.
+>
+> **➡️ NEXT (the only open action):** **one billable re-run on the default branch** validates, in a single shot,
+> (a) the deferred legs **#30/#31/#32** (need `ff9bd7e`) AND (b) this session's edits — especially the paths that
+> only run live: `data-drift-baseline-commit` + keyless `ai-bom-sign` (both need default-branch + `GITLAB_PUSH_TOKEN`
+> / OIDC). **Follow-ups (non-blocking):** commit the `lockfile-audit` artifact as `ci/requirements-ci.txt` to enable
+> `--require-hashes` (#0 "teeth"); then drop `allow_failure` on the per-env/lockfile audits + `markllm-deps-audit`
+> (#23 gating) once the pipeline is otherwise green. **The separate app dirs (`packages/`, `services/`) are NOT part
+> of this pipeline — do not touch or commit them; they're locally excluded via `.git/info/exclude`.**
+
+---
+
 # ▶️ STATUS (2026-06-18, session 3): #46 image-sign documented (⚠️ inert skip, by design — no container image built); RESUME AT #47 publish-signed-artifacts (deploy-prep 1/4 done)
 
 > **#46 `image-sign` — DONE (⚠️ INERT, by design).** `IMAGE_REF` unset → clean skip `exit 0`, green. Signs the deployable
@@ -201,7 +252,10 @@ c4d86f1  ci: make signature-verification protected-branch-aware              ←
 5cf4c55  ci: install curl in dataset chain jobs                               ← pushed
 beca04b  ci: apply 22 GAIPS pipeline required-fixes                           ← pushed
 ```
-### 🔴 SESSION-3 LOCAL CHANGES — UNCOMMITTED working tree, NOT pushed, NOT yet run/validated
+### 🔴 SESSION-3 LOCAL CHANGES — now COMMITTED in `7cbcd01` (session 4 backup), still NOT pushed / NOT run-validated
+> _Session-4 update: these session-3 working-tree edits were committed as the `7cbcd01` checkpoint before the
+> fix sweep, so they are no longer loose in `git status` — but they remain **unpushed and unvalidated on CI**.
+> The original description is preserved below._
 This session made **real `.gitlab-ci.yml` edits** (not just docs) while documenting. They are in the working tree
 only — `git status` will show `.gitlab-ci.yml` + several `docs/gaips-materials/*` modified. **None have run on a
 pipeline** — they need a billable re-run to validate. Summary:
@@ -230,22 +284,27 @@ before this session. So the working tree now = `8061900` + `ff9bd7e`/`a113877` (
 + doc edits (uncommitted). Decide whether to commit/squash these before the next billable run.
 
 ### ▶️ NEXT SESSION — start here:
-1. **🏁 WALKTHROUGH COMPLETE — all jobs `setup`→`pages` documented (deploy-prep 4/4).** #47/#48/#49 were
-   documented this session; #40–#46 earlier. Only **DEFERRED** legs remain undocumented for lack of run evidence:
-   #30 `great-expectations-validate` / #31 `ydata-profile` / #32 `dataset-sign` (need a re-run of `ff9bd7e`).
-   **No more pasting needed unless re-running.** Pivot to **applying the REQUIRED FIXES** (Tier-0 #0, then #23,
-   #24a/b, #25, #26, #27, #28). Surprises vs the old pre-reads, now corrected in the doc: #47 **DID** publish a
-   real `model-bundle.tar` (model-fixture-download supplies the weights — the YAML comment is stale → Fix #26a).
-2. **Method (for any re-run validation):** USER pastes each real GitLab job log/artifact (no glab/docker locally); read the job block in
-   `.gitlab-ci.yml` (grep the name — line numbers shifted) + backing script in `docs/gaips-materials/scripts/`
-   FIRST to set expectations; lead each verdict with the most damning TRUE finding; keep distinct jobs/controls
-   separate (anti-collapse). **REPORT FORMAT (user requirement, from #39 on — in CHAT *and* the doc):** every
-   per-job report states (1) **Purpose** (plain terms) and (2) **Recommended fixes** (finding→fix list). The user
-   values plain-English explanations — when asked "what does this mean?", drop the jargon (see the #24b/evidently
-   plain-English exchange). See memory `feedback-job-purpose-and-fixes`.
-3. **Then:** optionally push (one billable run) to validate (a) the deferred #30/#31/#32 (`ff9bd7e`) AND (b) this
-   session's `sign-evidence`/`drift-gate`/`attest` CI changes in one shot. After documenting #47–#49, the
-   walkthrough is COMPLETE (~49 jobs) — pivot to applying the REQUIRED FIXES (esp. Tier-0 #0, #23, #24, #25).
+1. **🏁 WALKTHROUGH COMPLETE *and* ALL REQUIRED FIXES APPLIED (session 4).** #1–#22 done+pushed earlier;
+   #0, #23, #24a/b, #25, #26, #27, #28 applied this session in `459a562` (UNPUSHED) over the `7cbcd01` backup.
+   See the **session-4 STATUS block at the top** for the per-fix summary + validation. **The only open
+   action is the billable re-run.**
+2. **▶️ DO THIS FIRST — the single billable re-run** (default branch, no `[sigstore-discovery]`). It validates
+   in one shot: (a) the **DEFERRED legs #30/#31/#32** (`great-expectations-validate` / `ydata-profile` /
+   `dataset-sign` — need `ff9bd7e`, never had run evidence on `8061900`); (b) the **session-3** edits
+   (`sign-evidence`/`attest`, `drift-gate` removal); (c) the **session-4 fix sweep**, especially the paths that
+   only execute live: `data-drift-baseline-commit` and the keyless `ai-bom-sign` (both need default-branch +
+   `GITLAB_PUSH_TOKEN` / OIDC). Decide commit/squash strategy for `ff9bd7e`+`a113877`+`7cbcd01`+`459a562` before pushing.
+3. **Method (for re-run validation):** USER pastes each real GitLab job log/artifact (no glab/docker locally); read
+   the job block in `.gitlab-ci.yml` (grep the name — line numbers shifted) + backing script in
+   `docs/gaips-materials/scripts/` FIRST to set expectations; lead each verdict with the most damning TRUE finding;
+   keep distinct jobs/controls separate (anti-collapse). **REPORT FORMAT (user requirement, from #39 on — in CHAT
+   *and* the doc):** every per-job report states (1) **Purpose** (plain terms) and (2) **Recommended fixes**
+   (finding→fix list). See memory `feedback-job-purpose-and-fixes`.
+4. **Post-re-run follow-ups (non-blocking, deferred by design):** commit the `lockfile-audit` artifact as
+   `ci/requirements-ci.txt` to enable `--require-hashes` (#0 "teeth"); then **drop `allow_failure`** on the per-env
+   audits, `lockfile-audit`, and `markllm-deps-audit` (#23) once the pipeline is otherwise green; add a small
+   enforcing gate over `evidently-drift` #38 (data-drift) and over `model-drift-detection` in live-scans (#24a)
+   once their references/baselines are committed.
 
 **Method unchanged:** read the job block in `.gitlab-ci.yml` (grep the name — line numbers shifted) + its
 backing script in `docs/gaips-materials/scripts/` to set expectations, then the USER pastes the real GitLab
@@ -360,7 +419,7 @@ controls**, then enforcement/auditability gaps, then pinning/scope, then hygiene
 problem · concrete fix. Checkboxes so the next session can track progress.
 
 ### 🛑 Tier 0 — CRITICAL (foundational; should have been done at the start)
-- [ ] **0. `pip-audit` must vuln-scan ALL jobs' libraries — today it covers almost none.** **Problem
+- [x] **0. ✅ APPLIED (s4, `459a562`) — `.audit-env` per-job env audit + `lockfile-audit` job.** `pip-audit` must vuln-scan ALL jobs' libraries — today it covers almost none.** **Problem
   (verified against `.gitlab-ci.yml`):** there are only two audit jobs and between them they audit a small
   slice of what the pipeline actually installs. `pip-audit` (sast, line 467) audits **only `requirements.txt`**
   = `pandas==2.3.3` / `requests==2.34.2` / `jinja2==3.1.6` (+ their resolved transitives). `markllm-deps-audit`
@@ -473,7 +532,7 @@ problem · concrete fix. Checkboxes so the next session can track progress.
   "disabled by config" (ok, exit 0) from "expected-but-missing" (`exit 1`).
 
 ### Walkthrough-surfaced fixes (session 3, 2026-06-17 — beyond the original 22)
-- [ ] **23. `markllm-deps-audit` #34 — AI deps audited in the wrong place, contingently, and concurrently
+- [x] ✅ **APPLIED (s4, `459a562`): moved to `stage: sast`, `needs:["setup"]`; gating still deferred.** **23. `markllm-deps-audit` #34 — AI deps audited in the wrong place, contingently, and concurrently
   with the job that executes them.** It's the **only** scan of the ML stack (the sast `pip-audit` #5-job
   audits root `requirements.txt` = `{pandas,requests,jinja2}` only — torch/transformers aren't in it or its
   transitives), yet it sits in `ai-eval` (stage 6) behind `needs:["artifact-signing-gate","model-manifest"]`
@@ -490,7 +549,7 @@ problem · concrete fix. Checkboxes so the next session can track progress.
   (per user): **keep `allow_failure: true` and `|| true`** until all pipeline bugs are fixed — turning on
   enforcement (drop `allow_failure`; `exit 1` when any vuln has non-empty `fix_versions`; `#35 needs:[34]`)
   while broken chains still exist would just paint the pipeline red. Ordering moves now; teeth come last.
-- [ ] **24. Drift baselines are in the wrong pipeline / missing — SPLIT, do NOT blanket-delete.** Background:
+- [x] ✅ **APPLIED (s4, `459a562`): 24a — `model-drift-detection` moved to live-scans, deleted from static (+ dead `needs` edges dropped); 24b — `data-drift-baseline-commit` sanitizes + commits `dataset-reference.jsonl`.** **24. Drift baselines are in the wrong pipeline / missing — SPLIT, do NOT blanket-delete.** Background:
   there are TWO independent drift controls and TWO baselines, and they were conflated. (i) **model/eval-metric
   drift** = `model-drift-detection` #36 + `detect_model_drift.py` (reads ONLY the six live-scan eval files
   `inspect-ai`/`garak`/`pyrit`/`giskard`/`guardrail-regression`/`promptfoo`-results.json) + its baseline
@@ -549,7 +608,7 @@ problem · concrete fix. Checkboxes so the next session can track progress.
       enshrine a redaction artifact + non-portable JSON + a 2-row half-empty frame as the drift baseline. The
       reference must be hand-authored, clean, realistically-sized (possibly from *pre*-redaction data). So #24b's
       path needs a sanitize/validate step, not a raw `cp seed → dest`.
-- [ ] 🛑 **25. `ai-bom-sign` #43 — sign the AI-BOM with cosign keyless (MANDATORY / CRITICAL).** Today the job signs
+- [x] ✅ **APPLIED (s4, `459a562`): `cosign sign-blob` keyless via `SIGSTORE_ID_TOKEN`; PreSync hook → `cosign verify-blob`; `allow_failure:false`; RSA key + public-key Secret removed.** 🛑 **25. `ai-bom-sign` #43 — sign the AI-BOM with cosign keyless (MANDATORY / CRITICAL).** Today the job signs
   the BOM with a native CycloneDX **enveloped RSA XMLDSig using an EPHEMERAL keypair** minted in-job (because
   `CYCLONEDX_SIGNING_KEY` is unset), deletes the private key, and publishes the throwaway public key beside the BOM.
   Result: the BOM's OWN signature is **tamper-evidence only — zero authenticity/provenance**, pins no stable signer
@@ -562,7 +621,7 @@ problem · concrete fix. Checkboxes so the next session can track progress.
   **supersedes** the weaker "just wire a stable `CYCLONEDX_SIGNING_KEY`" option — that was the interim stopgap; the
   mandatory fix is cosign keyless for consistency + real provenance. Then drop `allow_failure` so an unsigned BOM can't
   silently reach `publish-signed-artifacts`. (Documented in `PIPELINE_JOB_VALIDATION.md` #43.)
-- [ ] **26. `publish-signed-artifacts` #47 — three deploy-distribution hygiene fixes.** The job genuinely publishes
+- [x] ✅ **APPLIED (s4, `459a562`): 26a stale comment rewritten; 26b per-file upload tracking + `publish-result.json`, non-green on partial; 26c branch-scoped URL guidance; now publishes `.sig`/`.pem`.** **26. `publish-signed-artifacts` #47 — three deploy-distribution hygiene fixes.** The job genuinely publishes
   the signed set (AI-BOM + key + `model-bundle.tar`) to the GitLab generic package registry and emits the PreSync
   `ARTIFACT_BASE_URL` — these are quality/safety gaps, not breakage. (NB: its other two findings are already tracked
   elsewhere — the **ephemeral BOM key** is **Fix #25**, and the **absent dataset arm** rides the dataset-chain re-run
@@ -601,7 +660,7 @@ problem · concrete fix. Checkboxes so the next session can track progress.
       semver, or `$CI_DEFAULT_BRANCH`) so the path doesn't move per feature branch, then update the PreSync ConfigMap
       `ARTIFACT_BASE_URL` to that path. Otherwise PreSync keeps pointing at the now-stale `gaips-pipeline-required-fixes`
       package version after merge and fetches nothing. (Documented in `PIPELINE_JOB_VALIDATION.md` #47.)
-- [ ] **27. `metrics-normalize` #48 — dashboard fidelity fixes** (all in `docs/gaips-materials/scripts/write_operational_metrics.py`).
+- [x] ✅ **APPLIED (s4, `459a562`): 27a real markllm schema + `present-but-unparsed` state; 27b enforcing-vs-advisory gate flag; 27c `generated_at`→`pipeline_created_at` (schema 1.1).** **27. `metrics-normalize` #48 — dashboard fidelity fixes** (all in `docs/gaips-materials/scripts/write_operational_metrics.py`).
   The job genuinely normalises 27/37 sources into one honest `operational-metrics.json` and tolerates absent inputs by
   design; these fixes harden *interpretation*. It is reporting-only (`allow_failure: true`) — that's correct, no
   enforcement fix needed.
@@ -640,7 +699,7 @@ problem · concrete fix. Checkboxes so the next session can track progress.
   - ℹ️ Also note (no fix): the **operational/timing half is empty** without `GITLAB_API_TOKEN` (`operational.skipped=true`,
     graceful by design) — document that pipeline/job duration + queue metrics require the token.
     (Documented in `PIPELINE_JOB_VALIDATION.md` #48.)
-- [ ] **28. `pages` #49 — dashboard presentation-fidelity fixes** (in `docs/gaips-materials/scripts/render_metrics_dashboard.py`).
+- [x] ✅ **APPLIED (s4, `459a562`): 28a polarity-aware boolean coloring (`drift_detected:false`→green); 28b `null`→`n/a`; gate ledger shows enforcing/advisory.** **28. `pages` #49 — dashboard presentation-fidelity fixes** (in `docs/gaips-materials/scripts/render_metrics_dashboard.py`).
   The job genuinely renders a self-contained, JS-free GitLab Pages dashboard with an empty-input fallback; output is
   correctly UTF-8 encoded. These fixes are about how it *presents* #48's data, not whether it runs.
   - **28a (Tier 2 — negative-polarity booleans mis-colored; confirmed).**

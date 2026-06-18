@@ -1,5 +1,14 @@
 # GAIPS Pipeline — Job Validation & Documentation
 
+> **⚠️ STATUS UPDATE (session 4, 2026-06-18): the fixes this audit motivated are now APPLIED.**
+> All remaining required-fixes — **#0** (audit coverage), **#23**, **#24a/b**, **#25** (ai-bom-sign →
+> cosign keyless), **#26**, **#27**, **#28** — were implemented this session (local commit `459a562`,
+> not yet pushed). The per-job verdicts and 🛑 "MANDATORY FIX" recommendations **below are preserved
+> verbatim as the audit record that justified those changes** — they describe the *pre-fix* state, not
+> current `.gitlab-ci.yml`. For the authoritative current status and the resume point, see
+> [`SESSION_HANDOFF.md`](../../SESSION_HANDOFF.md). The deferred legs **#30/#31/#32** still await a
+> billable re-run for run evidence.
+
 Walkthrough of the main (static) pipeline run on commit `6a48e525` (pipeline `2606572181`),
 validating that each **successful** job performs real work (not exit-0 theater) and
 documenting what that work is.

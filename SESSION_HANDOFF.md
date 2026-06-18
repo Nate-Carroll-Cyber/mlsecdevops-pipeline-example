@@ -1,8 +1,110 @@
-# Session Handoff — GAIPS Model Pipeline (2026-06-17)
+# Session Handoff — GAIPS Model Pipeline (updated 2026-06-18, session 5)
 
 > **NAMING:** This is the **GAIPS model pipeline**. The repo/dir is named `counter-spy` and
 > holds untracked, unrelated project dirs (`services/`, `packages/`, `src/`, `ctf-frontend/`)
 > — those are a SEPARATE project, not part of this pipeline. Do not call this "Counter-Spy".
+
+> **PATHS (absolute).** Repo root: `/Users/nate/Documents/Counter-Spy Claude.ai/`. This handoff:
+> `/Users/nate/Documents/Counter-Spy Claude.ai/SESSION_HANDOFF.md`. Pipeline def:
+> `/Users/nate/Documents/Counter-Spy Claude.ai/.gitlab-ci.yml`. GAIPS materials (scripts/docs/deployment):
+> `/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/`. All repo-relative paths below are under the repo root.
+
+---
+
+# ▶️ STATUS (2026-06-18, session 5): REVIEW OF `e0311ab` → 6 FINDINGS (3 P1 / 3 P2) ALL FIXED + committed `d7585b7` + **PUSHED** (CI triggered). RESUME AT: watch this branch's pipeline; the deeper protected/default-branch validation remains open.
+
+> **What this session did.** A review of `e0311ab` (the #29–#34 implementation commit) found **6 findings where
+> behavior didn't match the docs/commit claims**. All fixed in one commit (`d7585b7`), then the branch was
+> **pushed to `gitlab`** — which **triggered a pipeline run** on `gaips-pipeline-required-fixes`.
+>
+> **P1 (functional gaps):**
+> - **P1-1 DT child not gated** — `/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/scripts/dependency_track_upload.py`
+>   uploaded the AI-BOM as a nested child but only evaluated the PARENT project; an unresolved parent also wrote a
+>   success report (silent pass). **Fix:** new `evaluate_project()` run for **both** parent and AI-BOM child; gate
+>   fails if EITHER has a blocking violation OR, post-upload, can't be resolved; report now carries both project
+>   UUIDs + dashboard URLs as proof of evaluation.
+> - **P1-2 hollow modelCard for the default model** — in
+>   `/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/scripts/build_ai_bom.py` the MarkLLM/HF fold
+>   matched mixed-case HF id (`Qwen/...`) against the lowercase GGUF path **case-sensitively** (never matched), and
+>   the `name in res["prompts"]` fallback was dead (prompts is a list of dicts). **Fix:** case-insensitive match on
+>   path/name; dropped the dead fallback. The default Qwen model now folds its watermark metrics into `modelCard`
+>   (closes the overstated #30b claim).
+> - **P1-3 scanners still on `:latest`** — in `/Users/nate/Documents/Counter-Spy Claude.ai/.gitlab-ci.yml`,
+>   `IMAGE_SEMGREP`/`IMAGE_GITLEAKS` were `:latest`, and `semgrep-sast` ran an UNPINNED `pip install semgrep` (never
+>   used `IMAGE_SEMGREP`). **Fix:** pinned both vars (`semgrep/semgrep:1.165.0`, `gitleaks/gitleaks:v8.30.1`);
+>   `semgrep-sast` now runs **in** the pinned image (`before_script:[]`, no pip install).
+>
+> **P2:**
+> - **P2-1 AI-BOM vuln surface incomplete (#29)** — `build_ai_bom.py` never parsed `lockfile-audit.json` (doesn't
+>   match the `pip-audit*` glob), and `ai-bom-assemble` didn't even `need:` lockfile/grype/trivy (so that parsing
+>   was dead). **Fix:** parse `lockfile-audit.json`; add `lockfile-audit`/`grype-scan`/`trivy-scan` to
+>   `ai-bom-assemble` needs and `pip-audit`/`lockfile-audit` to `ai-bom-content-gate` needs so BOTH jobs read the
+>   IDENTICAL audit surface (the gate calls the same `build_ai_bom._vulnerabilities()`). Per-job `pip-audit-env-*`
+>   left OUT of scope on purpose (would require lockstep `needs` on both jobs to avoid undercount).
+> - **P2-2 DT compose not turnkey** —
+>   `/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/deployment/dependency-track/docker-compose.yml`
+>   had `ALPINE_DATABASE_MODE: external` with no DB service → `docker compose up -d` fails. **Fix:** switched to
+>   **embedded H2** (all-in-one demo), with a comment on the external-DB production path.
+> - **P2-3 stale README publish/verify wording** —
+>   `/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/README.md` said the AI-BOM is published "+ its
+>   public key" and verified via `cyclonedx verify`. **Fix:** corrected to the `.xml`/`.sig`/`.pem` trio + `cosign verify-blob`.
+>
+> **Follow-up doc/comment drift (same commit):** dropped the literal `:latest` from descriptive comments + fixed the
+> stale "AI-BOM public key" comment (`.gitlab-ci.yml:123`); reconciled Syft/Grype/Trivy rows in
+> `/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/ci/SBOM.md` +
+> `/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/ci/CI-VARIABLES.md` to the ACTUAL CI values
+> (`anchore/syft:v1.45.1-debug`, `anchore/grype:v0.114.0-debug`, `aquasec/trivy:0.71.1`); added an authoritative
+> **"Evidence & Report Artifacts (per stage / job)"** section to the README documenting every job's artifact
+> filenames/filetypes + retention (extracted from the `artifacts:` blocks).
+>
+> **Validated offline before push:** both changed Python scripts compile; mocked tests confirm the DT dual-project
+> gate (child FAIL → exit 1; unresolved → None→fail) and the case-insensitive modelCard match; a fixture confirms
+> `lockfile-audit.json` is now ingested; `.gitlab-ci.yml` parses (`!reference` tag) with the new `needs` edges; the
+> compose parses in embedded mode. **No new tests run on CI yet** — that's the pipeline now running.
+>
+> **Git state — branch is now FULLY PUSHED (this supersedes session 4's "nothing pushed / ahead by 4").**
+> `gitlab/gaips-pipeline-required-fixes` == `HEAD` == `d7585b7` (0 ahead / 0 behind). The push moved the remote
+> `8061900..d7585b7`, so session-4's local-only commits (`459a562`, `7cbcd01`, `a113877`, `ff9bd7e`) **plus** the
+> newer `e0311ab` (#29–#34 impl) and `7daca48` (session-4 handoff) are all on the remote now.
+> ```
+> d7585b7  Fix review findings on e0311ab before test push          ← THIS session (pushed; CI running)
+> e0311ab  feat(gaips): implement + document required-fixes #29–#34  ← what this session reviewed
+> 7daca48  docs(gaips): session-4 handoff — fixes applied; resume = re-run
+> 459a562  ci(gaips): apply open required-fixes #0,#23,#24a/b,#25,#26,#27,#28
+> 8061900  ci: dataset-redact — install click for the spaCy CLI      ← former remote tip
+> ```
+>
+> **➡️ NEXT SESSION:**
+> 1. **Watch the pipeline** triggered by `d7585b7` (MR-create link:
+>    `https://gitlab.com/natecarrollfilms/counter-spy/-/merge_requests/new?merge_request%5Bsource_branch%5D=gaips-pipeline-required-fixes`).
+>    Verify the jobs touched this session: `semgrep-sast` (now runs in `semgrep/semgrep:1.165.0`), `ai-bom-assemble`
+>    + `ai-bom-content-gate` (new `needs:` → grype/trivy/lockfile artifacts actually present; `vulnerabilities[]`
+>    should now include lockfile-audit findings), and `dependency-track-upload` (inert unless `DT_API_URL`/`DT_API_KEY`
+>    set — the child-gate code can't run until DT is wired).
+> 2. **⚠️ This is still an UNPROTECTED feature branch**, so the protected-var signing/identity legs (`signature-verification`
+>    #19 and anything reading `MODEL_SIGNING_IDENTITY`/`MODEL_ENDPOINT`/etc.) **defer** here — see POST-PUSH FIX LOG #2.
+>    Session 4's deeper open action — **one validation run on the DEFAULT/protected branch** (for keyless `ai-bom-sign`,
+>    `data-drift-baseline-commit`, real signature verification) — is **still open**; this feature-branch run does not
+>    cover it.
+> 3. **Non-blocking follow-ups unchanged from session 4:** commit the `lockfile-audit` artifact as
+>    `/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/ci/requirements-ci.txt` for `--require-hashes`
+>    (#0 teeth), then drop `allow_failure` on the per-env/lockfile audits + `markllm-deps-audit` (#23) once green.
+>    **Do NOT touch the separate app dirs** (`packages/`, `services/`) — excluded via `.git/info/exclude`.
+
+> **POST-PUSH FIX LOG (session 5 cont., `d7585b7` pipeline run) — 2 job failures, both self-inflicted by `d7585b7`'s own
+> fixes, both fixed in the working tree (committed this turn):**
+> - **`gitleaks-scan` — `pull access denied for gitleaks/gitleaks`.** P1-3 pinned `IMAGE_GITLEAKS: gitleaks/gitleaks:v8.30.1`,
+>   but gitleaks has **no Docker Hub repo** — the official image is on **GHCR**. Fix: `ghcr.io/gitleaks/gitleaks:v8.30.1`
+>   (`.gitlab-ci.yml:65`). Version `8.30.1` was correct (the `dataset-redact` GitHub-release curl already uses it). The
+>   semgrep pin `semgrep/semgrep:1.165.0` IS a valid Docker Hub repo, so only gitleaks was affected.
+> - **`tamper-verification` — false-positive `TAMPER DETECTED`.** #32 changed `model-digest` to emit repo-relative paths
+>   (was absolute `/builds/…`); the cached baseline (pre-#32) still held the absolute-path line, and the tamper check
+>   compared **whole lines** (`baseline.strip() != current.strip()`) → mismatch despite **identical sha256**. Fix:
+>   compare the **set of sha256 digests** (path-insensitive) + migrate the stored baseline (file/Vault) to the new
+>   relative form on a content match so it self-heals (`.gitlab-ci.yml` tamper-verification block). Validated offline:
+>   YAML parses, embedded Python compiles, unit test confirms path-only change → PASS, real hash change → FAIL.
+>   ⚠️ On the re-run the tamper baseline migrates to relative-path format on its first green run. `VAULT_ADDR` still unset
+>   (best-effort cache durability, unchanged).
 
 ---
 

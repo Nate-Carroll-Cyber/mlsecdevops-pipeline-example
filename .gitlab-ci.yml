@@ -62,7 +62,7 @@ variables:
   IMAGE_GRYPE: "anchore/grype:v0.114.0-debug"
   IMAGE_TRIVY: "aquasec/trivy:0.71.1"   # pinned to an exact tag — keep in sync with the trivy-db schema
   IMAGE_CYCLONEDX: "cyclonedx/cyclonedx-cli:0.32.0"   # AI BOM schema validation / format conversion
-  IMAGE_GITLEAKS: "gitleaks/gitleaks:v8.30.1"         # gitleaks-scan SAST job image (pinned; keep in sync with GITLEAKS_VERSION)
+  IMAGE_GITLEAKS: "ghcr.io/gitleaks/gitleaks:v8.30.1" # gitleaks-scan SAST job image (pinned; GHCR — gitleaks has no Docker Hub repo; keep in sync with GITLEAKS_VERSION)
   IMAGE_CLAMAV: "clamav/clamav:1.4"                   # clamav-scan job — pinned to an exact tag (patch-floating line)
   PROMPTFOO_VERSION: "0.121.15"
   # MarkLLM watermark stack — pinned to current, markllm-compatible versions and
@@ -1281,21 +1281,49 @@ tamper-verification:
           print("Cached tamper baseline only recorded an empty model directory — reseeding with current model digests")
           baseline = current
 
-      # Always write the file copy (fallback + local diff evidence)
-      baseline_file.write_text(baseline or "")
+      # ── Comparison (content-based, path-insensitive) ─────────────────────────
+      # Compare the SET of sha256 digests, NOT the full "<path>  sha256:<hash>"
+      # lines. The recorded path is environment-dependent (Fix #32 moved it from
+      # the absolute /builds/… runner path to a repo-relative one), so a path-format
+      # or runner-layout change must NOT read as tampering — only a content-hash
+      # change (or a model file added/removed) is real tamper. Comparing lines
+      # verbatim made the #32 path change false-positive against a pre-#32 baseline.
+      def digest_set(text):
+          out = set()
+          marker = "sha256:"
+          for line in (text or "").splitlines():
+              idx = line.find(marker)
+              if idx != -1:
+                  out.add(line[idx + len(marker):].strip())
+          return out
 
-      # ── Comparison ──────────────────────────────────────────────────────────
-      if baseline and current and baseline.strip() != current.strip():
-          import difflib
-          diff = "".join(difflib.unified_diff(
-              baseline.splitlines(keepends=True),
-              current.splitlines(keepends=True),
-              fromfile="baseline", tofile="current",
-          ))
-          print("TAMPER DETECTED — digest mismatch:\n" + diff)
+      base_digests = digest_set(baseline)
+      cur_digests  = digest_set(current)
+
+      if base_digests and cur_digests and base_digests != cur_digests:
+          for h in sorted(base_digests - cur_digests):
+              print(f"TAMPER DETECTED — digest in baseline missing from current: sha256:{h}")
+          for h in sorted(cur_digests - base_digests):
+              print(f"TAMPER DETECTED — digest in current not in baseline:     sha256:{h}")
           sys.exit(1)
 
       print("Tamper check PASSED — digests match baseline")
+
+      # Migrate the stored baseline to the current (relative-path) form once the
+      # CONTENT matches, so the cache/Vault stop carrying the stale absolute-path
+      # format. (Previously wrote `baseline` back verbatim → it never self-healed,
+      # so the #32 path change would re-trigger the diff on every run.)
+      baseline_file.write_text(current or baseline or "")
+      if vault_addr and (baseline or "").strip() != (current or "").strip():
+          try:
+              client.secrets.kv.v2.create_or_update_secret(
+                  mount_point="secret", path=f"gaips/tamper-baseline/{project_slug}",
+                  secret={"digests": current},
+              )
+              print("Migrated tamper baseline format in Vault (content unchanged)")
+          except Exception as exc:
+              print(f"WARN: Vault baseline migrate failed ({exc})")
+
       (evidence_dir / "integrity.env").write_text("tamper_check_passed=true\n")
       PYEOF
   artifacts:

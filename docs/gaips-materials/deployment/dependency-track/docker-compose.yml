@@ -18,8 +18,10 @@ services:
           memory: 8192m
     environment:
       # See https://docs.dependencytrack.org/getting-started/configuration/ for the full set.
-      ALPINE_DATABASE_MODE: "external"   # set to "embedded" for an all-in-one demo (H2)
-      # For embedded/demo use, drop the EXTRA_* DB vars below and use ALPINE_DATABASE_MODE=embedded.
+      # Turnkey default: embedded H2 so `docker compose up -d` boots all-in-one with no
+      # external DB. For production, set ALPINE_DATABASE_MODE=external and add a postgres
+      # service + ALPINE_DATABASE_URL/USERNAME/PASSWORD vars (H2 is single-node/demo only).
+      ALPINE_DATABASE_MODE: "embedded"
     ports:
       - "8081:8080"
     volumes:

@@ -289,9 +289,15 @@ def _model_components(
             },
         }
 
+        # HF repo ids carry mixed case (e.g. "Qwen/Qwen2.5-1.5B-Instruct") while the
+        # signed model path/name are lowercase GGUF, so all id-to-artifact matching
+        # below is case-insensitive against both the path and the component name.
+        path_l, name_l = path.lower(), name.lower()
+
         # Fold HuggingFace card metadata in when this artifact maps to an HF repo
         for hf_id, rec in hf_by_id.items():
-            if hf_id and (hf_id.split("/")[-1] in path):
+            hf_base = hf_id.split("/")[-1].lower() if hf_id else ""
+            if hf_base and (hf_base in path_l or hf_base in name_l):
                 meta = rec.get("card_meta") or {}
                 if meta.get("pipeline_tag"):
                     model_card["modelParameters"]["task"] = meta["pipeline_tag"]
@@ -300,8 +306,11 @@ def _model_components(
 
         # Fold the MarkLLM watermark eval into the modelCard (Fix #30b) — previously
         # modelParameters/quantitativeAnalysis were always empty even though the eval ran.
+        # Match the model id basename against the (lowercased) path or component name;
+        # the old `name in res["prompts"]` fallback was dead (prompts is a list of dicts).
         for mid, res in markllm_by_id.items():
-            if mid and (mid.split("/")[-1] in path or name in (res.get("prompts") or "")):
+            mid_base = mid.split("/")[-1].lower() if mid else ""
+            if mid_base and (mid_base in path_l or mid_base in name_l):
                 metrics = res.get("metrics") or {}
                 if res.get("device"):
                     model_card["modelParameters"]["device"] = res["device"]
@@ -600,7 +609,12 @@ def _vulnerabilities(reports_dir: Path, components: list[dict]) -> list[dict]:
         vulns.append(entry)
 
     # pip-audit native JSON: {"dependencies":[{"name","version","vulns":[{id,fix_versions,description}]}]}
-    audit_files = sorted(reports_dir.glob("pip-audit*.json")) + [reports_dir / "markllm-deps-audit.json"]
+    # Covers the manifest scan (pip-audit.json), the hash-pinned lockfile scan
+    # (lockfile-audit.json — does NOT match the pip-audit* glob), and the MarkLLM
+    # dependency audit. All three share the pip-audit native shape; dedup is by `seen`.
+    audit_files = (sorted(reports_dir.glob("pip-audit*.json"))
+                   + [reports_dir / "lockfile-audit.json",
+                      reports_dir / "markllm-deps-audit.json"])
     for audit_path in audit_files:
         doc = _load_json(audit_path)
         if not isinstance(doc, dict) or not isinstance(doc.get("dependencies"), list):

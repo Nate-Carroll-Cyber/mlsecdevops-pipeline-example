@@ -56,14 +56,14 @@ variables:
   SIGSTORE_PY_VERSION: "4.3.0"        # `pip install sigstore==${SIGSTORE_PY_VERSION}`
   MODELAUDIT_VERSION: "0.2.47"        # `pip install modelaudit[all]==${MODELAUDIT_VERSION}` (was a >= floor)
   GITLEAKS_VERSION: "8.30.1"          # dataset-redact secret scan (no 'v' in tarball name)
-  IMAGE_SEMGREP: "semgrep/semgrep:latest"
+  IMAGE_SEMGREP: "semgrep/semgrep:1.165.0"       # semgrep-sast runs IN this image (no unpinned pip install)
   IMAGE_MINICONDA: "continuumio/miniconda3:26.3.2"
   IMAGE_SYFT: "anchore/syft:v1.45.1-debug"
   IMAGE_GRYPE: "anchore/grype:v0.114.0-debug"
-  IMAGE_TRIVY: "aquasec/trivy:0.71.1"   # pinned (no :latest) — keep in sync with the trivy-db schema
+  IMAGE_TRIVY: "aquasec/trivy:0.71.1"   # pinned to an exact tag — keep in sync with the trivy-db schema
   IMAGE_CYCLONEDX: "cyclonedx/cyclonedx-cli:0.32.0"   # AI BOM schema validation / format conversion
-  IMAGE_GITLEAKS: "zricethezav/gitleaks:latest"       # gitleaks-scan SAST job image
-  IMAGE_CLAMAV: "clamav/clamav:1.4"                   # clamav-scan job — pinned off :latest (patch-floating line)
+  IMAGE_GITLEAKS: "gitleaks/gitleaks:v8.30.1"         # gitleaks-scan SAST job image (pinned; keep in sync with GITLEAKS_VERSION)
+  IMAGE_CLAMAV: "clamav/clamav:1.4"                   # clamav-scan job — pinned to an exact tag (patch-floating line)
   PROMPTFOO_VERSION: "0.121.15"
   # MarkLLM watermark stack — pinned to current, markllm-compatible versions and
   # shared by markllm-deps-audit and markllm-watermark-eval. transformers stays on
@@ -120,9 +120,9 @@ variables:
   IMAGE_REGISTRY_USER: ""           # blank → ${CI_REGISTRY_USER}
   IMAGE_REGISTRY_PASSWORD: ""       # masked; blank → ${CI_REGISTRY_PASSWORD}
   # ── Signed-artifact publish — feeds the Argo CD PreSync verifier (BLOB side) ──
-  # publish-signed-artifacts uploads the signed AI-BOM, its public key, and the
-  # signed dataset (+ model bundle, when present) to the GitLab Generic Package
-  # Registry. The PreSync hook's ARTIFACT_BASE_URL must point at this same
+  # publish-signed-artifacts uploads the cosign-signed AI-BOM trio (.xml/.sig/.pem)
+  # and the signed dataset (+ model bundle, when present) to the GitLab Generic
+  # Package Registry. The PreSync hook's ARTIFACT_BASE_URL must point at this same
   # package/version. Publishing uses CI_JOB_TOKEN — no extra secret needed.
   EVIDENCE_PACKAGE_NAME: "gaips-evidence"
   EVIDENCE_PACKAGE_VERSION: "${CI_COMMIT_REF_SLUG}"   # PreSync ARTIFACT_BASE_URL points here
@@ -364,13 +364,14 @@ vault-secrets:
 
 semgrep-sast:
   stage: sast
+  image: ${IMAGE_SEMGREP}     # pinned semgrep image ships semgrep — no unpinned `pip install`
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["setup"]
+  before_script: []           # semgrep image is self-contained; skip the python venv bootstrap
   script:
-    - pip install semgrep
     - mkdir -p "${REPORTS_DIR}"
     # `semgrep scan` runs a tokenless rules-based scan; `semgrep ci` expects a
     # SEMGREP_APP_TOKEN and the managed-scan workflow.
@@ -2789,6 +2790,12 @@ ai-bom-assemble:
     - setup
     - syft-cyclonedx
     - pip-audit
+    # Vuln sources build_ai_bom.py parses into vulnerabilities[] (#29). GitLab only
+    # downloads artifacts from jobs named here, so without these the lockfile/grype/
+    # trivy parsing is dead and the BOM undercounts known risk.
+    - lockfile-audit
+    - grype-scan
+    - trivy-scan
     - model-fixture-download
     - model-digest
     - model-sign
@@ -2874,7 +2881,10 @@ ai-bom-content-gate:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  needs: ["ai-bom-assemble", "markllm-deps-audit", "grype-scan", "trivy-scan"]
+  # Must pull the IDENTICAL audit surface ai-bom-assemble emitted — the gate runs the
+  # same build_ai_bom._vulnerabilities() over REPORTS_DIR, so any missing producer here
+  # undercounts audit-reported vulns and checks a different surface than the BOM (#29).
+  needs: ["ai-bom-assemble", "pip-audit", "lockfile-audit", "markllm-deps-audit", "grype-scan", "trivy-scan"]
   allow_failure: true
   before_script: []
   cache: {}

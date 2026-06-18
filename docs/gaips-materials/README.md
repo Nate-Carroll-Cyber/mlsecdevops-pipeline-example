@@ -275,7 +275,7 @@ This stage produces the two artifacts the **deploy-time verifiers** consume, clo
 | Job | What it does |
 | --- | --- |
 | `image-sign` | Applies a **Cosign keyless** signature to the already-built workload image (`IMAGE_REF`), using the GitLab `SIGSTORE_ID_TOKEN` (audience `"sigstore"`). The resulting Fulcio certificate's identity matches the gitlab branch of the **Kyverno** `ClusterPolicy` regex, so admission control admits a Pod only when its image carries this signature. Without this job, flipping that Kyverno policy to `Enforce` would block every deploy. Skips when `IMAGE_REF` is unset; `allow_failure: true` (Kyverno is the deploy-time gate). |
-| `publish-signed-artifacts` | Uploads the signed **AI-BOM** (`aibom.cyclonedx.xml`) + its public key, the cosign-signed **dataset** (normalised to `dataset.dat`/`.sig`/`.pem`), and — when present — the **model bundle** to the GitLab **Generic Package Registry** at `${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}`. This is exactly the path the **Argo CD PreSync hook** fetches via `ARTIFACT_BASE_URL` to verify signatures *before* a rollout (AI-BOM via `cyclonedx verify`, dataset via `cosign verify-blob`, model via `model_signing verify`). Uses `CI_JOB_TOKEN` — no extra secret. Emits `artifacts-manifest.txt` recording what was published. |
+| `publish-signed-artifacts` | Uploads the cosign-signed **AI-BOM** trio (`aibom.cyclonedx.xml` + detached `.sig` + Fulcio `.pem`), the cosign-signed **dataset** (normalised to `dataset.dat`/`.sig`/`.pem`), and — when present — the **model bundle** to the GitLab **Generic Package Registry** at `${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}`. This is exactly the path the **Argo CD PreSync hook** fetches via `ARTIFACT_BASE_URL` to verify signatures *before* a rollout (AI-BOM and dataset via `cosign verify-blob`, model via `model_signing verify`). Uses `CI_JOB_TOKEN` — no extra secret. Emits `artifacts-manifest.txt` recording what was published. |
 
 > **Deploy-time verification (in-cluster, outside CI).** The loop is closed by two manifests under `deployment/`: `kubernetes/policies/kyverno-verify-image-signatures.yaml` (verifies the **image** signature at admission — `Audit` by default; flip to `Enforce` once `image-sign` has run for the deployed digest) and `argocd/verify-signatures-presync-hook.yaml` (a PreSync Job that verifies the **AI-BOM / dataset / model** signatures and aborts the sync on failure). See `deployment/vault/sample-secret-map.md` for the (secretless) wiring.
 
@@ -301,3 +301,109 @@ Terminal stage — runs dead-last so it can seal the **entire** run (including t
 | `sign-evidence` | Builds a comprehensive run-evidence manifest (`sign-evidence.json`): rich pipeline metadata (id/url/source/commit/ref/protected/triggerer/runner), the approved-vs-recorded model identity with a `digest_match` check **plus a `model.verified` + `verified_reason` field** sourced from `signature-verification` #19 (Fix #32a — the manifest now records whether the recorded digest was actually *verified* against a signature, not merely notarized; honestly `false`/deferred until #19 runs on a protected ref), and a **sha256 hash-manifest of every report, SBOM, and evidence artifact across the whole run** (it `needs:` all artifact-producing jobs in stages 2–10, now including `signature-verification`). Recorded model paths are repo-relative (Fix #40-F4). Signs it with `cosign sign-blob` using the GitLab `SIGSTORE_ID_TOKEN` and **self-verifies** the signature, producing a `.sig` + `.pem` — one transparency-logged signature that binds the integrity of the entire run's evidence set. (Renamed from `model-signing-evidence`, which ran mid-pipeline in the `evidence` stage and over only the model digest; the model artifact itself is signed by `model-sign`.) |
 
 > **Design note — why `sign-evidence` is terminal, and what that trades off.** Placing it last is what lets its hash-manifest cover the **entire** run, including the signed AI-BOM and the `deploy-prep` outputs. The consequence is that `publish-signed-artifacts` runs *before* it, so the run-evidence seal is **not** distributed to the deploy gate this run — it is a retained 90-day audit artifact (the deploy-facing attestation remains the signed **AI-BOM**, which `publish-signed-artifacts` does push). If you'd instead want the seal itself published to the deploy gate, that's the alternative wiring — but it'd force `sign-evidence` **before** publish, which reintroduces the blind spot (it could no longer capture `deploy-prep`). You can't have both in one job; getting both would require a small two-part split (seal-and-publish the core artifacts mid-pipeline, then a terminal full-run hash).
+
+## Evidence & Report Artifacts (per stage / job)
+
+The authoritative map of **what each job emits** — every GitLab `artifacts:` path and its filetype, with retention (`expire_in`). Paths are shown relative to `${CI_PROJECT_DIR}`; the four output roots are `reports/` (machine-readable scan output), `sbom/` (bills of materials), `evidence/` (signed/retained provenance), and `models/` (fixture bytes + signatures). A trailing `/` denotes a directory artifact. "GitLab report" marks an `artifacts:reports:` entry that also feeds a native GitLab feature (Security Dashboard, MR widget, dotenv inheritance). Jobs with no row under a stage (e.g. `model-signing-install`, `artifact-signing-gate`, `ai-bom-content-gate`, `image-sign`, `data-drift-baseline-commit`) are pure gates/installers and publish no artifacts.
+
+### Stage 1 — Setup
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `setup` | `evidence/pipeline.env` (.env), `evidence/version-info.json` (.json) | 1 day |
+| `model-manifest` | `model-baseline.env` (.env — GitLab **dotenv** report) | 90 days |
+| `vault-secrets` | `.vault-env` (.env — GitLab **dotenv** report) | 30 min |
+
+### Stage 2 — SAST
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `semgrep-sast` | `reports/semgrep.json` (.json — GitLab **sast** report) | 7 days |
+| `secret-detection` | `gl-secret-detection-report.json` (.json — GitLab **secret_detection** report), `reports/secret-detection.json` (.json) | 7 days |
+| `gitleaks-scan` | `reports/gitleaks.json` (.json), `reports/gitleaks.log` (.log) | 7 days |
+| `pip-audit` | `reports/pip-audit.json` (.json), `reports/pip-audit-cyclonedx.json` (.json — CycloneDX) | 7 days |
+| `lockfile-audit` | `reports/requirements-ci.txt` (.txt — hash-pinned lock), `reports/lockfile-audit.json` (.json), `reports/lockfile-audit-cyclonedx.json` (.json — CycloneDX) | 7 days |
+| `markllm-deps-audit` † | `reports/markllm-deps-audit.json` (.json) | 7 days |
+| `pkg-integrity` | `reports/pkg-integrity.env` (.env), `reports/pkg-integrity-manifest.json` (.json), `requirements.hashed.txt` (.txt) | 7 days |
+| `conda-pkg-verify` | `reports/conda/` (dir — env manifest) | 7 days |
+
+† `markllm-deps-audit` runs in the **sast** stage (it must finish before the AI-eval `markllm-watermark-eval`), even though the Stage 6 walkthrough discusses it alongside the other MarkLLM job.
+
+### Stage 3 — SBOM
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `syft-cyclonedx` | `sbom/sbom.cyclonedx.json` (.json), `sbom/sbom.cyclonedx.xml` (.xml) | 30 days |
+| `syft-spdx` | `sbom/sbom.spdx.json` (.json), `sbom/sbom.spdx` (tag-value) | 30 days |
+| `dvc-verify` | `reports/dvc-status.json` (.json) | 7 days |
+
+### Stage 4 — Vulnerability Scan
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `grype-scan` | `reports/grype.json` (.json) | 7 days |
+| `trivy-scan` | `reports/trivy-fs.json` (.json), `reports/trivy-image.json` (.json — GitLab **container_scanning** report) | 7 days |
+
+### Stage 5 — Model Integrity
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `model-fixture-download` | `models/` (dir — fixture bytes), `evidence/model-fixture-download.json` (.json) | 1 day |
+| `model-digest` | `evidence/model-digests.txt` (.txt — SHA-256 list) | 30 days |
+| `model-sign` | `models/**/model.sig` (.sig — Sigstore bundle per model dir) | 30 days |
+| `signature-verification` | `evidence/signature-verification.txt` (.txt), `evidence/signature-verification.jsonl` (.jsonl) | 90 days |
+| `tamper-verification` | `evidence/integrity.env` (.env), `evidence/model-digests-baseline.txt` (.txt) | 90 days |
+| `modelscan` | `reports/modelscan.json` (.json), `reports/modelscan.log` (.log) | 7 days |
+| `modelaudit-scan` | `reports/modelaudit.json` (.json), `reports/modelaudit-summary.json` (.json), `reports/modelaudit.log` (.log) | 7 days |
+| `modelfile-audit` | `reports/modelfile-audit.json` (.json), `evidence/modelfile-digests.txt` (.txt) | 7 days |
+| `clamav-scan` | `reports/clamav-model.json` (.json), `reports/clamav-model.txt` (.txt), `reports/clamav-model.log` (.log) | 7 days |
+| `hf-artifact-scan` | `reports/hf-scan/` (dir — per-model ClamAV + ModelScan) | 7 days |
+| `dataset-download` | `evidence/dataset-input/` (dir), `evidence/dataset-digest.txt` (.txt), `reports/dataset-download.json` (.json) | 1 day |
+| `dataset-scan` | `reports/dataset-scan.json` (.json), `reports/dataset-clamav.json` (.json), `reports/dataset-clamav.log` (.log), `reports/clamav-dataset.txt` (.txt) | 7 days |
+| `dataset-redact` | `reports/dataset-redact.json` (.json — counts only, never raw values), `evidence/dataset-input/` (dir — redacted in place) | 7 days |
+| `eval-dataset-validate` | `reports/eval-dataset-validation.json` (.json) | 7 days |
+| `dataset-sign` | `evidence/dataset-input/` (dir — incl. `dataset.sig`/`dataset.pem`) | 90 days |
+| `great-expectations-validate` | `reports/great-expectations.json` (.json), `evidence/great-expectations/` (dir) | 30 days |
+| `ydata-profile` | `reports/ydata-profile.json` (.json), `evidence/ydata-profile/` (dir) | 30 days |
+| `sigstore-identity-discover` | `.sigstore-identity-discover/probe/model.sig` (.sig — one-shot identity probe) | 1 hour |
+
+### Stage 6 — AI Evaluation
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `markllm-watermark-eval` | `reports/markllm-results.json` (.json — generate→detect result + metrics) | 7 days |
+
+### Stage 7 — Guardrail / Drift
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `evidently-drift` | `reports/evidently-drift.json` (.json), `reports/dataset-reference.seed.jsonl` (.jsonl — first-run seed), `evidence/evidently/` (dir — HTML/JSON report) | 30 days |
+
+### Stage 8 — Evidence
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `evidence-summary` | `evidence/evidence-summary.md` (.md — human-readable roll-up), `evidence/model-baseline.json` (.json — pinned identity), `evidence/eval-baseline.seed.json` (.json — when seeded) | 90 days |
+
+### Stage 9 — AI BOM
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `ai-bom-assemble` | `sbom/aibom.cyclonedx.json` (.json — CycloneDX 1.6 AI BOM) | 90 days |
+| `ai-bom-validate` | `sbom/aibom.cyclonedx.xml` (.xml — schema-validated, the form `ai-bom-sign` signs) | 90 days |
+| `ai-bom-sign` | `sbom/aibom.cyclonedx.xml` (.xml), `sbom/aibom.cyclonedx.sig` (.sig — detached cosign), `sbom/aibom.cyclonedx.pem` (.pem — Fulcio cert) | 90 days |
+| `dependency-track-upload` | `reports/dependency-track.json` (.json — findings/violations + dashboard URLs for the SBOM **and** AI-BOM child) | 30 days |
+
+### Stage 10 — Deploy Prep
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `publish-signed-artifacts` | `evidence/publish/artifacts-manifest.txt` (.txt — what was published), `evidence/publish/publish-result.json` (.json) | 90 days |
+| `metrics-normalize` | `reports/operational-metrics.json` (.json) | 90 days |
+| `pages` | `public/` (dir — GitLab Pages site) | 90 days |
+
+### Stage 11 — Attest
+
+| Job | Artifacts (file — type) | Retention |
+| --- | --- | --- |
+| `sign-evidence` | `evidence/sign-evidence.json` (.json — whole-run hash-manifest), `evidence/sign-evidence.sig` (.sig — detached cosign), `evidence/sign-evidence.pem` (.pem — Fulcio cert) | 90 days |

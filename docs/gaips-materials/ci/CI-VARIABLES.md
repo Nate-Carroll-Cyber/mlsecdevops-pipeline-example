@@ -148,11 +148,11 @@ match an internal mirror or bump a tool.
 | `TRANSFORMERS_VERSION` | `4.57.6` | Pinned `transformers` for the MarkLLM stack — held on the **4.x** line because markllm 0.1.5 predates the transformers 5.x major release. |
 | `MARKLLM_MODEL_ID` | `""` (derived) | Hugging Face **transformers** repo id for `markllm-watermark-eval`. Leave empty and the job derives it from `MODEL_FIXTURE_URL` at runtime — the HF GGUF repo (e.g. `Qwen/Qwen2.5-1.5B-Instruct-GGUF`) is mapped to its transformers repo (`Qwen/Qwen2.5-1.5B-Instruct`), since `AutoModelForCausalLM` can't load GGUF. Set explicitly to override. The job fails only if no id can be resolved (empty and no `MODEL_FIXTURE_URL`). |
 | `MARKLLM_MODEL_REVISION` | `""` | Optional pinned branch, tag, or commit for the model loaded by MarkLLM. Recommended for reproducible evidence. |
-| `IMAGE_SEMGREP` | `semgrep/semgrep:v1.165.0` | SAST image. |
+| `IMAGE_SEMGREP` | `semgrep/semgrep:1.165.0` | `semgrep-sast` image — the job runs in it (no `pip install semgrep`). |
 | `IMAGE_MINICONDA` | `continuumio/miniconda3:26.3.2` | conda verify image. |
-| `IMAGE_SYFT` | `anchore/syft:v1.45.1` | SBOM image. |
-| `IMAGE_GRYPE` | `anchore/grype:v0.114.0` | Vuln-scan image. |
-| `IMAGE_TRIVY` | `aquasec/trivy:v0.71.0` | FS/container scan image. |
+| `IMAGE_SYFT` | `anchore/syft:v1.45.1-debug` | SBOM image (`-debug` variant ships a shell for the wrapper scripts). |
+| `IMAGE_GRYPE` | `anchore/grype:v0.114.0-debug` | Vuln-scan image (`-debug` variant ships a shell). |
+| `IMAGE_TRIVY` | `aquasec/trivy:0.71.1` | FS/container scan image (no `v` prefix; keep in sync with the trivy-db schema). |
 | `IMAGE_CYCLONEDX` | `cyclonedx/cyclonedx-cli:0.32.0` | AI-BOM validate/sign image. |
 | `IMAGE_GITLEAKS` | `gitleaks/gitleaks:v8.30.1` | `gitleaks-scan` SAST image (matches the `GITLEAKS_VERSION` binary). |
 | `IMAGE_CLAMAV` | `clamav/clamav:1.4` | `clamav-scan` image (patch-floating line; append a digest to hard-pin). |

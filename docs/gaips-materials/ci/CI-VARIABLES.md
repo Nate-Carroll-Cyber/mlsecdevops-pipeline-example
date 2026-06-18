@@ -85,7 +85,7 @@ verification identifiers, not secrets; leave variable expansion off.
 
 | Variable | Source | Masked | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `DT_API_URL` | vault/you | No | `""` | Dependency-Track URL (no trailing `/api`). Blank → `dependency-track-upload` skips. |
+| `DT_API_URL` | vault/you | No | `""` | Dependency-Track URL (no trailing `/api`). Blank → `dependency-track-upload` skips. Wiring runbook + turnkey instance: [`deployment/dependency-track/`](../deployment/dependency-track/) (Fix #34). |
 | `DT_API_KEY` | vault/you | Yes | `""` | Dependency-Track API key. |
 | `DT_FAIL_ON` | default | No | `FAIL` | `violationState`(s) that fail the DT policy gate (comma list). |
 | `DVC_REMOTE_URL` | you | No | `""` | `s3://`/`gs://`/`azure://`/`ssh://` remote for `dvc-verify` to pull pinned data/models. Blank → reports status only. |

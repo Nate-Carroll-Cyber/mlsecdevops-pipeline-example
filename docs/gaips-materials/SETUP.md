@@ -112,7 +112,9 @@ vault kv put secret/gaips/ci/registry-token        value="<registry_token_or_bla
 ### A6. (Optional) add the secrets Terraform does NOT seed
 `dt-api-url` and `dt-api-key` are read by `vault-secrets` but not created by
 Terraform (the job just logs a WARN and continues). Add them only if you use the
-Dependency-Track integration (Part D3):
+Dependency-Track integration (Part D3) — to stand up the instance these point at,
+see the runbook in [`deployment/dependency-track/`](deployment/dependency-track/)
+(docker-compose + the exact API-key permissions + a gating policy):
 ```bash
 vault kv put secret/gaips/ci/dt-api-url value="https://dtrack.<your-host>"
 vault kv put secret/gaips/ci/dt-api-key value="<dt-api-key>"
@@ -245,7 +247,7 @@ Each is independent; set the variable(s) and the corresponding job activates.
 | --- | --- | --- | --- |
 | D1 | **Dataset scan/redact/sign** | Optional: `DATASET_PACKAGE_NAME`, `DATASET_FILENAME` (+ `DATASET_EXPECTED_SHA256`) | Downloads from the Generic Package Registry when configured; otherwise uses the committed CI dataset fixture. Then AV+structural scan → secret/PII redaction → schema validate → cosign sign. |
 | D2 | **HF model scan** | `HF_MODEL_IDS="org/model-a,org/model-b"` (+ `HF_TOKEN` for gated) | ClamAV + ModelScan each HF repo. |
-| D3 | **Dependency-Track** | `DT_API_URL`, masked `DT_API_KEY` (+ `DT_FAIL_ON`, default `FAIL`) | Uploads SBOM + AI-BOM for continuous CVE/policy analysis; **hard policy gate**. |
+| D3 | **Dependency-Track** | `DT_API_URL`, masked `DT_API_KEY` (+ `DT_FAIL_ON`, default `FAIL`) | Uploads SBOM + AI-BOM for continuous CVE/policy analysis; **hard policy gate**. Turnkey instance + step-by-step wiring runbook: [`deployment/dependency-track/`](deployment/dependency-track/) (Fix #34). Ingests the structured `vulnerabilities[]` the AI-BOM now emits (Fix #29). |
 | D4 | **AI-BOM signing** | _none_ — keyless via GitLab `SIGSTORE_ID_TOKEN` (Fix #25) | `ai-bom-sign` signs the AI-BOM with cosign keyless (Fulcio + Rekor), like the model/dataset. No signing-key variable to set. |
 | D5 | **DVC lineage** | `DVC_REMOTE_URL` (+ `.dvc/` in repo) | Verifies workspace vs pinned dataset/model versions. |
 

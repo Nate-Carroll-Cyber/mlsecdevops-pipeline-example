@@ -969,7 +969,12 @@ model-digest:
         while IFS= read -r -d '' f; do
           MODEL_FOUND=1
           sha256=$(sha256sum "$f" | awk '{print $1}')
-          echo "${f}  sha256:${sha256}" | tee -a "${EVIDENCE_DIR}/model-digests.txt"
+          # Fix #32 (root): record REPO-RELATIVE paths, not the absolute /builds/… find
+          # path. The recorded string flows verbatim into sign-evidence recorded_digests
+          # (#40-F4) and the AI-BOM artifact.path / bom-ref (#41-F5); a relative path
+          # clears both at the source. Strip the project dir if $f is under it.
+          rel="${f#${CI_PROJECT_DIR}/}"
+          echo "${rel}  sha256:${sha256}" | tee -a "${EVIDENCE_DIR}/model-digests.txt"
         done < <(find "${MODEL_DIR}" -type f -name "*.${ext}" -print0 2>/dev/null)
       done
       if [ "${MODEL_FOUND}" -eq 0 ]; then
@@ -2575,6 +2580,7 @@ sign-evidence:
     - tamper-verification
     - markllm-watermark-eval
     - artifact-signing-gate
+    - signature-verification   # Fix #32a: pull the #19 verdict so the bundle records verified, not just notarized
     - evidence-summary
     # ai-bom stage — captures the signed AI-BOM (the keystone an auditor reads)
     - ai-bom-assemble
@@ -2656,12 +2662,43 @@ sign-evidence:
           for line in digests_txt.read_text().splitlines():
               if "sha256:" in line:
                   fpath, _, dg = line.rpartition("sha256:")
-                  recorded.append({"path": fpath.strip(), "sha256": dg.strip()})
+                  fp = fpath.strip()
+                  # Fix #40-F4 (defensive to the #17 root fix): never record an absolute
+                  # /builds/… path; model-digest now writes repo-relative.
+                  if os.path.isabs(fp):
+                      fp = os.path.relpath(fp, project_dir)
+                  recorded.append({"path": fp, "sha256": dg.strip()})
       model["recorded_digests"] = recorded
       model["digest_match"] = bool(
           model.get("approved_sha256")
           and any(r["sha256"] == model["approved_sha256"] for r in recorded)
       )
+
+      # Fix #32a — record whether the recorded digest was actually VERIFIED against a
+      # signature (signature-verification #19), not merely notarized. #19 writes a
+      # deferred marker on unprotected refs; mark the bundle unverified + reason so it
+      # is self-declaring rather than implying assurance it does not have.
+      verified, vreason = "unknown", "signature-verification did not run"
+      sigver = evidence_dir / "signature-verification.jsonl"
+      if sigver.exists():
+          recs = []
+          for ln in sigver.read_text().splitlines():
+              ln = ln.strip()
+              if ln:
+                  try:
+                      recs.append(json.loads(ln))
+                  except Exception:
+                      pass
+          if any(r.get("skipped") for r in recs):
+              verified = "false"
+              vreason = next((r.get("reason") for r in recs if r.get("skipped")), "deferred")
+          elif any(r.get("subjects") and all(s.get("match") for s in r["subjects"]) for r in recs):
+              verified, vreason = "true", None
+          elif recs:
+              verified, vreason = "false", "no signed subject matched the on-disk model"
+      model["verified"] = verified
+      if vreason:
+          model["verified_reason"] = vreason
 
       bundle = {
           "schema_version": "2.0",
@@ -2824,6 +2861,28 @@ ai-bom-validate:
     paths:
       - "${SBOM_DIR}/aibom.cyclonedx.xml"
     expire_in: 90 days
+
+# Fix #31: ai-bom-validate proves the BOM is well-FORMED; this asserts it is
+# SUBSTANTIVE — vulnerabilities[] populated when the audit found vulns (#29), every
+# model signed + verified (#32). The validate image is the .NET cyclonedx-cli (no
+# Python), so the content checks run here in python:3.11-slim instead. Advisory
+# (allow_failure: true) per the Fix #0/#23 teeth-last posture; flip --enforce once
+# the pipeline is otherwise green.
+ai-bom-content-gate:
+  stage: ai-bom
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  needs: ["ai-bom-assemble", "markllm-deps-audit", "grype-scan", "trivy-scan"]
+  allow_failure: true
+  before_script: []
+  cache: {}
+  script:
+    - |
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/assert_ai_bom_content.py" \
+        --bom "${SBOM_DIR}/aibom.cyclonedx.json" \
+        --reports "${REPORTS_DIR}"
 
 ai-bom-sign:
   stage: ai-bom

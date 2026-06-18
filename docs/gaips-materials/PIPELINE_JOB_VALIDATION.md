@@ -8,6 +8,19 @@
 > current `.gitlab-ci.yml`. For the authoritative current status and the resume point, see
 > [`SESSION_HANDOFF.md`](../../SESSION_HANDOFF.md). The deferred legs **#30/#31/#32** still await a
 > billable re-run for run evidence.
+>
+> **➕ PROMOTED + ✅ IMPLEMENTED (session 4): six substantive recommendations from the #39–#45 reviews below
+> lived ONLY in these per-job blocks and were never in the numbered fix registry — so the apply-the-fixes pass
+> (which works off that registry) would have missed them. They were promoted to registry items #29–#34 in
+> `SESSION_HANDOFF.md` and then IMPLEMENTED this same session (code-applied + fixture-validated; #34 infra-ready;
+> teeth on #31/#33 deferred). The per-job verdicts below are the PRE-FIX audit record — do NOT re-promote;
+> see `SESSION_HANDOFF.md` STATUS + `PIPELINE_FIX_PLAN_29-34.md` for what landed:**
+> - **#29** ← `ai-bom-assemble` #41 F2 — no CycloneDX `vulnerabilities[]` (11 known vulns recorded as counts only).
+> - **#30** ← `ai-bom-assemble` #41 F1/F6 (+ #42 F2) — `software=97` fuses two dep universes; hollow eval / empty `modelCard`.
+> - **#31** ← `ai-bom-validate` #42 F1 — validates form, not substance (every #41 content gap passes the schema gate).
+> - **#32** ← `sign-evidence`/`model-signing-evidence` #40 F1 (notarizes ≠ verifies) + #41 F4 (`signed` without `verified`); incl. abs-path #40 F4/#41 F5 (root: `model-digest` #17 / Fix #14).
+> - **#33** ← `evidence-summary` #39 F1–F3 — presence-only gate (checks files exist, never their verdicts).
+> - **#34** ← `dependency-track-upload` #45 — enabler: wire DT so the best-built policy gate actually runs.
 
 Walkthrough of the main (static) pipeline run on commit `6a48e525` (pipeline `2606572181`),
 validating that each **successful** job performs real work (not exit-0 theater) and

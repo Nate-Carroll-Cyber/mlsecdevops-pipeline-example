@@ -6,10 +6,25 @@
 
 ---
 
-# ▶️ STATUS (2026-06-18, session 4): ALL OPEN REQUIRED-FIXES APPLIED + validated + committed locally (UNPUSHED). RESUME AT: one billable re-run to validate the deferred legs + this work.
+# ▶️ STATUS (2026-06-18, session 4): #0–#28 APPLIED; #29–#34 PROMOTED then APPLIED (code) + fixture-validated, except #34 (infra-ready, not wired). RESUME AT: one billable re-run to validate all of it + the deferred legs.
 
-> **Session 4 = the fix-application session.** The walkthrough was complete; this session **applied every
-> remaining open fix** in one sweep and committed it. **Nothing is pushed** (cost deferred per user).
+> **Registry now = 35 items (#0–#34): 34 code-applied, 1 infra-ready (#34).** #0–#28 applied earlier this
+> session; **#29–#34** were promoted from per-job blocks and then implemented this turn:
+> - **#29** ✅ CycloneDX `vulnerabilities[]` from pip-audit/grype/trivy with `affects` → component bom-refs.
+> - **#30a** ✅ software count split (pipeline vs markllm) + source labels; **#30b** ✅ markllm eval folded into modelCard.
+> - **#31** ✅ new advisory `ai-bom-content-gate` (substance assertions); **#33** ✅ evidence-summary reads verdicts (WARN-first).
+> - **#32** ✅ abs-path root fixed at `model-digest` L972 (clears #40-F4 + #41-F5); `model.verified`/`verified_reason`
+>   recorded in `build_ai_bom` + `sign-evidence` (honest `false`/deferred until #19 on a protected ref).
+> - **#34** 🟡 client was already complete; added compose + runbook. Needs a DT instance + CI vars + re-run.
+>
+> **Validated offline:** all 3 changed/new Python scripts compile; `.gitlab-ci.yml` parses (`!reference` tag);
+> end-to-end fixture run asserts #29 vulns + affects, #30a/b counts + modelCard, #32 relative paths + verified
+> state, #31 advisory-pass-with-warnings (+ `--enforce` fails on empty vulns[]), #33 WARN-vs-`--enforce` gating.
+> **Teeth deferred** on #31/#33 (advisory until the pipeline is green, per Fix #0/#23). Plan +
+> per-fix detail: [`docs/gaips-materials/PIPELINE_FIX_PLAN_29-34.md`](docs/gaips-materials/PIPELINE_FIX_PLAN_29-34.md).
+>
+> **Session 4 = the fix-application session (#0–#28).** The walkthrough was complete; this session **applied every
+> then-open fix** in one sweep and committed it. **Nothing is pushed** (cost deferred per user).
 >
 > **Git state (newest first, all UNPUSHED — branch `gaips-pipeline-required-fixes`, ahead of remote by 4):**
 > ```
@@ -727,6 +742,86 @@ problem · concrete fix. Checkboxes so the next session can track progress.
     emoji) is a **transport/paste artifact**. The renderer is correctly UTF-8 (source bytes verified `c2 b7` for `·`,
     `write_text(..., encoding="utf-8")` at `:264`, `<meta charset="utf-8">`). If the **live** Pages site is garbled,
     investigate GitLab Pages' served `Content-Type`/charset — not this script. (Documented in `PIPELINE_JOB_VALIDATION.md` #49.)
+
+### Promoted from per-job blocks (session 4, 2026-06-18 — #39–#45 reviews; were doc-only, never in this registry)
+
+> These six were substantive recommendations from the #39–#42 / #45 walkthrough that lived **only** in
+> `PIPELINE_JOB_VALIDATION.md` per-job blocks, so the apply-the-fixes pass (which works off THIS list) would
+> have silently missed them. All **OPEN**. Two cross-cutting roots are noted inline rather than given their own
+> slots: **absolute paths** (#40-F4 + #41-F5 → one upstream fix in `model-digest` #17 / Fix #14: emit
+> repo-relative paths) and **"signed ≠ verified"** (#41-F4 + #40-F1 → both trace to `signature-verification`
+> #19 deferring on unprotected branches). NB: bare `#NN` = job number (validation doc); `Fix #NN` / the bold
+> ordinal = this registry.
+>
+> **📋 Implementation plan:** code-grounded fix plan for all six (files, exact lines, change sketches,
+> sequence, offline-vs-re-run split) → [`docs/gaips-materials/PIPELINE_FIX_PLAN_29-34.md`](docs/gaips-materials/PIPELINE_FIX_PLAN_29-34.md).
+
+- [x] ✅ **APPLIED (s4): `build_ai_bom._vulnerabilities()` emits CycloneDX `vulnerabilities[]` from pip-audit
+  (`markllm-deps-audit` + per-job `pip-audit-*`) / grype / trivy, deduped, with `affects[].ref` → component
+  bom-refs (software comps now get stable bom-refs). `bom.counts.vulnerabilities` added. Fixture-verified.**
+  🛑 **29. `ai-bom-assemble` #41 — AI-BOM emits NO `vulnerabilities[]` (#41-F2; Tier 2 — highest of the
+  promoted set).** The BOM records 11 known vulns (2 RCE-class) only as **property counts** and emits no
+  CycloneDX `vulnerabilities` array — so Dependency-Track ingests **nothing structured** and the policy gate
+  has nothing to evaluate. **Fix:** emit a real CycloneDX `vulnerabilities[]` from the audit data already in
+  the bundle (`markllm-deps-audit` #34 / `pip-audit` / grype / trivy), each entry with `id`, `source`,
+  `ratings`, `affects`. (Higher real-world impact than several Tier-3/4 items above; pairs with **#34** — the
+  array is unenforced until DT ingests it.) (Documented in `PIPELINE_JOB_VALIDATION.md` #41 F2.)
+- [x] ✅ **APPLIED (s4): 30a — syft comps tagged `gaips:source=syft-sbom`; flat `bom.counts.software` split into
+  `…software.pipeline` + `…software.markllm`. 30b — `markllm-results.json` folded into the modelCard
+  (`quantitativeAnalysis.performanceMetrics` + `modelParameters`). Fixture-verified. ⚠️ 30a's pipeline closure is
+  only as deep as syft #10 — see #35.** **30. `ai-bom-assemble` #41 — BOM content completeness (#41-F1 + #41-F6 / #42-F2; Tier 3).**
+  - **30a — `software=97` conflates two disjoint dependency universes (#41-F1).** The flat count fuses the **3
+    main-pipeline pins** with the **~94-pkg MarkLLM stack** into one number, misrepresenting the real closure.
+    **Fix:** separate/scope/label the two component sets so the count reflects the actual deployed surface.
+    **Depends on** fixing SBOM depth in `syft-cyclonedx` #10 (today shallow/top-level only — see #10's ⚠️).
+  - **30b — hollow eval section / empty `modelCard` (#41-F6, #42-F2).** The eval block and
+    `modelCard.modelParameters` are empty even though markllm genuinely ran. **Fix:** fold
+    `markllm-results.json` + `modelParameters` into the assembly so the BOM carries the eval evidence it
+    claims. (Documented in `PIPELINE_JOB_VALIDATION.md` #41 F1/F6, #42 F2.)
+- [x] ✅ **APPLIED (s4, advisory): new `assert_ai_bom_content.py` + `ai-bom-content-gate` job (python:3.11-slim,
+  `allow_failure:true`). Asserts audit-found-vulns ⇒ BOM `vulnerabilities[]` non-empty, and models signed
+  (+verified WARN until #19). `--enforce` flips to a hard gate; teeth deferred per Fix #0/#23. Fixture-verified
+  (advisory pass-with-warnings; `--enforce` fails on empty vulns[]).** **31. `ai-bom-validate` #42 — validates FORM, not SUBSTANCE (#42-F1; Tier 2).** "BOM validated" today
+  means only **well-formed / schema-conformant**, so every #29/#30 content gap passes the gate cleanly. **Fix:**
+  add **content assertions** — fail when an audit found vulns but the BOM's `vulnerabilities[]` is empty (ties
+  to #29), and assert **signed + verified** (ties to #32) — **or** honestly relabel the gate
+  "schema-conformance only" so it isn't read as a content guarantee. (Documented in
+  `PIPELINE_JOB_VALIDATION.md` #42 F1.)
+- [x] ✅ **APPLIED (s4): root abs-path fixed at `model-digest` L972 (repo-relative `${f#${CI_PROJECT_DIR}/}`) +
+  defensive `relpath` in `build_ai_bom` & `sign-evidence` (clears #41-F5 + #40-F4). 32a — `sign-evidence` now
+  `needs: signature-verification` and records `model.verified` + `verified_reason` from the #19 jsonl. 32b —
+  `build_ai_bom` emits `gaips:model.verified` (+ `.reason`) beside `signed`. Both honestly report `false`/deferred
+  until #19 runs on a protected ref. Fixture-verified.** **32. "signed ≠ verified" — notarization without verification (#40-F1 + #41-F4; Tier 2). Cross-cutting
+  root: `signature-verification` #19 deferring on unprotected branches.**
+  - **32a — `sign-evidence` #40 notarizes, doesn't verify (#40-F1).** It signs whatever digest `model-digest`
+    #17 recorded; there is no bound verify step. **Fix:** bind it to a real `cosign verify-blob` (requires #19
+    to NOT defer on this branch — Fix #4/#6 territory), **or** stamp `unverified:true` in the evidence bundle so
+    a notarized-but-unverified digest is self-declaring.
+  - **32b — `ai-bom-assemble` #41 signs without a verified marker (#41-F4).** **Fix:** add a
+    `gaips:model.verified` property set from the actual verify result (false/absent until #19 verifies), so the
+    BOM distinguishes "a signature exists" from "we checked it."
+  - ℹ️ **Also under `sign-evidence` #40 — absolute path (#40-F4; Tier 5):** `recorded_digests` still carries an
+    absolute `/builds/…` path. Root-caused to `model-digest` #17 emitting absolute paths (same root as #41-F5);
+    **one upstream repo-relative fix in #17 (Fix #14) clears both** — track here, fix there. (Documented in
+    `PIPELINE_JOB_VALIDATION.md` #40 F1/F4, #41 F4/F5.)
+- [x] ✅ **APPLIED (s4, WARN-first): `write_ci_evidence_summary.py` now reads VERDICTS (3-state pass/fail/inert
+  per artifact: semgrep ERROR-sev, markllm status, modelaudit critical, GX success, evidently drift
+  (polarity-aware), DT violations). Summary table gains Verdict/Detail columns; required-missing still hard-fails;
+  required-FAIL warns by default, `--enforce-verdicts` makes it block (teeth-last). Fixture-verified.** **33. `evidence-summary` #39 — PRESENCE-only gate (#39-F1, +F2/F3; Tier 2).** The `evidence` gate checks
+  only that files **exist**, never their **verdicts** — so a bundle of failing/empty evidence passes green.
+  **Fix:** make it **read the verdicts** (3-state: pass / fail / inert), failing closed on a real fail, **or**
+  honestly relabel it a **bundle-completeness** check (not an evidence-validity gate); also address F2/F3
+  (thin-set / 3-state handling). (Documented in `PIPELINE_JOB_VALIDATION.md` #39 F1–F3.)
+- [~] 🟡 **INFRA-READY (s4), not wired: client code was already complete; added a turnkey
+  `deployment/dependency-track/docker-compose.yml` + a step-by-step runbook
+  (`deployment/dependency-track/README.md`); `DT_API_URL`/`DT_API_KEY`/`DT_FAIL_ON` already in CI-VARIABLES §4.
+  REMAINING (user/env): stand up the instance, mint the API key, set the two CI vars, define a FAIL policy, and
+  validate on the billable re-run. This is what gives #29 teeth.** **34. `dependency-track-upload` #45 — wire Dependency-Track (ENABLER, not a bug; Tier 1 enabler).** Not a
+  defect in the job — it's the enabler that makes the pipeline's **best-built policy gate actually run**. With
+  DT wired, the structured `vulnerabilities[]` from #29 gets ingested and the DT policy gate evaluates it.
+  **Fix:** stand up / configure the DT endpoint + API key and confirm the upload + policy evaluation
+  round-trips. (Pairs with **#29** — DT is inert without structured vulns; #29 is unenforced without DT.)
+  (Documented in `PIPELINE_JOB_VALIDATION.md` #45.)
 
 > After Fix #1 (+ #5/#16 to the clamav jobs), **re-run the pipeline** so the dataset chain populates, then
 > resume the walkthrough at #30 to validate `great-expectations-validate` / `ydata-profile` / `dataset-sign`

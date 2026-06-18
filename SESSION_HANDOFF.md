@@ -6,26 +6,251 @@
 
 ---
 
-# ▶️ STATUS (2026-06-17): 22 FIXES APPLIED + PUSHED + ITERATED — resume DOCUMENTING #29–#49
+# ▶️ STATUS (2026-06-18, session 3): #46 image-sign documented (⚠️ inert skip, by design — no container image built); RESUME AT #47 publish-signed-artifacts (deploy-prep 1/4 done)
 
-**Where things stand:** the 22-item REQUIRED-FIXES list below is fully applied (all boxes checked) AND
-pushed to branch `gaips-pipeline-required-fixes` on `gitlab`. We then ran the pipeline on the branch and
-fixed every failure it surfaced (see "POST-PUSH FIX LOG" below) — each red was a real latent defect the old
-skip-green masked, exactly as expected. **The whole point now: STOP fixing-and-pushing and RETURN TO THE
-WALKTHROUGH — document jobs #29–#49** against the branch's run evidence (the dataset chain finally executes,
-so #29–#33 have real data for the first time).
+> **#46 `image-sign` — DONE (⚠️ INERT, by design).** `IMAGE_REF` unset → clean skip `exit 0`, green. Signs the deployable
+> **container image** (`ghcr.io/…/gaips-rag-app@sha256:…`) — NOT the model (#18) or BOM (#43); verified at deploy by
+> **Kyverno** admission. This static pipeline builds no container image, so the skip is architecturally correct (the image
+> is a separate app pipeline's output). When active: cosign **keyless** (Fulcio+Rekor) + **post-sign verify** — the GOOD
+> pattern, the exemplar for converting #43 (Fix #25). `allow_failure:true` correct (Kyverno is the real gate). needs anchor
+> = dependency-track-upload (also inert this run). Clean skip ≠ ✅ (signing path untested here).
 
-**Branch / commit state (newest first; `ff9bd7e` is LOCAL-only, the rest are pushed):**
+> **#45 `dependency-track-upload` — DONE (⚠️ INERT this run).** DT unconfigured (`DT_API_URL`/`DT_API_KEY` unset) →
+> clean skip `{skipped:true}` `exit 0`, green. Upload + continuous-analysis + policy gate NEVER ran (untested; vault/dvc
+> pattern — clean skip ≠ ✅). **But it's the BEST-BUILT gate of the vuln family:** real `allow_failure:false` hard gate
+> with `exit 1`, async polling, AI-BOM nested under app project, VEX-aware — the ONLY vuln/policy control that actually
+> blocks (vs grype #13 / trivy #14 non-enforcing); re-derives CVEs itself from purls so #41-F2 (no vulnerabilities[])
+> doesn't blind it. **2 caveats when wired:** (F2) gate fires on authored DT POLICIES not raw CVE severity → a DT with
+> no policies passes green even with criticals; (F3) CVE matching = SOFTWARE components only (model/data are inventory),
+> on the #41 shallow/fused set. Now also `image-sign`'s gate anchor (post-drift-gate-removal) → also inert this run.
+
+> **`drift-gate` REMOVED (2026-06-18, user decision).** Confirmed vacuous theater (#44), so deleted from the static
+> pipeline. Edits (YAML validated — parses, no dangling needs, no cycle, no stage-order violations): job block removed;
+> `image-sign` `needs:["drift-gate"]`→`["dependency-track-upload"]`; dropped from `sign-evidence` needs (38→37); stale
+> comment + README/SBOM mermaids&tables + SETUP + CI-VARIABLES + live-scans docs all updated. **Consequence (supersedes
+> #24b re-point):** data drift (`evidently-drift` #38) is now **ungated** in the static pipeline. Eval-metric drift unit
+> + a real gate belong in live-scans (Fix #24a). If static-pipeline data-drift enforcement is wanted later, add a small
+> gate over #38 — do NOT revive drift-gate over the dead model-drift-detection.
+
+> **#44 `drift-gate` — DONE (🔴 CONFIRMED THEATER).** The WATCH item is confirmed from the run. drift-gate is a HARD gate
+> (`allow_failure:false`) but **structurally cannot fail** here: its only input `model-drift-detection` #36 is
+> dead-by-construction → emits `{skipped}` every run → gate branch (2) "skipped/seeded → pass". Log: "Drift gate:
+> baseline seeded/skipped — pass". The `exit 1` drift path (branch 3) is unreachable. **F2:** fails open TWICE (missing
+> report → pass; skipped → pass). **F3:** never reads `evidently-drift.json` (data drift #38, which ran seed-mode) → the
+> one drift control that executed is gated by NOTHING; neither drift axis is enforced. **F4:** gate logic is individually
+> defensible (first-run seeding + real exit-1 path) — vacuity is a SYSTEM property (producer permanently skipped). Root
+> fix = **Fix #24a/#24b** (give it a producer that can emit a verdict — move #36 to live-scans, re-point gate at #38) +
+> harden gate to stop failing open. Green "drift gate pass" = nothing checked, NOT drift-free.
+
+> **#43 `ai-bom-sign` — DONE (✅/🔴).** Real native CycloneDX enveloped XML signature (rsa-sha256, c14n, enveloped
+> transform, Reference URI="" covers whole BOM) + in-job `verify all` round-trip ("All signatures verified"). Good key
+> hygiene (rm private key, publish only pub+signed XML), pinned CLI by digest. **🔴 F1/F2:** `CYCLONEDX_SIGNING_KEY`
+> UNSET → signed with an EPHEMERAL keypair minted in-job + published beside the BOM → tamper-evidence only, ZERO
+> authenticity/provenance, NO stable signer across runs (deploy-time `cyclonedx verify` can't pin an identity; dormant
+> until CYCLONEDX_SIGNING_KEY/_PUB wired — Vault/DVC "present-not-enabled" pattern). The BOM's OWN sig is WEAKER than the
+> cosign model sig embedded inside it — fix = wire stable key OR sign BOM with cosign keyless (consistent + Rekor). **F3**
+> allow_failure:true → BOM can ship unsigned. F4: signs UTF-8-BOM XML cleanly (closes #42 F3).
+
+> **#42 `ai-bom-validate` — DONE (✅/⚠️).** Real HARD CycloneDX 1.6 schema-conformance gate (`/cyclonedx validate
+> --fail-on-errors`, no allow_failure, pinned `cyclonedx-cli:0.32.0` by digest) + lossless JSON→XML render for #43.
+> Log: "BOM validated successfully." XML cross-checked: faithful round-trip (same serialNumber, 99 comps, embedded sig).
+> **Caveat (F1):** structural-only — validates FORM not SUBSTANCE, so every #41 content gap (fused software=97, no
+> vulnerabilities[], signed≠verified, abs path) passes cleanly; green = well-formed, not complete/correct. F2 modelCard
+> rendered as empty shell (modelParameters/quantitativeAnalysis empty — a #41 fix). F3 XML has leading UTF-8 BOM marker
+> (cosmetic; it's the exact bytes #43 signs).
+
+> **#41 `ai-bom-assemble` — DONE (✅/⚠️).** Real CycloneDX 1.6 AI-BOM, 99 components (models=1/datasets=1/software=97),
+> hard job (no allow_failure), embeds the REAL cosign model sig (decoded: Sigstore bundle v0.3 + Fulcio cert — model-sign
+> #18 DID sign on the branch via id_tokens) + faithful scan verdicts. **Caveats:** F1 `software=97` FUSES two disjoint dep
+> universes — 3 shallow `requirements.txt` pins (syft, #10-blind) + ~94 MarkLLM eval-stack pkgs (markllm-deps-audit, NOT in
+> the static runtime) — overstating the real closure; F2 NO CycloneDX `vulnerabilities[]` despite 11 known vulns (2 RCE-class)
+> recorded only as `gaips:vulns.count` props; F3 `dataset.signed=false` → confirms dataset-sign #32 didn't run on 8061900
+> (fixed only in unpushed ff9bd7e); F4 `signed=true` w/o `verified` (#19 deferred); F5 abs `/builds/…` path in model bom-ref;
+> F6 eval section hollow (all 6 behavioural evals absent → live-scan pipeline; markllm NOT folded in). F7 version.dirty=true.
+
+> **#40 `model-signing-evidence` — DONE (✅/⚠️).** Real Sigstore keyless signing executed on the branch run
+> `8061900` (pipeline `2609319649`): Fulcio ephemeral cert, SCT verified, **Rekor index 1853780818**, `.sig`+`.pem`
+> written. **KEY CORRECTION:** the protected-var caveat does **NOT** apply here — the job signs via GitLab-native
+> `id_tokens.SIGSTORE_ID_TOKEN`, NOT the protected `MODEL_SIGNING_IDENTITY`, so it works on any ref (it does not
+> defer like #19). **Caveats:** (F1) it NOTARIZES a digest `model-digest` #17 merely *recorded* — with #19 deferred,
+> no tamper check binds in; (F2) the signature is **write-only** — no in-pipeline `cosign verify-blob` consumer
+> (only `image-sign` line 2768 verifies, and that's the container image); (F3) **dead 37-pkg `model-signing`+`sigstore`
+> install** — all signing is cosign (same waste pattern as #15/#17, unaudited per Fix #0); (F4) signed `model_digests`
+> string carries the absolute `/builds/…` runner path. ✅ cosign pinned+checksum-verified, pins exact (Fix #11),
+> no `allow_failure` (fails closed on its own op).
+>
+> **🔧 OVERHAULED THIS SESSION (local, NOT pushed — pending next run):** renamed `model-signing-evidence` →
+> **`sign-evidence`** and **moved to a new terminal `attest` stage** (last in the pipeline, after deploy-prep) so it
+> can hash+sign the WHOLE run incl. the signed AI-BOM (it ran in `evidence` before, missing ai-bom/deploy-prep).
+> Bundle is now a `schema_version 2.0` run-evidence manifest: rich pipeline metadata + model identity
+> (`approved_sha256` vs `recorded` + `digest_match`) + **sha256 hash-manifest of all reports/sbom/evidence files**
+> (`needs:` all 38 producers; model blob NOT pulled). Added **cosign verify-blob self-verify** (closes F2 write-only);
+> **dropped the dead model-signing/sigstore install** (closes F3; `before_script:[]`+`cache:{}`). Open: F1 (still signs
+> #17's recorded digest — needs #19 to not defer), F4 (abs path in #17's `tee`). Note: the seal is NOT published by
+> `publish-signed-artifacts` (runs before attest) — it's a retained audit artifact. Docs updated (README/SBOM mermaid+tables,
+> validation-doc UPDATE note). YAML verified: parses, no dangling needs, no cycle, no stage-order violations, python compiles + smoke-tested.
+
+**Where things stand:** the 22-item REQUIRED-FIXES list is fully applied + pushed; the branch run surfaced and
+fixed 7 latent defects (POST-PUSH FIX LOG below). This session **continued the per-job walkthrough** against the
+branch run `8061900` (the PUSHED tip — does NOT include the local-only `ff9bd7e` fixes). Documented earlier:
+**#29 revised 🔴→✅, #33 ✅, #35 ✅**. Documented THIS continuation: **#34 ✅/🔴, #36 🔴, #37 ⛔absent** + added
+**Fix #23 and Fix #24 (a/b)**.
+
+> ⚠️ **NOTE for the fresh context window (why we reset): the prior thread kept OVER-COLLAPSING distinct things
+> into one** (two `pip-audit` jobs treated as one; the eval-metric drift baseline vs the data-drift baseline;
+> "delete the whole drift unit" when half of it must stay). **Discipline going forward: keep distinct jobs /
+> baselines / controls SEPARATE; verify each against the YAML before merging them in prose.** Fix #24 in
+> particular was wrong twice before landing as a SPLIT (24a move eval-metric unit to live-scans; 24b KEEP +
+> re-point `model-baseline-commit` for the data-drift baseline). Don't re-collapse it.
+
+**RESUME AT #47 `publish-signed-artifacts`** (deploy-prep). Done through #46; only #47–#49 remain. See the
+"SESSION-3 LOCAL CHANGES" + "NEXT SESSION" blocks below for the uncommitted CI edits and the resume detail.
+
+> **#38 `evidently-drift` — DONE (⚠️🔴 ran in SEED-MODE).** It ran but never compared: no committed
+> `dataset-reference.jsonl` → seed branch → `{seeded:true,drift_detected:false}` (the seed default, NOT a
+> verdict), and it **returned before importing Evidently** — so PSI/TextEvals never executed and
+> `evidence/evidently/` is an empty dir (no HTML). Chain positive: the redacted dataset DID reach it (2 records),
+> re-proving the #1 chain fix. **The pasted seed exposed two more defects + a #28 finding:** (1) Presidio
+> #28 over-redacted the benign key `ci-benign-002` → **`<PERSON>`** (false positive on a synthetic id;
+> non-deterministic — `ci-benign-001` survived → seed is non-reproducible); (2) the seed is **invalid JSON**
+> (`NaN` tokens from pandas NaN-filling the two rows' disjoint columns). **Caveat added to Fix #24b: do NOT
+> commit this seed verbatim** — it would enshrine `<PERSON>` + `NaN` + a 2-row half-empty frame as the drift
+> baseline; author a clean, realistically-sized reference instead. Also: unpinned bleeding-edge stack
+> (evidently 0.7.21 / pandas 3.0.3 / numpy 2.4.6 — comparison-path compat UNVERIFIED since it never ran) and a
+> shared-cache bloat round-trip (~250 MB of unused wheels into the `no space left` key from #22/#35).
+
+### ✅ Documented THIS session (all in `PIPELINE_JOB_VALIDATION.md` + MEMORY.md running log):
+- **#29 `eval-dataset-validate`** — REVISED 🔴→✅. Now a GENUINE executing hard schema gate (`allow_failure:false`):
+  downloaded `dataset-redact`'s artifact, found `DATASET_FILE` (broken-chain `exit 1` guard NOT hit → **Fix #1
+  chain repair CONFIRMED end-to-end**), jsonschema validated both fixture rows → `Eval dataset VALID — 2
+  record(s)`. STRUCTURE-only (content = GX #30). The fact it RAN proves the dataset chain is alive.
+- **#33 `artifact-signing-gate`** — ✅ real enforcing chokepoint (`allow_failure:false`), PASSED. ⚠️ TWO honest
+  caveats: (1) it downloads `signature-verification`'s artifact but **NEVER reads it** — keys only off
+  `integrity.env`(tamper)+modelscan+modelaudit, so on this branch (where sig-verify DEFERS) **nothing actually
+  verified a signature yet the "signing gate" passes green** — it's a tamper gate, not a signing gate; (2)
+  ModelScan arm vacuous on the 0-file GGUF scan → malware coverage = ModelAudit #22 + ClamAV #24 only.
+  **MODEL-INTEGRITY STAGE COMPLETE — 17/20** (#30/#31/#32 deferred).
+- **#35 `markllm-watermark-eval`** — ✅ genuinely works (loaded Qwen2.5-1.5B on CPU, embedded+detected KGW
+  watermarks, both `is_watermarked:true`, scores 6.25/4.53). ⚠️ HEADLINE caveat: **chain-of-custody break** —
+  it evals `Qwen/Qwen2.5-1.5B-Instruct` (full transformers repo, freshly downloaded from HF, UNVERIFIED,
+  `revision:null`), **NOT the q2_k GGUF the entire model-integrity chain just signed/verified/scanned**. The
+  integrity guarantees don't cover the evaluated artifact. Also: dead `min_length=160` constraint (silently
+  overridden, infeasible vs max_length 141/138); 🔴 **cache `no space left on device` again** (the #22 pattern
+  recurring at the heaviest install — self-reinforcing: save fails → not persisted → re-download grows the key
+  → next save fails; fix = separate/smaller cache key for ai-eval jobs). `ai-eval` 1/2 documented.
+- **#34 `markllm-deps-audit`** — ✅ real + good explainability (logs every id+pkg+fix_versions, persists JSON)
+  but 🔴 **report-only**: found 11 vulns/3 pkgs incl TWO RCE-class in the libs it audits — `torch` CVE-2025-3000
+  (no fix), `transformers` PYSEC-2025-217/CVE-2025-14929 (X-CLIP deserialization RCE, no fix), `transformers`
+  CVE-2026-1839 (`torch.load` w/o `weights_only`, **fixable** 5.0.0rc3) — and passed green. 8/11 are pillow
+  noise. → **Fix #23**: wrong place (only ML-stack scan, sits behind integrity chain) + wrong order (runs
+  *concurrently* with #35 which executes those deps). `ai-eval` **2/2 COMPLETE**.
+- **#36 `model-drift-detection`** — 🔴 DEAD-BY-CONSTRUCTION: `detect_model_drift.py` reads only the six
+  live-scan eval files (all moved to `live-scans.gitlab-ci.yml` 2026-06-16) → `{skipped:true,"no metrics"}`
+  every run; ignores `markllm-results.json` (the only eval here). → **Fix #24a** (move eval-metric unit to
+  live-scans). `allow_failure` correct by design (producer; gate is `drift-gate`). 🔴🔴 WATCH `drift-gate`: if
+  it PASSes on a `{skipped}` report the whole guardrail-drift layer is theater.
+- **#37 `model-baseline-commit`** — ⛔ DOES NOT INSTANTIATE on this branch (default-branch-only rule; present
+  in git, not removed; user ran it MANUALLY → that's how `eval-baseline.json` got committed). IMPORTANT, not
+  deletable: it's the self-bootstrap that writes a drift baseline back to the repo. → **Fix #24b**: KEEP +
+  re-point at evidently-drift #38's `dataset-reference.jsonl` (which has NO commit job → #38 can't bootstrap).
+- **#38 `evidently-drift`** — ⚠️🔴 RAN IN SEED-MODE (full detail in the STATUS callout above + the doc).
+  **Purpose:** input-side data-drift control (PSI/TextEvals vs a committed reference). **Findings:** F1 seed-mode
+  vacuous green (returned before importing Evidently → never compared); F2 no activation path (no auto-commit job
+  → Fix #24b); F3 empty evidence dir; F4 Presidio #28 over-redacted `ci-benign-002`→`<PERSON>` (non-deterministic);
+  F5 seed is invalid JSON (`NaN`); F6 unpinned/unaudited stack (→ Fix #0); F7 cache bloat; F8 2-row fixture vacuous.
+  **Recommended fixes:** (1) F1/F2 → re-point #37 at the seed *with sanitize/validate*, not raw `cp` (#24b);
+  (2) F3 → resolved once comparison runs; (3) F4 → exclude id/key fields from PII redaction, build ref from
+  pre-redaction data; (4) F5 → normalize NaN→null before serializing; (5) F6 → pin **and** audit the drift stack
+  (Fix #0); (6) F7 → separate/smaller cache key; (7) F8 → realistically-sized reference before `allow_failure:false`;
+  (8) verify `drift-gate` doesn't treat `{seeded}` as PASS.
+- **#39 `evidence-summary`** — ⚠️ real bundler + genuine gate (NO `allow_failure`) but a **file-PRESENCE gate,
+  never opens the artifacts**. **Purpose:** assemble the 90-day evidence bundle (`evidence-summary.md` + bundle
+  the drift seed + `model-baseline.json`) and gate on required artifacts. **Findings:** F1 `EXPECTED=[semgrep.json,
+  markllm-results.json]` checked via `.exists()` only (script:37-41) → a run full of findings passes green;
+  F2 the 2 required files are weak — clamav/signature/tamper/dataset-scan/artifact-signing-gate/pip-audit outputs
+  aren't in `EXPECTED` *or* `ADVISORY`; F3 advisory `False` rows (GX/ydata/DT) blur skipped-by-design vs broken;
+  F4 bundles seed-mode `evidently-drift.json` + #38's empty HTML dir as if signal; F5 `eval-baseline.seed.json`
+  bundle path DEAD (upload WARNING — confirms #36 dead-by-construction); F6 unpinned+unaudited `pip install jinja2`
+  (→ Fix #0). **Recommended fixes:** (1) F1 → parse verdicts (semgrep error-severity / markllm `is_watermarked`),
+  or rename it a completeness check; (2) F2 → add integrity-chain outputs to `EXPECTED`; (3) F3 → producers emit
+  `{skipped:true,reason}` + 3-state column, fail only on MISSING; (4) F4 → show each report's verdict not bare
+  presence, don't bundle the empty HTML dir; (5) F5 → resolved by Fix #24a/#24b, flag inert meanwhile; (6) F6 →
+  Fix #0 + use the pinned `requirements.txt` jinja2. **`evidence` stage 1/2; resume at #40 model-signing-evidence.**
+
+**Two-drift / two-baseline model (do not re-collapse — see the over-collapse note in STATUS):**
+`model-drift-detection` #36 = EVAL-METRIC drift (six live-scan files; belongs in live-scans, Fix #24a).
+`evidently-drift` #38 = DATA drift (dataset vs `dataset-reference.jsonl`; stays here). `model-baseline-commit`
+#37 = the baseline bootstrap (Fix #24b: re-point to #38). `ydata-profile` #31 = single-dataset descriptive
+profile, NO baseline (not a drift control). Evidently (Context7-confirmed) uses per-column stattests
+(PSI/Wasserstein/chisquare), so #36's flat `±0.10` scalar is a crude proxy — fine for aggregate pass-rates.
+
+### ⏸️ DEFERRED — #30/#31/#32 (no run evidence; need a re-run of the `ff9bd7e` fixes):
+These three dataset-chain jobs depend on the LOCAL-ONLY `ff9bd7e` fixes (NOT in the `8061900` run), so they
+were documented only as "pending-confirm" (a placeholder block sits between #29 and #33 in the validation doc).
+On `8061900` they'd fail: **#30 GX** on category-in-set (`ci-fixture` not in `value_set`, 0/2 vs mostly 0.9);
+**#31 ydata** on `No module named 'pkg_resources'` (setuptools 81); **#32 dataset-sign** on the broken-chain
+guard. **To confirm them: push `ff9bd7e` for a green branch run, then validate the three logs.**
+
+**Branch / commit state (newest first; `ff9bd7e` + `a113877` are LOCAL-only, the rest are pushed):**
 ```
-ff9bd7e  ci: fix dataset-sign needs, ydata pkg_resources, GX category set   ← NOT pushed yet
-8061900  ci: dataset-redact — install click for the spaCy CLI               ← pushed
-14ffa87  ci: make conda-forge isolation real (--override-channels)          ← pushed
-c4d86f1  ci: make signature-verification protected-branch-aware            ← pushed
-8061900↑ / 5cf4c55  ci: install curl in dataset chain jobs                  ← pushed
-beca04b  ci: apply 22 GAIPS pipeline required-fixes                         ← pushed (first run ran on this)
+a113877  docs: update handoff — fixes done, resume documenting               ← NOT pushed (+ further edits this session)
+ff9bd7e  ci: fix dataset-sign needs, ydata pkg_resources, GX category set     ← NOT pushed yet
+8061900  ci: dataset-redact — install click for the spaCy CLI                 ← pushed (THIS is the run being documented)
+14ffa87  ci: make conda-forge isolation real (--override-channels)            ← pushed
+c4d86f1  ci: make signature-verification protected-branch-aware              ← pushed
+5cf4c55  ci: install curl in dataset chain jobs                               ← pushed
+beca04b  ci: apply 22 GAIPS pipeline required-fixes                           ← pushed
 ```
-Push `ff9bd7e` to get a fully-green branch run, THEN document. (Or document #29–#33 from the per-job logs
-the user pastes, as before — no push strictly required to resume the walkthrough.)
+### 🔴 SESSION-3 LOCAL CHANGES — UNCOMMITTED working tree, NOT pushed, NOT yet run/validated
+This session made **real `.gitlab-ci.yml` edits** (not just docs) while documenting. They are in the working tree
+only — `git status` will show `.gitlab-ci.yml` + several `docs/gaips-materials/*` modified. **None have run on a
+pipeline** — they need a billable re-run to validate. Summary:
+1. **`sign-evidence` overhaul** (was `model-signing-evidence` #40): renamed → `sign-evidence`; moved to a new
+   terminal **`attest`** stage (last in the pipeline); bundle rebuilt into a `schema_version 2.0` run-evidence
+   manifest (pipeline metadata + model identity + **sha256 hash-manifest of all reports/sbom/evidence files**);
+   added **cosign verify-blob self-verify**; dropped the dead `model-signing`/`sigstore` pip install
+   (`before_script:[]`+`cache:{}`). `needs:` = 37 artifact-producers.
+2. **`drift-gate` REMOVED** (#44 confirmed theater): job deleted; `image-sign` re-pointed
+   `needs:["drift-gate"]`→`["dependency-track-upload"]`; removed from `sign-evidence` needs.
+3. **Docs updated to match:** README + SBOM mermaids/tables (added `attest`, removed `drift-gate`, added the
+   **four-signature chart**: model/dataset/ai-bom/image — what signs what + verifier), SETUP, CI-VARIABLES,
+   live-scans.
+4. **New CRITICAL fixes added** to the REQUIRED FIXES list: **#25** (`ai-bom-sign` → cosign keyless, MANDATORY)
+   and **#24b elevated to CRITICAL** (`model-baseline-commit` commits the WRONG baseline — `eval-baseline.json`,
+   not `dataset-reference.jsonl` — `.gitlab-ci.yml:2301-2302`). Later (next session) **#26** (`publish-signed-artifacts`
+   #47: stale model-bundle comment / no failed-publish signal / branch-scoped `ARTIFACT_BASE_URL` cutover) and **#27**
+   (`metrics-normalize` #48: present-but-`null` extraction gaps / gate-semantics labeling / `generated_at` mislabel)
+   and **#28** (`pages` #49: negative-polarity boolean mis-color — `drift_detected:false` shows red — + blank-cell rendering
+   of present-but-`null` values) were added to the walkthrough-surfaced list — Tier 2–5, not critical.
+**ALL local CI edits validated statically** (YAML parses, no dangling `needs:`, no cycle, no stage-order
+violations, embedded Python compiles + smoke-tested) — but **never run on CI.**
+
+**Branch reminder:** `8061900` is the pushed tip being documented; `ff9bd7e`+`a113877` were already local-only
+before this session. So the working tree now = `8061900` + `ff9bd7e`/`a113877` (uncommitted) + this session's CI
++ doc edits (uncommitted). Decide whether to commit/squash these before the next billable run.
+
+### ▶️ NEXT SESSION — start here:
+1. **🏁 WALKTHROUGH COMPLETE — all jobs `setup`→`pages` documented (deploy-prep 4/4).** #47/#48/#49 were
+   documented this session; #40–#46 earlier. Only **DEFERRED** legs remain undocumented for lack of run evidence:
+   #30 `great-expectations-validate` / #31 `ydata-profile` / #32 `dataset-sign` (need a re-run of `ff9bd7e`).
+   **No more pasting needed unless re-running.** Pivot to **applying the REQUIRED FIXES** (Tier-0 #0, then #23,
+   #24a/b, #25, #26, #27, #28). Surprises vs the old pre-reads, now corrected in the doc: #47 **DID** publish a
+   real `model-bundle.tar` (model-fixture-download supplies the weights — the YAML comment is stale → Fix #26a).
+2. **Method (for any re-run validation):** USER pastes each real GitLab job log/artifact (no glab/docker locally); read the job block in
+   `.gitlab-ci.yml` (grep the name — line numbers shifted) + backing script in `docs/gaips-materials/scripts/`
+   FIRST to set expectations; lead each verdict with the most damning TRUE finding; keep distinct jobs/controls
+   separate (anti-collapse). **REPORT FORMAT (user requirement, from #39 on — in CHAT *and* the doc):** every
+   per-job report states (1) **Purpose** (plain terms) and (2) **Recommended fixes** (finding→fix list). The user
+   values plain-English explanations — when asked "what does this mean?", drop the jargon (see the #24b/evidently
+   plain-English exchange). See memory `feedback-job-purpose-and-fixes`.
+3. **Then:** optionally push (one billable run) to validate (a) the deferred #30/#31/#32 (`ff9bd7e`) AND (b) this
+   session's `sign-evidence`/`drift-gate`/`attest` CI changes in one shot. After documenting #47–#49, the
+   walkthrough is COMPLETE (~49 jobs) — pivot to applying the REQUIRED FIXES (esp. Tier-0 #0, #23, #24, #25).
+
+**Method unchanged:** read the job block in `.gitlab-ci.yml` (grep the name — line numbers shifted) + its
+backing script in `docs/gaips-materials/scripts/` to set expectations, then the USER pastes the real GitLab
+job log/artifact (no glab/docker locally), validate paste vs expectation, write the entry. Lead each verdict
+with the most damning TRUE finding (see VERDICT DISCIPLINE below).
 
 ## ⚠️ POST-PUSH FIX LOG (failures the branch run surfaced, in order — all now fixed)
 Each is a genuine pre-existing defect that only appeared once the fix made the job actually run/enforce:
@@ -130,9 +355,41 @@ only **#1–#15** and is not maintained past that — use the validation doc for
 
 # 🔧 REQUIRED FIXES (apply in this order)
 
-Ordered by severity: **Tier 1 = green-but-does-nothing security controls** (fix first), then enforcement/
-auditability gaps, then pinning/scope, then hygiene/waste. Each item: `job #` · problem · concrete fix.
-Checkboxes so the next session can track progress.
+Ordered by severity: **Tier 0 = CRITICAL foundational gap**, then **Tier 1 = green-but-does-nothing security
+controls**, then enforcement/auditability gaps, then pinning/scope, then hygiene/waste. Each item: `job #` ·
+problem · concrete fix. Checkboxes so the next session can track progress.
+
+### 🛑 Tier 0 — CRITICAL (foundational; should have been done at the start)
+- [ ] **0. `pip-audit` must vuln-scan ALL jobs' libraries — today it covers almost none.** **Problem
+  (verified against `.gitlab-ci.yml`):** there are only two audit jobs and between them they audit a small
+  slice of what the pipeline actually installs. `pip-audit` (sast, line 467) audits **only `requirements.txt`**
+  = `pandas==2.3.3` / `requests==2.34.2` / `jinja2==3.1.6` (+ their resolved transitives). `markllm-deps-audit`
+  #34 (line 2177) audits **only** a synthetic `torch`/`transformers`/`markllm` list. **Every other job
+  `pip install`s libraries that NO pip-audit ever sees** — and crucially this includes the **security toolchain
+  that guards the model, which is itself never vuln-scanned**: `model-signing`/`sigstore`/`cryptography`
+  (785/886/935/997/2425), `modelaudit[all]` (1257), `modelscan` (1203), `presidio-analyzer`/`presidio-anonymizer`
+  (dataset-redact 1846), `huggingface_hub` (1518), `hvac` (256/1075), `semgrep` (332), `pip-tools` (496),
+  `dvc[all]` (680), `jsonschema` (1920), `great-expectations` (1962), `ydata-profiling` (2001), `evidently`
+  (2325, pulls cryptography 49.0.0 + a ~73-pkg tree). **Two failure modes:** (i) *zero coverage* for all the
+  above; (ii) *audit/runtime version mismatch* even where a name overlaps `requirements.txt` — e.g.
+  evidently-drift runs `pandas 3.0.3`/`numpy 2.4.6` while pip-audit only ever cleared `pandas 2.3.3`; `jinja2`
+  / `requests` are re-installed unpinned in evidence/DT/metrics jobs. **Consequence:** a CVE in any of these
+  (or a poisoned `modelaudit`/`presidio`/`cryptography`) would pass green undetected — and **pinning a library
+  that nothing audits just freezes a blind spot** (this is why the #38 F6 "pin the drift stack" rec is
+  necessary-but-insufficient on its own, and it generalizes Fix #23 from torch/transformers to the whole
+  pipeline). **Fix (coverage now, teeth later — same posture as #23):**
+  - **(A) Per-job env audit (catches the version-mismatch):** add a shared `.pip-audit-env` script anchor that
+    every job with an ad-hoc install calls **after** its install — `pip-audit` against the **live installed
+    environment** (no `--requirement`, so it audits exactly what the job will run) → per-job
+    `${REPORTS_DIR}/pip-audit-<job>.json`.
+  - **(B) Lockfile audit (reproducible set):** consolidate the ad-hoc installs into hash-pinned lockfiles
+    (`ci/requirements-*.in` → `pip-compile --generate-hashes`) and have the central `pip-audit` job audit that
+    full set, not just the 3-line `requirements.txt`.
+  - **Best = A + B** (lockfile for reproducibility + per-job env audit for "audit what you actually run").
+  - **Gating:** wire coverage first; keep `allow_failure:true` / `|| true` until the pipeline is otherwise
+    green (per Fix #23), **then** drop `allow_failure` and fail when any vuln has a non-empty `fix_versions`.
+  - **NB:** this supersedes the standalone pin recommendations — every "pin X" fix (#11, #38 F6) must be paired
+    with adding X to audited coverage here.
 
 ### Tier 1 — Broken / inert security controls (highest priority)
 - [x] **1. `dataset-redact` #28 — BROKEN CHAIN (cascades to #29–#32).** Redaction never runs and fails
@@ -214,6 +471,203 @@ Checkboxes so the next session can track progress.
 - [x] **22. Skip messages that disguise breaks (#29, and the chain generally).** "evals run on fixtures" /
   "no dataset present" make a wiring break look intentional. **Fix:** skip reasons must distinguish
   "disabled by config" (ok, exit 0) from "expected-but-missing" (`exit 1`).
+
+### Walkthrough-surfaced fixes (session 3, 2026-06-17 — beyond the original 22)
+- [ ] **23. `markllm-deps-audit` #34 — AI deps audited in the wrong place, contingently, and concurrently
+  with the job that executes them.** It's the **only** scan of the ML stack (the sast `pip-audit` #5-job
+  audits root `requirements.txt` = `{pandas,requests,jinja2}` only — torch/transformers aren't in it or its
+  transitives), yet it sits in `ai-eval` (stage 6) behind `needs:["artifact-signing-gate","model-manifest"]`
+  — so any model-integrity gate failure suppresses it entirely. Worse, it and `markllm-watermark-eval` #35
+  are sibling `ai-eval` jobs with **no edge between them** (#35 doesn't `needs:` #34), so they run in
+  parallel: #35 `pip install`s + live-loads torch/transformers (the CVE-2026-1839 `torch.load`-without-
+  `weights_only` path) at the same time as / before the audit flagging it finishes. The job's script has **no
+  real dependency** on stages 3–6 (it audits a synthetic `torch==/transformers==/markllm==` requirement list
+  from the static version vars; touches no model/dataset/signing artifact) — the current `needs:` is
+  vestigial convention. **Fix (this item — the MOVE only):** `stage: sast` + `needs: ["setup"]` (drop
+  `artifact-signing-gate`/`model-manifest`). This puts both `pip-audit` jobs side by side over their two
+  disjoint dep universes, decouples the AI-stack scan from the integrity chain (can't be skipped by a gate
+  failure), and makes it run **before** #35 executes those deps. **GATING IS DEFERRED / NON-BLOCKING for now**
+  (per user): **keep `allow_failure: true` and `|| true`** until all pipeline bugs are fixed — turning on
+  enforcement (drop `allow_failure`; `exit 1` when any vuln has non-empty `fix_versions`; `#35 needs:[34]`)
+  while broken chains still exist would just paint the pipeline red. Ordering moves now; teeth come last.
+- [ ] **24. Drift baselines are in the wrong pipeline / missing — SPLIT, do NOT blanket-delete.** Background:
+  there are TWO independent drift controls and TWO baselines, and they were conflated. (i) **model/eval-metric
+  drift** = `model-drift-detection` #36 + `detect_model_drift.py` (reads ONLY the six live-scan eval files
+  `inspect-ai`/`garak`/`pyrit`/`giskard`/`guardrail-regression`/`promptfoo`-results.json) + its baseline
+  `evals/eval-baseline.json` + the bootstrap `model-baseline-commit` #37. (ii) **data/feature drift** =
+  `evidently-drift` #38 (`run_evidently_report.py --current ${DATASET_FILE} --reference
+  evals/dataset-reference.jsonl`) + its baseline `evals/dataset-reference.jsonl`. **`model-baseline-commit` is
+  IMPORTANT, not deletable:** it is the self-bootstrap that writes a seeded baseline back into the repo
+  (default-branch + `GITLAB_PUSH_TOKEN` + a seed produced → `cp seed → dest`, `git commit`, `git push -o
+  ci.skip HEAD:default`); **without an auto-commit step a drift control has no baseline and stays in seed-mode
+  forever** (seed every run, never compare).
+  - **24a (MOVE to live-scans):** relocate the *eval-metric* unit — `model-drift-detection` +
+    `detect_model_drift.py` + `evals/eval-baseline.json` + the eval-baseline bootstrap logic — into
+    `ci/live-scans.gitlab-ci.yml`, where its six input files actually exist; DELETE that unit from this
+    pipeline. It was left behind by the 2026-06-16 split (`extract_metrics()` → `{}` →
+    `{skipped:true,"reason":"no metrics"}` every run here; baseline `eval-baseline.json` is itself seeded from
+    live-scans-only metrics `giskard.high_findings`/`guardrail.pass_rate` = committed to the wrong repo).
+    Do NOT graft a `markllm-results.json` branch on (rejected: overloads one job + leaves six dead readers;
+    watermark-score drift, if wanted, is a separate small check next to #35). **Knock-on — DONE (2026-06-18):**
+    `drift-gate` was **REMOVED** from the static pipeline (confirmed vacuous theater at #44 — it PASSed on the
+    `{skipped}` report). `image-sign` re-pointed to `needs:["dependency-track-upload"]`; removed from `sign-evidence`
+    needs; docs updated. ⚠️ This **supersedes the #24b "re-point drift-gate at evidently-drift" plan**: data drift
+    (#38) is now **ungated** in the static pipeline. If data-drift *enforcement* is wanted here later, add a small
+    gate over `evidently-drift` #38 (once it has a real committed reference) — do NOT revive `drift-gate` over the
+    dead `model-drift-detection`. The eval-metric drift unit + its enforcing gate still need to MOVE to live-scans.
+  - 🛑 **24b (CRITICAL — KEEP + RE-POINT in this pipeline):** this pipeline's REAL drift control is
+    `evidently-drift` #38 (data drift on the dataset), and **it has NO baseline-commit job → its
+    `dataset-reference.jsonl` never auto-materializes → #38 is stuck in seed-mode and can never actually compare**
+    unless a human hand-commits the reference.
+    - **The precise defect (why this is critical):** `model-baseline-commit` #37 is the pipeline's ONLY auto-commit
+      job, but it commits the **WRONG baseline** — it hardcodes `eval-baseline.seed.json → evals/eval-baseline.json`
+      (`.gitlab-ci.yml:2301-2302`), i.e. the **eval-metric** baseline for the **dead-by-construction #36**, and
+      **never touches `evals/dataset-reference.jsonl`**. So the one bootstrap the pipeline has **feeds a dead control
+      and starves the live one** (#38). Confirmed at #44/#38 in the validation doc.
+    - **Understanding — the compare logic already exists, only the file is missing:** `run_evidently_report.py` holds
+      the FULL compare path; it early-returns at the seed branch (`:96-107`) only because `evals/dataset-reference.jsonl`
+      is absent. The moment that file exists, it falls through to the real run (`:109-164`) — PSI `DataDriftPreset` +
+      `TextEvals`, writes `evidently-drift.json` + `evidence/evidently/drift-report.html`, and **`exit 1`s on drift**
+      (`:160-163`). ⇒ **No code change needed to DOCUMENT drift — only a committed reference.** To ENFORCE drift, just
+      drop `evidently-drift`'s `allow_failure: true` (the script self-`exit 1`s) — no gate needed (drift-gate is gone).
+    - **Fix:** add/clone a data-drift bootstrap that commits `reports/dataset-reference.seed.jsonl →
+      evals/dataset-reference.jsonl`, reusing #37's mechanism — **but with a sanitize/validate step, NOT a raw `cp`**
+      (the seed is corrupted: F4 `<PERSON>` over-redaction + F5 invalid `NaN` JSON + F8 2-row).
+    - **#37's mechanism, to clone (template):** runs **only on the default branch** (`rules: $CI_COMMIT_BRANCH ==
+      $CI_DEFAULT_BRANCH`) and **only when all three hold** — (a) a seed was produced this run, (b) `GITLAB_PUSH_TOKEN`
+      (`write_repository` PAT) is set, (c) the dest baseline doesn't already exist. Those guards make it a **one-time,
+      self-disabling bootstrap** (won't clobber an existing baseline; never fires on feature branches — which is why
+      today's `eval-baseline.json` is a MANUAL artifact, not auto-path-proven). When they hold: `cp seed → dest` →
+      `git commit -m "… [skip ci]"` → `git push -o ci.skip HEAD:<default>`; **both** `[skip ci]` and `-o ci.skip` stop
+      that push from triggering a new pipeline (no commit→pipeline→commit loop). It commits **straight to the default
+      branch, bypassing MR review** — fine for a CI bot, but record as a deliberate **governance exception**. Gating
+      posture per Fix #23 (non-blocking until bugs fixed).
+    - **⚠️ Caveat from the #38 run — do NOT auto-commit the seed verbatim.** The actual
+      `dataset-reference.seed.jsonl` is corrupted: (a) Presidio #28 redacted the benign id `ci-benign-002` →
+      `<PERSON>` (false positive, non-deterministic — `ci-benign-001` survived → seed not reproducible), and
+      (b) it's invalid JSON (`NaN` from NaN-filling the two rows' disjoint columns). Auto-committing it would
+      enshrine a redaction artifact + non-portable JSON + a 2-row half-empty frame as the drift baseline. The
+      reference must be hand-authored, clean, realistically-sized (possibly from *pre*-redaction data). So #24b's
+      path needs a sanitize/validate step, not a raw `cp seed → dest`.
+- [ ] 🛑 **25. `ai-bom-sign` #43 — sign the AI-BOM with cosign keyless (MANDATORY / CRITICAL).** Today the job signs
+  the BOM with a native CycloneDX **enveloped RSA XMLDSig using an EPHEMERAL keypair** minted in-job (because
+  `CYCLONEDX_SIGNING_KEY` is unset), deletes the private key, and publishes the throwaway public key beside the BOM.
+  Result: the BOM's OWN signature is **tamper-evidence only — zero authenticity/provenance**, pins no stable signer
+  across runs, and the deploy-time `cyclonedx verify` (Argo PreSync) can only trust-on-first-use the key that ships
+  inside the artifact. It is the **lone identity-less signature** in a pipeline where the model #18, dataset #32, and
+  `sign-evidence` #40 all sign **cosign keyless** (Fulcio identity + Rekor transparency log). **Fix (do this, not the
+  stopgap):** convert `ai-bom-sign` to **`cosign sign-blob` via the GitLab `SIGSTORE_ID_TOKEN`** (id_tokens, works on
+  any ref — same pattern as #40), emitting a `.sig`/`.pem` over the BOM with a real Fulcio identity + Rekor entry;
+  update the Argo PreSync hook to `cosign verify-blob` (identity/issuer regexp) instead of `cyclonedx verify`. This
+  **supersedes** the weaker "just wire a stable `CYCLONEDX_SIGNING_KEY`" option — that was the interim stopgap; the
+  mandatory fix is cosign keyless for consistency + real provenance. Then drop `allow_failure` so an unsigned BOM can't
+  silently reach `publish-signed-artifacts`. (Documented in `PIPELINE_JOB_VALIDATION.md` #43.)
+- [ ] **26. `publish-signed-artifacts` #47 — three deploy-distribution hygiene fixes.** The job genuinely publishes
+  the signed set (AI-BOM + key + `model-bundle.tar`) to the GitLab generic package registry and emits the PreSync
+  `ARTIFACT_BASE_URL` — these are quality/safety gaps, not breakage. (NB: its other two findings are already tracked
+  elsewhere — the **ephemeral BOM key** is **Fix #25**, and the **absent dataset arm** rides the dataset-chain re-run
+  under **#24b / deferred #30–#32**; do not duplicate them here.)
+  - **26a (Tier 5 — stale/misleading comment, comment-only edit).**
+    - **Current (`.gitlab-ci.yml:2938-2944`):** the comment above the bundle guard asserts *"model-sign publishes only
+      `**/model.sig` as artifacts, not the weights, so via `needs` alone this stays empty and the bundle is correctly
+      skipped."* The guard it annotates (`:2945-2955`) sets `HAVE_WEIGHTS=1` if `MODEL_DIR` holds any
+      `pkl|pt|safetensors|gguf|bin|h5|onnx`, then tars the dir iff weights **and** a `model.sig` are present.
+    - **Why it's wrong:** the comment reasons about `model-sign` alone and **ignores that `model-fixture-download` is
+      also in `needs:` (`:2909`)** and provisions the GGUF weights into `MODEL_DIR`. So `HAVE_WEIGHTS=1`, the guard
+      passes, and `model-bundle.tar` ships on **every** run where the fixture is present — proven by the `80619005`
+      log (`staged → model-bundle.tar (model_signing bundle of …/models)`). The bundle is the norm, not the exception.
+    - **Fix:** rewrite the comment to credit `model-fixture-download` for the weights (and `model-sign` for `model.sig`),
+      i.e. *"the bundle ships whenever the fixture provisioned weights + model.sig are both present; it is skipped only
+      when neither needs-source populated `MODEL_DIR`."* **No logic change.** While here, optionally add a one-line
+      assert that the bundled `model.sig` is the one `model-sign` produced (chain-of-custody, cross-ref #47-F8).
+  - **26b (Tier 2 — no failed-publish signal).**
+    - **Current:** the whole job is `allow_failure: true` (`:2910`). The upload loop (`:2963-2972`) runs
+      `curl -sSf --retry 3 … --upload-file` per manifest line; if a file fails after 3 retries the step errors but
+      `allow_failure` swallows it → **green**. The two early-outs (`:2914-2917` no GitLab API; `:2960-2962` empty
+      manifest) also `exit 0`. Net: a failed/partial publish, or a publish of *nothing*, is indistinguishable from a
+      full success — the deploy registry can silently retain stale artifacts.
+    - **Fix:** keep `allow_failure: true` (a transient registry hiccup shouldn't fail the run), but make the outcome
+      **observable**: accumulate per-file results in the loop and write `${STAGE_DIR}/publish-result.json`
+      `{"published":[…],"failed":[…],"skipped_reason":null|"<guard>"}`, add it to `artifacts:paths` (`:2974`), and emit
+      a `WARNING:`/`::warning::` log line if `failed` is non-empty. Then `metrics-normalize` #48 can surface a
+      publish-health signal instead of the run going invisibly green on a partial/empty publish.
+  - **26c (Tier 3 — branch-scoped URL cutover).**
+    - **Current:** `BASE` (`:2959`) = `${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}`,
+      and on this run `EVIDENCE_PACKAGE_VERSION` resolved to the **branch** (`gaips-pipeline-required-fixes`), so the
+      emitted `ARTIFACT_BASE_URL` is branch-specific. The Argo PreSync hook
+      (`deployment/argocd/verify-signatures-presync-hook.yaml`) fetches from a ConfigMap `ARTIFACT_BASE_URL` that must
+      match this exact path.
+    - **Fix:** at merge, decide the stable `EVIDENCE_PACKAGE_VERSION` for the deploy-facing package (a release **tag** /
+      semver, or `$CI_DEFAULT_BRANCH`) so the path doesn't move per feature branch, then update the PreSync ConfigMap
+      `ARTIFACT_BASE_URL` to that path. Otherwise PreSync keeps pointing at the now-stale `gaips-pipeline-required-fixes`
+      package version after merge and fetches nothing. (Documented in `PIPELINE_JOB_VALIDATION.md` #47.)
+- [ ] **27. `metrics-normalize` #48 — dashboard fidelity fixes** (all in `docs/gaips-materials/scripts/write_operational_metrics.py`).
+  The job genuinely normalises 27/37 sources into one honest `operational-metrics.json` and tolerates absent inputs by
+  design; these fixes harden *interpretation*. It is reporting-only (`allow_failure: true`) — that's correct, no
+  enforcement fix needed.
+  - **27a (Tier 2 — present-but-`null` extraction gaps; real schema drift, with the markllm one confirmed).**
+    - **Confirmed defect (markllm):** the normaliser (`:443-446`) reads
+      `markllm.get("ready", markllm.get("readiness"))` and `markllm.get("import_ok", markllm.get("import_status"))` —
+      but **the producer `run_markllm_watermark_eval.py` writes none of those keys.** It emits `status`
+      (`"running"|"passed"|"failed"`, `:73/:142/:36`), `failure_reason` (`:37`), and `metrics:{prompt_count,
+      detections_completed}` (`:144-146`), plus `model_id`/`device`/`prompts`. So both `.get()` chains miss → the
+      section is all-`null` even though #38 genuinely ran (loaded a 1.5B model). Same class, lower-confidence:
+      `data_quality.download.size` (`:339` reads `size`/`bytes`, but `dataset-download.json` has neither → confirm the
+      producer's real key) and `security.package_integrity.mode="unknown"` (`:191`, from `pkg-integrity.env`).
+    - **Fix:** map to the keys the producers actually write — e.g. `ready` ← `status == "passed"`,
+      `import_ok` ← `failure_reason` absent (or `status != "failed"`), and surface `detections_completed`/`prompt_count`
+      from `metrics`; reconcile `download.size` and `package_integrity.mode` against their producers the same way. AND
+      add a third `Sources` state: when a file loads but its section comes back all-`null`, mark it
+      `"present-but-unparsed"` (not `"present"`), so a parse gap is distinguishable downstream from a genuinely absent
+      input. (The `Sources` status is currently binary present/absent — extend it.)
+  - **27b (Tier 2 — gate-semantics labeling can mislead).**
+    - **Current:** `Metrics.gate(name, state, detail)` (`:129-132`) buckets signals into passed/failed/skipped with **no
+      notion of enforcement**, and the output (`:644-648`) reports a flat `passed/failed/skipped` count. So the run's
+      lone "failed" is `semgrep-sast` — which is **advisory** (`allow_failure: true`) — while the pipeline's actual hard
+      gates (`signature-verification` #19, `artifact-signing-gate` #33, `clamav-scan`, `dataset-scan`/`-redact`,
+      `eval-dataset-validate`, `ai-bom-assemble`/`ai-bom-validate`, `dependency-track-upload`) aren't even in the list.
+      "10 passed, 1 failed" therefore reads as deploy-blocking when it isn't.
+    - **Fix:** extend the gate signature to `gate(name, state, detail, enforcing=False)` and record `enforcing` in each
+      entry; pass `enforcing=True` only for the `allow_failure: false` gates above. The dashboard (`pages` #49) can then
+      separate "advisory finding" from "hard-gate failure," so the headline count reflects enforcement reality.
+  - **27c (Tier 5 — `generated_at` is the pipeline timestamp, not the build time).**
+    - **Current:** `:632` sets `ts = args.timestamp or CI_PIPELINE_CREATED_AT or "unknown"`, and the YAML invocation
+      (`.gitlab-ci.yml:3004-3009`) passes no `--timestamp`, so `generated_at` = `CI_PIPELINE_CREATED_AT` (pipeline
+      *creation* time) — which is why it coincides with `provenance.timestamp`, not when this JSON was actually written.
+    - **Fix:** either rename `generated_at` → `pipeline_created_at` (truthful), or keep it and add a separate
+      `normalised_at` stamped at write time (`datetime.now(timezone.utc)`), so consumers can tell "when the pipeline
+      ran" from "when the dashboard JSON was produced."
+  - ℹ️ Also note (no fix): the **operational/timing half is empty** without `GITLAB_API_TOKEN` (`operational.skipped=true`,
+    graceful by design) — document that pipeline/job duration + queue metrics require the token.
+    (Documented in `PIPELINE_JOB_VALIDATION.md` #48.)
+- [ ] **28. `pages` #49 — dashboard presentation-fidelity fixes** (in `docs/gaips-materials/scripts/render_metrics_dashboard.py`).
+  The job genuinely renders a self-contained, JS-free GitLab Pages dashboard with an empty-input fallback; output is
+  correctly UTF-8 encoded. These fixes are about how it *presents* #48's data, not whether it runs.
+  - **28a (Tier 2 — negative-polarity booleans mis-colored; confirmed).**
+    - **Current:** `render_value` (`:71-73`) does `cls = "ok" if value else "bad"` for **every** boolean — uniformly
+      `true→green`, `false→red`. So `data_quality.evidently.drift_detected: false` renders as a **red `pill bad`**
+      (`<span class="pill bad">False</span>`), the lone red pill in the Data-Quality card, even though **no drift is the
+      desired outcome**. The rule is polarity-blind: any future `infected`/`vulnerable`/`dirty` boolean mis-colors the
+      same way (true should be red, false green).
+    - **Fix:** make coloring polarity-aware — define a `NEGATIVE_POLARITY` key set
+      (`{"drift_detected","infected","vulnerable","dirty",…}`) and, when the rendered key is in it, invert
+      (`cls = "bad" if value else "ok"`); leave positive-polarity bools (`valid`/`clean`/`passed`/`changed`) on the
+      existing `true→ok` rule. Pass the `key` (already available in `render_value(key, value)`) into the decision.
+  - **28b (Tier 5 — `None` renders as a blank cell, ambiguous with absent; render-side companion to #27a).**
+    - **Current:** a `None` scalar falls through to `fmt(value)` (`:76`) and renders as an empty `<td></td>` — so
+      `markllm.{ready,import_ok}`, `hf_scan.*`, and `download.size` show as blank cells **indistinguishable from a
+      missing input**, even though markllm genuinely ran (#38). (The data-layer root cause is **#27a**.)
+    - **Fix:** render `None` as an explicit `n/a` / `unparsed` (muted) rather than blank, and once #27a adds the
+      `"present-but-unparsed"` Sources state, badge those rows distinctly (e.g. an amber pill) so a parse gap reads as a
+      gap, not "no data."
+  - ℹ️ Also (no NEW fix — consumer of **#27b**): the banner tile "**1 gates failed**" + the red `semgrep-sast` ledger row
+    present an **advisory** (`allow_failure`) finding as a failure, with no advisory/enforcing distinction and none of the
+    real hard gates shown. Once #27b adds an `enforcing` flag, thread it into the ledger + banner here so the headline
+    can't be misread as deploy state.
+  - ℹ️ Also (no fix — NOT a bug): the mojibake in a pasted copy of `index.html` (`GAIPS CI Metrics â …`, `Â·`, garbled
+    emoji) is a **transport/paste artifact**. The renderer is correctly UTF-8 (source bytes verified `c2 b7` for `·`,
+    `write_text(..., encoding="utf-8")` at `:264`, `<meta charset="utf-8">`). If the **live** Pages site is garbled,
+    investigate GitLab Pages' served `Content-Type`/charset — not this script. (Documented in `PIPELINE_JOB_VALIDATION.md` #49.)
 
 > After Fix #1 (+ #5/#16 to the clamav jobs), **re-run the pipeline** so the dataset chain populates, then
 > resume the walkthrough at #30 to validate `great-expectations-validate` / `ydata-profile` / `dataset-sign`

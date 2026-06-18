@@ -197,6 +197,9 @@ stages:
   - evidence
   - ai-bom
   - deploy-prep
+  # Terminal stage: runs dead-last so sign-evidence can hash + sign the ENTIRE
+  # run's evidence set, including the ai-bom and deploy-prep outputs.
+  - attest
 
 # ─── SETUP ───────────────────────────────────────────────────────────────────
 
@@ -2251,8 +2254,10 @@ model-drift-detection:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  # Report producer (never blocks) — the hard gate is `drift-gate`, placed after
-  # the BOM so a drifted run still yields a signed BOM that RECORDS the drift.
+  # Report producer (never blocks). NOTE: this eval-metric drift unit is dead-by-
+  # construction in the static pipeline (its six live-scan inputs moved to live-scans);
+  # the former `drift-gate` that consumed it was removed as vacuous (Fix #24a). This
+  # job belongs in the live-scans pipeline alongside its inputs and a real gate.
   allow_failure: true
   variables:
     DRIFT_THRESHOLD: "0.10"   # absolute metric movement that flags drift
@@ -2422,42 +2427,169 @@ evidence-summary:
       - "${EVIDENCE_DIR}/model-baseline.json"
     expire_in: 90 days
 
-model-signing-evidence:
-  stage: evidence
+# Builds a comprehensive RUN-EVIDENCE manifest — rich pipeline metadata, the
+# approved-vs-recorded model identity, and a sha256 hash-manifest of EVERY report,
+# SBOM, and evidence artifact produced across the whole run — then keyless-signs it
+# with cosign and self-verifies the result. Signing this one manifest therefore
+# binds the integrity of the entire run's evidence set in a single transparency-
+# logged signature. (Renamed from `model-signing-evidence`: the model itself is
+# signed by `model-sign`; this job signs evidence ABOUT the run.)
+sign-evidence:
+  # Terminal `attest` stage (last in the pipeline) so the hash-manifest below
+  # captures EVERY artifact, including the signed AI-BOM and deploy-prep outputs.
+  stage: attest
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
+  # Mirror evidence-summary's collection set so this job receives every report/SBOM/
+  # evidence artifact in the run and can hash them all into one signed manifest.
   needs:
-    - artifact-signing-gate
+    - semgrep-sast
+    - secret-detection
+    - gitleaks-scan
+    - pip-audit
+    - pkg-integrity
+    - conda-pkg-verify
+    - syft-cyclonedx
+    - syft-spdx
+    - grype-scan
+    - trivy-scan
+    - modelscan
+    - modelaudit-scan
+    - modelfile-audit
+    - clamav-scan
+    - hf-artifact-scan
     - model-digest
+    - dataset-download
+    - dataset-scan
+    - dataset-redact
+    - eval-dataset-validate
+    - great-expectations-validate
+    - ydata-profile
+    - dvc-verify
+    - evidently-drift
+    - tamper-verification
+    - model-drift-detection
+    - markllm-watermark-eval
+    - artifact-signing-gate
     - evidence-summary
+    # ai-bom stage — captures the signed AI-BOM (the keystone an auditor reads)
+    - ai-bom-assemble
+    - ai-bom-validate
+    - ai-bom-sign
+    - dependency-track-upload
+    # deploy-prep stage — captures the publish manifest, image-sign, metrics, pages
+    - image-sign
+    - publish-signed-artifacts
+    - metrics-normalize
+    - pages
   # SIGSTORE_ID_TOKEN is the standard env var cosign reads for keyless signing.
-  # aud must be "sigstore" — Fulcio validates this claim.
+  # aud must be "sigstore" — Fulcio validates this claim. This is a GitLab-native
+  # id_token (works on any ref), independent of the protected MODEL_SIGNING_IDENTITY.
   id_tokens:
     SIGSTORE_ID_TOKEN:
       aud: "sigstore"
+  # cosign does all signing; no pip packages are needed (stdlib-only manifest build).
+  before_script: []
+  cache: {}
   script:
-    - pip install "model-signing==${MODEL_SIGNING_VERSION}" "sigstore==${SIGSTORE_PY_VERSION}"
     - apt-get update -qq && apt-get install -y -qq curl ca-certificates
     - mkdir -p "${EVIDENCE_DIR}"
     - |
-      python - <<'PYEOF'
-      import json, os, datetime
+      # Build the run-evidence manifest (stdlib only).
+      python3 - <<'PYEOF'
+      import json, os, hashlib, datetime
+      from pathlib import Path
+
+      def env(k):
+          v = os.environ.get(k, "")
+          return v if v != "" else None
+
+      def sha256_file(p):
+          h = hashlib.sha256()
+          with open(p, "rb") as f:
+              for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                  h.update(chunk)
+          return h.hexdigest()
+
+      project_dir  = os.environ["CI_PROJECT_DIR"]
+      reports_dir  = Path(os.environ["REPORTS_DIR"])
+      sbom_dir     = Path(os.environ["SBOM_DIR"])
+      evidence_dir = Path(os.environ["EVIDENCE_DIR"])
+      out          = evidence_dir / "sign-evidence.json"
+      own_files    = {"sign-evidence.json", "sign-evidence.sig", "sign-evidence.pem"}
+
+      # --- hash-manifest of every report / SBOM / evidence artifact in the run ---
+      artifacts, seen = [], set()
+      for base in (reports_dir, sbom_dir, evidence_dir):
+          if not base.exists():
+              continue
+          for p in sorted(base.rglob("*")):
+              if not p.is_file() or p.name in own_files:
+                  continue
+              rel = os.path.relpath(p, project_dir)
+              if rel in seen:
+                  continue
+              seen.add(rel)
+              artifacts.append({
+                  "path": rel,
+                  "sha256": sha256_file(p),
+                  "size_bytes": p.stat().st_size,
+              })
+
+      # --- model identity: approved baseline vs the digest model-digest recorded ---
+      model = {}
+      baseline = evidence_dir / "model-baseline.json"
+      if not baseline.exists():
+          baseline = Path(os.environ["GAIPS_MATERIALS_DIR"]) / "evals" / "model-baseline.json"
+      if baseline.exists():
+          b = json.loads(baseline.read_text()).get("model", {})
+          model.update(name=b.get("name"), path=b.get("path"),
+                       approved_sha256=b.get("sha256"))
+
+      recorded = []
+      digests_txt = evidence_dir / "model-digests.txt"
+      if digests_txt.exists():
+          for line in digests_txt.read_text().splitlines():
+              if "sha256:" in line:
+                  fpath, _, dg = line.rpartition("sha256:")
+                  recorded.append({"path": fpath.strip(), "sha256": dg.strip()})
+      model["recorded_digests"] = recorded
+      model["digest_match"] = bool(
+          model.get("approved_sha256")
+          and any(r["sha256"] == model["approved_sha256"] for r in recorded)
+      )
 
       bundle = {
-          "schema_version": "1.0",
-          "pipeline_id":    os.environ["CI_PIPELINE_ID"],
-          "commit_sha":     os.environ["CI_COMMIT_SHA"],
-          "ref":            os.environ["CI_COMMIT_REF_NAME"],
-          "timestamp":      datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
-          "model_digests":  open(os.environ["EVIDENCE_DIR"] + "/model-digests.txt").read().splitlines(),
+          "schema_version": "2.0",
+          "kind": "gaips-run-evidence",
+          "generated_at": datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
+          "pipeline": {
+              "id":            env("CI_PIPELINE_ID"),
+              "url":           env("CI_PIPELINE_URL"),
+              "source":        env("CI_PIPELINE_SOURCE"),
+              "created_at":    env("CI_PIPELINE_CREATED_AT"),
+              "project_path":  env("CI_PROJECT_PATH"),
+              "project_url":   env("CI_PROJECT_URL"),
+              "commit_sha":    env("CI_COMMIT_SHA"),
+              "commit_short":  env("CI_COMMIT_SHORT_SHA"),
+              "commit_title":  env("CI_COMMIT_TITLE"),
+              "ref":           env("CI_COMMIT_REF_NAME"),
+              "ref_protected": env("CI_COMMIT_REF_PROTECTED"),
+              "triggered_by":  env("GITLAB_USER_LOGIN"),
+              "runner":        env("CI_RUNNER_DESCRIPTION"),
+              "signing_job_id":  env("CI_JOB_ID"),
+              "signing_job_url": env("CI_JOB_URL"),
+          },
+          "model": model,
+          "artifact_count": len(artifacts),
+          "artifacts": artifacts,
       }
 
-      out = os.environ["EVIDENCE_DIR"] + "/model-signing-evidence.json"
-      with open(out, "w") as f:
-          json.dump(bundle, f, indent=2)
+      out.write_text(json.dumps(bundle, indent=2) + "\n")
       print(json.dumps(bundle, indent=2))
+      print(f"\nHashed {len(artifacts)} artifact(s); model.digest_match={model.get('digest_match')}")
       PYEOF
     - |
       # Install cosign binary (not available via pip; each job gets a fresh container)
@@ -2472,22 +2604,32 @@ model-signing-evidence:
         | (cd /tmp && sha256sum --check --strict)
       install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
     - |
-      BUNDLE="${EVIDENCE_DIR}/model-signing-evidence.json"
+      BUNDLE="${EVIDENCE_DIR}/sign-evidence.json"
       if [ -n "${SIGSTORE_ID_TOKEN}" ]; then
         # SIGSTORE_ID_TOKEN is set by id_tokens above; cosign reads it automatically
         cosign sign-blob --yes \
-          --output-signature "${EVIDENCE_DIR}/model-signing-evidence.sig" \
-          --output-certificate "${EVIDENCE_DIR}/model-signing-evidence.pem" \
+          --output-signature "${EVIDENCE_DIR}/sign-evidence.sig" \
+          --output-certificate "${EVIDENCE_DIR}/sign-evidence.pem" \
           "${BUNDLE}"
-        echo "Evidence bundle signed via Sigstore keyless"
+        echo "Run-evidence manifest signed via Sigstore keyless"
+        # Self-verify the signature we just produced, so a broken signature fails
+        # the job here rather than shipping an unverified artifact downstream.
+        cosign verify-blob \
+          --certificate "${EVIDENCE_DIR}/sign-evidence.pem" \
+          --signature   "${EVIDENCE_DIR}/sign-evidence.sig" \
+          --certificate-identity-regexp ".+" \
+          --certificate-oidc-issuer-regexp "https://(gitlab|oauth2)\\..+" \
+          "${BUNDLE}" \
+          && echo "Self-verify OK: signature matches the manifest" \
+          || { echo "ERROR: self-verify of the signed evidence failed"; exit 1; }
       else
         echo "SIGSTORE_ID_TOKEN not available — evidence bundle unsigned (id_tokens requires GitLab 15.7+)"
       fi
   artifacts:
     paths:
-      - "${EVIDENCE_DIR}/model-signing-evidence.json"
-      - "${EVIDENCE_DIR}/model-signing-evidence.sig"
-      - "${EVIDENCE_DIR}/model-signing-evidence.pem"
+      - "${EVIDENCE_DIR}/sign-evidence.json"
+      - "${EVIDENCE_DIR}/sign-evidence.sig"
+      - "${EVIDENCE_DIR}/sign-evidence.pem"
     expire_in: 90 days
 
 # ─── AI BOM ──────────────────────────────────────────────────────────────────
@@ -2638,36 +2780,12 @@ ai-bom-sign:
       - "${SBOM_DIR}/aibom-signing.pub"       # public key for offline verification
     expire_in: 90 days
 
-# Hard gate on model drift — runs LAST, after the BOM is built and signed, so a
-# drifted run still produces a signed BOM that records the drift. Fails the
-# pipeline when drift is detected; passes on a clean run, a seeded baseline, or
-# when drift detection was skipped (no metrics).
-drift-gate:
-  stage: ai-bom
-  rules:
-    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
-      when: never
-    - when: on_success
-  needs: ["model-drift-detection", "ai-bom-sign"]
-  before_script: []          # stdlib python only
-  allow_failure: false       # this is the gate — drift fails the pipeline
-  script:
-    - |
-      python3 - <<'PYEOF'
-      import json, os, sys
-      path = os.path.join(os.environ["REPORTS_DIR"], "model-drift.json")
-      if not os.path.exists(path):
-          print("No drift report — gate passes (drift detection skipped)"); sys.exit(0)
-      d = json.load(open(path))
-      if d.get("skipped") or d.get("seeded"):
-          print("Drift gate: baseline seeded/skipped — pass"); sys.exit(0)
-      if d.get("drift_detected"):
-          drifted = ", ".join(x["metric"] for x in d.get("drifted", []))
-          print(f"DRIFT GATE FAILED — metric(s) beyond threshold: {drifted}")
-          print("Review reports/model-drift.json; update evals/eval-baseline.json if the new behaviour is intended.")
-          sys.exit(1)
-      print("Drift gate PASSED — eval metrics within threshold of baseline")
-      PYEOF
+# NOTE: `drift-gate` was REMOVED (Fix #24a). In the static pipeline it was vacuous
+# theater — its only input, model-drift-detection, is dead-by-construction here
+# (its six live-scan eval inputs moved to the live-scans pipeline), so the hard gate
+# could only ever pass. The eval-metric drift unit + its gate belong in live-scans
+# alongside the inputs. If DATA-drift enforcement is wanted here, add a small gate
+# over evidently-drift (#38) once it has a committed reference baseline (Fix #24b).
 
 # Ingest the signed BOMs into Dependency-Track for CONTINUOUS analysis — the SBOM
 # and the AI BOM (nested under the app project) are re-scanned against new CVEs +
@@ -2720,7 +2838,10 @@ image-sign:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  needs: ["drift-gate"]
+  # drift-gate removed (was vacuous theater in the static pipeline — its only input,
+  # model-drift-detection, is dead-by-construction here; see Fix #24a). Anchored instead
+  # to the ai-bom stage's remaining hard gate so image signing still follows it.
+  needs: ["dependency-track-upload"]
   # Fulcio requires an OIDC token with aud "sigstore" for keyless signing — same
   # mechanism model-sign / dataset-sign use. The resulting cert's identity is this
   # GitLab job's SAN, which matches the Kyverno policy's gitlab issuer/subject regex.

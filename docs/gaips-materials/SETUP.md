@@ -143,7 +143,7 @@ All optional — absent files make their jobs skip — but for a full run, provi
 | `evals/promptfoo.yaml` | `promptfoo-eval` (live-scan pipeline) | Already shipped in materials. See [`ci/live-scans.md`](ci/live-scans.md). |
 | `evals/eval-dataset.schema.json` | `eval-dataset-validate` | Already shipped. |
 | `guardrails/baseline.json` | `guardrail-regression` (live-scan pipeline) | Regression baseline. See [`ci/live-scans.md`](ci/live-scans.md). |
-| `evals/eval-baseline.json` | `model-drift-detection`, `drift-gate` | **Seeded on first run** — see Part C2. |
+| `evals/eval-baseline.json` | `model-drift-detection` (eval-metric drift unit; its gate lives in the live-scans pipeline, not here) | **Seeded on first run** — see Part C2. |
 
 The collector/runner scripts (`build_ai_bom.py`, `run_guardrail_regression.py`,
 `write_ci_evidence_summary.py`, `detect_model_drift.py`, etc.) already ship under
@@ -200,7 +200,7 @@ git commit -m "ci: add GAIPS AI/ML security pipeline" && git push
 ```
 On a clean repo with no models/datasets, expect:
 - **Always-run hard gates pass:** `secret-detection`, `gitleaks-scan`,
-  `clamav-scan`, `artifact-signing-gate`, `drift-gate`.
+  `clamav-scan`, `artifact-signing-gate`.
 - **Everything model/dataset/integration-specific skips cleanly** (logs say so).
 - `artifact-signing-gate` passes because `tamper-verification` seeds its baseline
   and writes `integrity.env`.
@@ -216,8 +216,11 @@ malformed dataset) — fix the input, not the gate.
 
 ### C2. Activate drift detection (seed the baseline)
 The first run with eval metrics seeds `eval-baseline.seed.json`. To make
-`drift-gate` meaningful on later runs, that seed must become
-`evals/eval-baseline.json`. Two options:
+eval-metric drift detection meaningful on later runs, that seed must become
+`evals/eval-baseline.json`. **Note:** the enforcing eval-metric drift gate lives in
+the **live-scans** pipeline (where the eval metrics are produced) — the static main
+pipeline no longer has a `drift-gate` (it was removed as vacuous; see `README.md`).
+Two options:
 
 - **Automatic:** create a Project Access Token (scope `write_repository`), set it
   as masked CI/CD variable **`GITLAB_PUSH_TOKEN`**, and run on the default branch
@@ -294,8 +297,8 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
 - [ ] `vault kv get -mount=secret gaips/ci/model-endpoint` returns your real value
       (with `VAULT_NAMESPACE` exported).
 - [ ] Pipeline is green; `vault-secrets` log shows `N/8 secret(s) written`.
-- [ ] `artifact-signing-gate` passed and `drift-gate` passed.
-- [ ] `evals/eval-baseline.json` committed (drift detection now active).
+- [ ] `artifact-signing-gate` passed.
+- [ ] `evals/eval-baseline.json` committed (eval-metric drift detection now active in the live-scans pipeline).
 - [ ] (If signing) `signature-verification` passed against your real
       `MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER`.
 - [ ] (If deploying) `image-sign` + `publish-signed-artifacts` produced artifacts;

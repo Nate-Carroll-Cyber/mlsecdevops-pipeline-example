@@ -25,7 +25,7 @@ these in **GitLab → Settings → CI/CD → Variables** (or fetch from Vault vi
 
 > With just these (or nothing at all), the pipeline runs: every model/dataset/
 > integration job skips cleanly, and the only hard gates — `secret-detection`,
-> `gitleaks-scan`, `clamav-scan`, `artifact-signing-gate`, `drift-gate` — pass on
+> `gitleaks-scan`, `clamav-scan`, `artifact-signing-gate` — pass on
 > a clean repo.
 
 `secret-detection` uses a shallow HEAD checkout (`GIT_DEPTH: 1`) plus
@@ -120,7 +120,7 @@ verification identifiers, not secrets; leave variable expansion off.
 
 | Variable | Source | Default | Purpose |
 | --- | --- | --- | --- |
-| `DRIFT_THRESHOLD` | default | `0.10` | Absolute eval-metric movement that flags drift (`model-drift-detection` → `drift-gate`). |
+| `DRIFT_THRESHOLD` | default | `0.10` | Absolute eval-metric movement that flags drift (`model-drift-detection`; the enforcing gate lives in the live-scans pipeline — the static pipeline's `drift-gate` was removed). |
 
 The following tuning variables belong to the separate **live-scan pipeline**
 ([`ci/live-scans.md`](live-scans.md)), not this one:

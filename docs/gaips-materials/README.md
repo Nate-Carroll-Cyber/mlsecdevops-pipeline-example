@@ -105,15 +105,18 @@ flowchart TD
     end
     livescan[[separate live-scan pipeline<br/>ci/live-scans.gitlab-ci.yml<br/>promptfoo · garak · giskard<br/>inspect-ai · pyrit · guardrail-regression]]
     subgraph EVID [evidence]
-      evid_jobs[evidence-summary · model-signing-evidence]
+      evid_jobs[evidence-summary]
     end
     subgraph AIBOM [ai-bom]
-      assemble[ai-bom-assemble<br/>→ aibom.cyclonedx.json<br/>+ version, redaction, drift<br/>embeds model/dataset cosign sigs] --> validate[ai-bom-validate<br/>schema 1.6 + XML] --> aibom_sign[ai-bom-sign<br/>enveloped XML signature] --> drift_gate[drift-gate<br/>hard-fail on drift]
+      assemble[ai-bom-assemble<br/>→ aibom.cyclonedx.json<br/>+ version, redaction, drift<br/>embeds model/dataset cosign sigs] --> validate[ai-bom-validate<br/>schema 1.6 + XML] --> aibom_sign[ai-bom-sign<br/>enveloped XML signature]
       dtrack[dependency-track-upload<br/>continuous BOM policy gate]
     end
     subgraph DEPLOY [deploy-prep]
       imgsign[image-sign<br/>cosign keyless → workload image]
       publish[publish-signed-artifacts<br/>AI-BOM + dataset → package registry]
+    end
+    subgraph ATTEST [attest]
+      signev[sign-evidence<br/>sha256 hash-manifest of the WHOLE run<br/>+ cosign keyless sign + self-verify]
     end
     subgraph VERIFY [deploy-time verification — outside CI, in-cluster]
       kyverno[[Kyverno ClusterPolicy<br/>verify image signature at admission]]
@@ -126,6 +129,7 @@ flowchart TD
     SAST & VULN & GUARD & MI --> EVID
     EVID --> AIBOM
     AIBOM --> DEPLOY
+    DEPLOY --> ATTEST
     imgsign -. "signature verified by" .-> kyverno
     publish -. "artifacts fetched & verified by" .-> presync
 ```
@@ -239,7 +243,7 @@ The `guardrail-regression` job moved to the separate [live-scan pipeline](ci/liv
 
 | Job | What it does |
 | --- | --- |
-| `model-drift-detection` | Extracts normalised eval metrics from `reports/` and compares them to the committed baseline `evals/eval-baseline.json`; any metric moving beyond `DRIFT_THRESHOLD` (default ±0.10) flags drift. Report producer only (`allow_failure: true`) — the enforcing gate is `drift-gate` in the `ai-bom` stage. On first run (no baseline) it seeds `eval-baseline.seed.json` (also bundled into the end-of-pipeline `evidence-summary` artifacts). **Note:** with the live evals split into the separate pipeline, this job finds no eval-metric reports in *this* pipeline, so it seeds/skips and `drift-gate` passes on the skip. It stays wired so drift re-activates if the live-scan pipeline's eval reports are fed into `reports/`; meaningful behaviour drift is computed from those eval metrics. |
+| `model-drift-detection` | Extracts normalised eval metrics from `reports/` and compares them to the committed baseline `evals/eval-baseline.json`; any metric moving beyond `DRIFT_THRESHOLD` (default ±0.10) flags drift. Report producer only (`allow_failure: true`). **Note:** with the live evals split into the separate pipeline, this job finds no eval-metric reports in *this* pipeline, so it seeds/skips every run — i.e. it is dead-by-construction here. The former `drift-gate` that consumed it has been **removed** from the static pipeline (it could only ever pass); this eval-metric drift unit + its gate belong in the **live-scans** pipeline alongside the eval reports (Fix #24a). |
 | `model-baseline-commit` | **Automates baseline activation.** On the default branch, when a baseline was just seeded and none exists in the repo, commits `eval-baseline.seed.json` → `evals/eval-baseline.json` and pushes (with `[skip ci]` + `-o ci.skip`, so no pipeline loop). Requires `GITLAB_PUSH_TOKEN` (Project Access Token, scope `write_repository`); if unset, falls back to the manual artifact. Never overwrites an existing baseline. `allow_failure: true` — a failed auto-commit never breaks the build. |
 | `evidently-drift` | Data/feature drift on the **input** side (complements `model-drift-detection`, which watches eval *metrics*). Evidently's `DataDriftPreset` (PSI) compares a committed reference snapshot (`evals/dataset-reference.jsonl`) to the current dataset; TextEvals adds LLM-relevant text descriptors over prompt columns. Seeds the reference on first run. Soft gate (`allow_failure: true`); skips cleanly when no dataset is present. **Note:** no `evals/dataset-reference.jsonl` is committed today, so the first run seeds the reference rather than detecting drift against it. |
 
@@ -248,7 +252,6 @@ The `guardrail-regression` job moved to the separate [live-scan pipeline](ci/liv
 | Job | What it does |
 | --- | --- |
 | `evidence-summary` | Collects all reports from every prior job and renders a human-readable Markdown evidence summary to `evidence/evidence-summary.md`. Also bundles the approved `model-baseline.json` (and a freshly-seeded `eval-baseline.seed.json`, when present) into the final-report artifacts, so the run records the exact model identity and variable manifest it was pinned to. Retained for 90 days. |
-| `model-signing-evidence` | Builds a JSON bundle containing pipeline ID, commit SHA, branch, timestamp, and the full model digest list. Signs it with `cosign sign-blob` using the GitLab `SIGSTORE_ID_TOKEN`, producing a `.sig` and `.pem` certificate — a tamper-evident, publicly-verifiable record of the pipeline run. |
 
 ### Stage 9 — AI BOM
 
@@ -259,7 +262,6 @@ The final stage rolls every prior element into **one CycloneDX 1.6 AI BOM** — 
 | `ai-bom-assemble` | Runs `scripts/build_ai_bom.py`, merging the Syft software SBOM (`library` components), models (`machine-learning-model` components with a `modelCard`, digest, ModelScan/ModelAudit/ClamAV/Hugging Face verdicts, and the embedded `model.sig`), datasets (`data` components with digest, scan verdict, and embedded `dataset.sig`), and AI-eval results (root-component properties + external references) into `sbom/aibom.cyclonedx.json`. The per-component **cosign** signatures for models and datasets are embedded here as base64 `data:`-URI external references; the BOM's own signature is applied downstream by `ai-bom-sign`. It also folds in **Git version provenance** (from `version-info.json`), the **dataset redaction** verdict (redacted SHA + secret/PII counts, so the `data` component hash reflects the redacted bytes), and the **model-drift** verdict. Each input is optional, so the BOM degrades gracefully as stages light up — with the live evals split out, their results are recorded as `eval.*.present: false` here unless the live-scan pipeline's reports are fed into `reports/`. Retained for 90 days. |
 | `ai-bom-validate` | Validates the BOM against the CycloneDX 1.6 JSON schema with `cyclonedx validate --fail-on-errors`, then converts it to `sbom/aibom.cyclonedx.xml` — the form the next job signs. Hard gate (no `allow_failure`): a schema-invalid BOM fails the pipeline rather than shipping a malformed attestation. |
 | `ai-bom-sign` | Applies the BOM's **own** signature as a native CycloneDX **enveloped signature** (`cyclonedx sign bom`, an XML Digital Signature embedded directly in `aibom.cyclonedx.xml`), then proves it with `cyclonedx verify all`. Unlike a detached signature, this verifies **as-is** — no canonical reconstruction. Uses a stable RSA key from `CYCLONEDX_SIGNING_KEY` / `CYCLONEDX_SIGNING_PUB` when configured, else an ephemeral keypair (intra-run verification only). The private key is never published; the public key ships as `aibom-signing.pub` for offline verification. Models and datasets keep their cosign/Sigstore signatures (embedded by `ai-bom-assemble`); only the BOM document itself moves to enveloped signing. |
-| `drift-gate` | The hard gate for model drift. Runs **last** — after the BOM is built and signed — and fails the pipeline (`allow_failure: false`) when `model-drift-detection` reported drift. Placing it here means a drifted run still produces a signed BOM that **records** the drift, rather than a blocked pipeline that explains nothing. Passes on a clean run, a freshly-seeded baseline, or when drift detection was skipped — so with the live evals split out (no eval metrics in this pipeline), it currently passes on the skip. |
 | `dependency-track-upload` | Ingests the Syft SBOM and the AI BOM (nested under it via `parentName`/`parentVersion`) into **Dependency-Track** for *continuous* analysis — re-scanning against new CVEs and policy conditions over time. Hard policy gate **when configured**: fails on any non-suppressed violation whose `violationState` is in `DT_FAIL_ON` (default `FAIL`). Skips cleanly when `DT_API_URL`/`DT_API_KEY` are unset — so in a default run with no Dependency-Track credentials, nothing is uploaded and the gate is inert (the "also pushed to Dependency-Track" behaviour applies only once DT is wired). |
 
 The pipeline default is `interruptible: true` so superseded jobs can be canceled by GitLab when a newer pipeline replaces them. Enable GitLab's project-level auto-cancel redundant pipelines setting to turn that into runner-minute savings during CI debugging.
@@ -274,3 +276,26 @@ This stage produces the two artifacts the **deploy-time verifiers** consume, clo
 | `publish-signed-artifacts` | Uploads the signed **AI-BOM** (`aibom.cyclonedx.xml`) + its public key, the cosign-signed **dataset** (normalised to `dataset.dat`/`.sig`/`.pem`), and — when present — the **model bundle** to the GitLab **Generic Package Registry** at `${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}`. This is exactly the path the **Argo CD PreSync hook** fetches via `ARTIFACT_BASE_URL` to verify signatures *before* a rollout (AI-BOM via `cyclonedx verify`, dataset via `cosign verify-blob`, model via `model_signing verify`). Uses `CI_JOB_TOKEN` — no extra secret. Emits `artifacts-manifest.txt` recording what was published. |
 
 > **Deploy-time verification (in-cluster, outside CI).** The loop is closed by two manifests under `deployment/`: `kubernetes/policies/kyverno-verify-image-signatures.yaml` (verifies the **image** signature at admission — `Audit` by default; flip to `Enforce` once `image-sign` has run for the deployed digest) and `argocd/verify-signatures-presync-hook.yaml` (a PreSync Job that verifies the **AI-BOM / dataset / model** signatures and aborts the sync on failure). See `deployment/vault/sample-secret-map.md` for the (secretless) wiring.
+
+#### The pipeline's signing jobs (what signs what, and who verifies it)
+
+The pipeline signs **four distinct artifacts** — they are easy to confuse, so the table below is the canonical map. Note `image-sign` signs the deployable *container image*, **not** the model; the model is a separate artifact signed by `model-sign`.
+
+| Job | Signs | Mechanism | Verified at deploy by |
+| --- | --- | --- | --- |
+| `model-sign` | the **model** (GGUF weights blob) | cosign keyless (Fulcio + Rekor) | Argo CD PreSync hook (`model_signing verify`) |
+| `dataset-sign` | the **redacted dataset** | cosign keyless (Fulcio + Rekor) | Argo CD PreSync hook (`cosign verify-blob`) |
+| `ai-bom-sign` | the **AI-BOM document** | enveloped XML signature | Argo CD PreSync hook (`cyclonedx verify`) |
+| `image-sign` | the **workload container image** | cosign keyless (Fulcio + Rekor) | **Kyverno** ClusterPolicy (admission control) |
+
+*(A fifth, `sign-evidence`, cosign-keyless-signs the whole-run evidence manifest for 90-day audit retention — it is not a deploy gate.)*
+
+### Stage 11 — Attest
+
+Terminal stage — runs dead-last so it can seal the **entire** run (including the AI-BOM and deploy-prep outputs) in one signature.
+
+| Job | What it does |
+| --- | --- |
+| `sign-evidence` | Builds a comprehensive run-evidence manifest (`sign-evidence.json`): rich pipeline metadata (id/url/source/commit/ref/protected/triggerer/runner), the approved-vs-recorded model identity with a `digest_match` check, and a **sha256 hash-manifest of every report, SBOM, and evidence artifact across the whole run** (it `needs:` all artifact-producing jobs in stages 2–10). Signs it with `cosign sign-blob` using the GitLab `SIGSTORE_ID_TOKEN` and **self-verifies** the signature, producing a `.sig` + `.pem` — one transparency-logged signature that binds the integrity of the entire run's evidence set. (Renamed from `model-signing-evidence`, which ran mid-pipeline in the `evidence` stage and over only the model digest; the model artifact itself is signed by `model-sign`.) |
+
+> **Design note — why `sign-evidence` is terminal, and what that trades off.** Placing it last is what lets its hash-manifest cover the **entire** run, including the signed AI-BOM and the `deploy-prep` outputs. The consequence is that `publish-signed-artifacts` runs *before* it, so the run-evidence seal is **not** distributed to the deploy gate this run — it is a retained 90-day audit artifact (the deploy-facing attestation remains the signed **AI-BOM**, which `publish-signed-artifacts` does push). If you'd instead want the seal itself published to the deploy gate, that's the alternative wiring — but it'd force `sign-evidence` **before** publish, which reintroduces the blind spot (it could no longer capture `deploy-prep`). You can't have both in one job; getting both would require a small two-part split (seal-and-publish the core artifacts mid-pipeline, then a terminal full-run hash).

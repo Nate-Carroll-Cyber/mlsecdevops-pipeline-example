@@ -40,15 +40,18 @@ flowchart TD
     end
     s_live[[separate live-scan pipeline<br/>ci/live-scans.gitlab-ci.yml<br/>promptfoo · garak · giskard · inspect-ai · pyrit · guardrail-regression]]
     subgraph EVID [evidence]
-      s7[evidence-summary · model-signing-evidence]
+      s7[evidence-summary]
     end
     subgraph AIBOM [ai-bom]
-      a1[ai-bom-assemble] --> a2[ai-bom-validate] --> a3[ai-bom-sign] --> a4[drift-gate]
+      a1[ai-bom-assemble] --> a2[ai-bom-validate] --> a3[ai-bom-sign]
       a5[dependency-track-upload]
     end
     subgraph DEPLOY [deploy-prep]
       d1[image-sign<br/>cosign keyless → image]
       d2[publish-signed-artifacts<br/>→ package registry]
+    end
+    subgraph ATTEST [attest]
+      at1[sign-evidence<br/>hash-manifest of whole run + cosign sign]
     end
     subgraph VERIFY [deploy-time verification — in-cluster]
       v1[[Kyverno: verify image sig]]
@@ -59,7 +62,7 @@ flowchart TD
     SBOM --> VULN
     g --> EVAL --> GUARD
     SAST & VULN & GUARD & MI --> EVID
-    EVID --> AIBOM --> DEPLOY
+    EVID --> AIBOM --> DEPLOY --> ATTEST
     d1 -. "verified by" .-> v1
     d2 -. "verified by" .-> v2
 ```
@@ -94,7 +97,7 @@ flowchart TD
 
 | Tool | Version | Source | Used by | Pin status |
 | --- | --- | --- | --- | --- |
-| `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `dataset-sign`, `model-signing-evidence`, `image-sign` (4 install sites) | ✅ Pinned + checksum verified |
+| `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `dataset-sign`, `sign-evidence`, `image-sign` (4 install sites) | ✅ Pinned + checksum verified |
 | `gitleaks` | `8.30.1` | `github.com/gitleaks/gitleaks/releases` | `dataset-redact` | ✅ Pinned + checksum verified |
 | `promptfoo` | `0.121.15` | `npm install -g promptfoo` | `promptfoo-eval` **(live-scan)** | ✅ Pinned |
 
@@ -106,8 +109,8 @@ All packages below are installed fresh in each job container. None are pinned in
 
 | Package | Extras | Used by | Pin status | Notes |
 | --- | --- | --- | --- | --- |
-| `model-signing` | — | `model-signing-install`, `model-digest`, `model-sign`, `signature-verification`, `model-signing-evidence` | ⚠️ Unpinned | Core signing/verification library; pin to avoid breaking API changes |
-| `sigstore` | — | `model-signing-install`, `model-sign`, `signature-verification`, `model-signing-evidence` | ⚠️ Unpinned | Sigstore Python SDK; used for keyless signing via Fulcio/Rekor |
+| `model-signing` | — | `model-signing-install`, `model-digest`, `model-sign`, `signature-verification` | ⚠️ Unpinned | Core signing/verification library; pin to avoid breaking API changes (`sign-evidence` no longer installs it — it signs with cosign only) |
+| `sigstore` | — | `model-signing-install`, `model-sign`, `signature-verification` | ⚠️ Unpinned | Sigstore Python SDK; used for keyless signing via Fulcio/Rekor |
 | `hvac` | — | `vault-secrets`, `tamper-verification` | ⚠️ Unpinned | HashiCorp Vault Python client |
 | `pip-audit` | — | `pip-audit` | ⚠️ Unpinned | Audits `requirements.txt` against OSV and advisory DBs |
 | `pip-tools` | — | `pkg-integrity` | ⚠️ Unpinned | `pip-compile` for generating hashed lockfiles |
@@ -154,7 +157,7 @@ All packages below are installed fresh in each job container. None are pinned in
 
 | Risk | Status | Notes |
 | --- | --- | --- |
-| `cosign` binary downloaded with no checksum verification | ✅ Fixed | All four install sites (`model-signing-install`, `dataset-sign`, `model-signing-evidence`, `image-sign`) download `cosign_checksums.txt` and verify via `sha256sum --check --strict` before installing |
+| `cosign` binary downloaded with no checksum verification | ✅ Fixed | All four install sites (`model-signing-install`, `dataset-sign`, `sign-evidence`, `image-sign`) download `cosign_checksums.txt` and verify via `sha256sum --check --strict` before installing |
 | `promptfoo` unpinned | ✅ Fixed | Pinned to `0.121.15` via `PROMPTFOO_VERSION` (now in the separate [live-scan pipeline](live-scans.gitlab-ci.yml)) |
 | `torch` + `transformers` unaudited | ✅ Fixed | New `markllm-deps-audit` job runs `pip-audit` against `torch`, `transformers`, and `markllm` before `markllm-watermark-eval` |
 | Current CI blocked by historic secret fixtures | ✅ Scoped | GitLab native `secret-detection` remains a hard gate, but runs against the current HEAD checkout (`GIT_DEPTH: 1`, `SECRET_DETECTION_LOG_OPTIONS="--max-count=1"`). Use one-off historic scans/history cleanup for old fixtures instead of blocking every current pipeline. |

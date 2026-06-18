@@ -11,13 +11,13 @@ model endpoint**, so they live here, intended to run as the root `.gitlab-ci.yml
 pipeline runs them, and removing them is why the main run no longer pulls live-eval
 tooling or requires `MODEL_ENDPOINT`.
 
-> The eval-metric drift producer (`model-drift-detection` → `model-baseline-commit`)
-> and the MarkLLM jobs currently sit in the **main** pipeline — see
-> [`README.md`](../README.md). But drift detection in the main pipeline has no
-> live-eval inputs there (it seeds/skips every run), so the main pipeline's
-> `drift-gate` was **removed** as vacuous. The eval-metric drift unit + an enforcing
-> gate belong **here** in the live-scans pipeline, alongside the eval metrics that
-> actually feed it (Fix #24a — pending the relocation).
+> The eval-metric drift producer (`model-drift-detection`) now runs **here** in
+> the live-scans pipeline (Fix #24a), alongside the six eval jobs that actually
+> feed it — inspect-ai, garak, pyrit, giskard, guardrail-regression, promptfoo.
+> In the main pipeline it had no live-eval inputs (it seeded/skipped every run),
+> so it — and the vacuous `drift-gate` that consumed it — were removed there. The
+> MarkLLM jobs stay in the main pipeline. The main pipeline keeps the **input**-side
+> data-drift control (`evidently-drift` + `data-drift-baseline-commit`, Fix #24b).
 
 ## How to run it
 

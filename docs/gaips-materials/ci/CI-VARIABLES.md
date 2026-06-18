@@ -110,9 +110,9 @@ verification identifiers, not secrets; leave variable expansion off.
 
 | Variable | Source | Masked | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `CYCLONEDX_SIGNING_KEY` | you | Yes | _(unset)_ | RSA private key (PEM) for a **stable** AI-BOM signer identity. Unset → `ai-bom-sign` uses an ephemeral per-run keypair. |
-| `CYCLONEDX_SIGNING_PUB` | you | No | _(unset)_ | Matching RSA public key (PEM); published as `aibom-signing.pub` for offline verify. |
-| `GITLAB_PUSH_TOKEN` | you | Yes | _(unset)_ | Project Access Token (scope `write_repository`) so `model-baseline-commit` can auto-commit the seeded `evals/eval-baseline.json`. Unset → manual commit. |
+| `GITLAB_PUSH_TOKEN` | you | Yes | _(unset)_ | Project Access Token (scope `write_repository`) so `data-drift-baseline-commit` can auto-commit the seeded `evals/dataset-reference.jsonl`. Unset → manual commit. |
+
+> **AI-BOM signing is keyless (Fix #25).** `ai-bom-sign` now signs with cosign keyless (Fulcio + Rekor) via the GitLab `SIGSTORE_ID_TOKEN`, exactly like `model-sign`/`dataset-sign` — there is **no signing-key variable** to set. The former `CYCLONEDX_SIGNING_KEY` / `CYCLONEDX_SIGNING_PUB` are removed; the PreSync hook verifies the BOM against the CI signer identity (`MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER`), no public-key Secret required.
 
 ---
 

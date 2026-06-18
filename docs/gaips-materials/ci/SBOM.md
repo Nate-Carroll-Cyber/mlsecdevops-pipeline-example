@@ -36,7 +36,7 @@ flowchart TD
       s5[markllm-deps-audit · markllm-watermark-eval]
     end
     subgraph GUARD [guardrail]
-      s6[model-drift-detection · model-baseline-commit<br/>evidently-drift]
+      s6[evidently-drift · data-drift-baseline-commit]
     end
     s_live[[separate live-scan pipeline<br/>ci/live-scans.gitlab-ci.yml<br/>promptfoo · garak · giskard · inspect-ai · pyrit · guardrail-regression]]
     subgraph EVID [evidence]

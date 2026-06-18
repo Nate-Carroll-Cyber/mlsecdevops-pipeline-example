@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 
 import pandas as pd
@@ -97,8 +98,22 @@ def main() -> None:
         seed = Path(args.seed_out)
         seed.parent.mkdir(parents=True, exist_ok=True)
         # Seed JSONL so the maintainer commits a stable reference snapshot.
+        # DataFrame.from_records back-fills missing cells with NaN across
+        # heterogeneous records; strip NaN/None-valued keys so the seeded
+        # reference matches the real per-record schema (no spurious columns, no
+        # non-finite JSON literals that strict parsers reject). Fix #24b.
+        def _clean(rec: dict) -> dict:
+            out = {}
+            for k, v in rec.items():
+                if v is None:
+                    continue
+                if isinstance(v, float) and not math.isfinite(v):
+                    continue
+                out[k] = v
+            return out
+
         seed.write_text(
-            "\n".join(json.dumps(r) for r in current_df.to_dict(orient="records")) + "\n",
+            "\n".join(json.dumps(_clean(r)) for r in current_df.to_dict(orient="records")) + "\n",
             encoding="utf-8",
         )
         print(f"No reference at {reference_path} — seeded {len(current_df)} record(s) → {seed}")

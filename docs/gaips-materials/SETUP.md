@@ -222,15 +222,18 @@ the **live-scans** pipeline (where the eval metrics are produced) — the static
 pipeline no longer has a `drift-gate` (it was removed as vacuous; see `README.md`).
 Two options:
 
-- **Automatic:** create a Project Access Token (scope `write_repository`), set it
-  as masked CI/CD variable **`GITLAB_PUSH_TOKEN`**, and run on the default branch
-  — `model-baseline-commit` commits it for you (with `[skip ci]`).
-- **Manual:** download the `eval-baseline.seed.json` artifact from
-  `model-drift-detection` and commit it to `evals/eval-baseline.json`.
+> Note: the eval-metric baseline (`evals/eval-baseline.json`) is seeded by
+> `model-drift-detection`, which now lives in the **live-scans** pipeline (Fix
+> #24a) — seed/commit it there, alongside the eval jobs that feed it.
 
-### C3. (Optional) seed the input-drift reference
-Same pattern for `evidently-drift`: commit its `dataset-reference.seed.jsonl`
-artifact to `evals/dataset-reference.jsonl` once you have a representative dataset.
+### C3. Seed the input-drift reference (auto on the default branch)
+- **Automatic:** set masked CI/CD variable **`GITLAB_PUSH_TOKEN`** (Project Access
+  Token, scope `write_repository`) and run on the default branch — once
+  `evidently-drift` seeds a reference, `data-drift-baseline-commit` **sanitizes
+  and commits** it to `evals/dataset-reference.jsonl` for you (with `[skip ci]`),
+  activating data-drift detection (Fix #24b).
+- **Manual:** download the `dataset-reference.seed.jsonl` artifact from
+  `evidently-drift`, sanitize it, and commit it to `evals/dataset-reference.jsonl`.
 
 ---
 
@@ -243,7 +246,7 @@ Each is independent; set the variable(s) and the corresponding job activates.
 | D1 | **Dataset scan/redact/sign** | Optional: `DATASET_PACKAGE_NAME`, `DATASET_FILENAME` (+ `DATASET_EXPECTED_SHA256`) | Downloads from the Generic Package Registry when configured; otherwise uses the committed CI dataset fixture. Then AV+structural scan → secret/PII redaction → schema validate → cosign sign. |
 | D2 | **HF model scan** | `HF_MODEL_IDS="org/model-a,org/model-b"` (+ `HF_TOKEN` for gated) | ClamAV + ModelScan each HF repo. |
 | D3 | **Dependency-Track** | `DT_API_URL`, masked `DT_API_KEY` (+ `DT_FAIL_ON`, default `FAIL`) | Uploads SBOM + AI-BOM for continuous CVE/policy analysis; **hard policy gate**. |
-| D4 | **Stable AI-BOM signer** | masked `CYCLONEDX_SIGNING_KEY` + `CYCLONEDX_SIGNING_PUB` (RSA PEM) | Signs the AI-BOM with a persistent identity instead of an ephemeral per-run key. |
+| D4 | **AI-BOM signing** | _none_ — keyless via GitLab `SIGSTORE_ID_TOKEN` (Fix #25) | `ai-bom-sign` signs the AI-BOM with cosign keyless (Fulcio + Rekor), like the model/dataset. No signing-key variable to set. |
 | D5 | **DVC lineage** | `DVC_REMOTE_URL` (+ `.dvc/` in repo) | Verifies workspace vs pinned dataset/model versions. |
 
 ---
@@ -263,8 +266,9 @@ signed artifacts; the cluster verifies them.
    CI job).
 
 ### E2. Publish the signed evidence
-`publish-signed-artifacts` uploads the signed AI-BOM (+ public key), the signed
-dataset, and (when present) the model bundle to the Generic Package Registry at:
+`publish-signed-artifacts` uploads the signed AI-BOM (+ its `.sig` + Fulcio
+`.pem`), the signed dataset, and (when present) the model bundle to the Generic
+Package Registry at:
 ```
 ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}
 ```
@@ -282,9 +286,10 @@ Apply `deployment/kubernetes/policies/kyverno-verify-image-signatures.yaml`.
 ### E4. Argo CD — verify blob signatures before sync
 Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
 - Set its `ARTIFACT_BASE_URL` (ConfigMap) to the package URL from E2.
-- Provide the AI-BOM public key (`aibom-signing.pub`) to the hook via the
-  `/keys` mount (a Secret/ConfigMap) so `cyclonedx verify all` can run.
-- The hook verifies the AI-BOM (`cyclonedx verify all`), dataset
+- Set `MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER` (ConfigMap) to your CI
+  signer identity — all three artifacts now verify keyless against it, so **no
+  public-key Secret is required** (Fix #25).
+- The hook verifies the AI-BOM (`cosign verify-blob`), dataset
   (`cosign verify-blob`), and model bundle (`model_signing verify` — **not**
   cosign), and aborts the sync on any failure.
 

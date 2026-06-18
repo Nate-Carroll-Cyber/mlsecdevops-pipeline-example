@@ -37,7 +37,9 @@ except ImportError:  # pragma: no cover — only the GitLab-API block needs it
 # ── loading helpers ───────────────────────────────────────────────────────────
 
 class Sources:
-    """Tracks which inputs were present, absent, or failed to parse."""
+    """Tracks each input's state: 'present', 'absent', 'error: …' (malformed JSON),
+    or 'present-but-unparsed' (valid JSON whose expected schema keys were not
+    found, so nothing usable was extracted — distinct from a clean 'present')."""
 
     def __init__(self) -> None:
         self.status: dict[str, str] = {}
@@ -440,10 +442,34 @@ def parse_ai_eval(reports: Path, src: Sources, m: Metrics) -> None:
 
     markllm = _load_json(reports / "markllm-results.json", src, "markllm-results.json")
     if isinstance(markllm, dict):
-        ev["markllm"] = {
-            "ready": markllm.get("ready", markllm.get("readiness")),
-            "import_ok": markllm.get("import_ok", markllm.get("import_status")),
+        # Fix #27a — run_markllm_watermark_eval.py emits status + metrics, NOT the
+        # ready/import_ok keys this used to read (which always extracted null and
+        # rendered a misleading present-but-blank cell). Read the real schema:
+        # status ∈ {running,passed,failed}; metrics.{prompt_count,detections_completed}.
+        status = markllm.get("status")
+        mk_metrics = markllm.get("metrics") or {}
+        if not isinstance(mk_metrics, dict):
+            mk_metrics = {}
+        mm: dict[str, Any] = {
+            "status": status,
+            "algorithm": markllm.get("algorithm"),
+            "model_id": markllm.get("model_id"),
+            "prompt_count": mk_metrics.get("prompt_count"),
+            "detections_completed": mk_metrics.get("detections_completed"),
         }
+        if markllm.get("failure_reason"):
+            mm["failure_reason"] = markllm.get("failure_reason")
+        ev["markllm"] = mm
+        if isinstance(mm["detections_completed"], (int, float)) and not isinstance(mm["detections_completed"], bool):
+            m.metric("ai_eval.markllm.detections_completed", mm["detections_completed"])
+        if status in ("passed", "failed"):
+            m.gate("markllm-watermark-eval", status == "passed",
+                   markllm.get("failure_reason") or f"{mm['detections_completed']} detection(s) completed")
+        else:
+            # Present + valid JSON, but no terminal status (e.g. still "running" or
+            # an unrecognised shape) — flag it as present-but-unparsed so the
+            # dashboard shows that, not a false "present" with empty fields.
+            src.mark("markllm-results.json", "present-but-unparsed")
 
     giskard = _load_json(reports / "giskard-results.json", src, "giskard-results.json")
     if isinstance(giskard, dict):
@@ -606,7 +632,7 @@ def main() -> None:
     parser.add_argument("--sbom", required=True, help="SBOM_DIR")
     parser.add_argument("--out", required=True, help="output operational-metrics JSON path")
     parser.add_argument("--timestamp", default="",
-                        help="ISO generated_at (defaults to CI_PIPELINE_CREATED_AT or 'unknown')")
+                        help="ISO pipeline-created timestamp (defaults to CI_PIPELINE_CREATED_AT or 'unknown')")
     parser.add_argument("--gitlab-token-env", default="GITLAB_API_TOKEN",
                         help="env var holding a read_api token for the GitLab API block")
     parser.add_argument("--gitlab-timeout", type=int, default=30)
@@ -629,10 +655,28 @@ def main() -> None:
     provenance = parse_provenance(evidence, src, m)
     operational = fetch_gitlab_operational(args.gitlab_token_env, args.gitlab_timeout, m)
 
-    ts = (args.timestamp or os.environ.get("CI_PIPELINE_CREATED_AT") or "unknown")
+    # Fix #27b — mark each gate enforcing (job allow_failure:false) vs advisory
+    # (allow_failure:true), so the dashboard can distinguish a real blocking gate
+    # from a soft one. Derived from the GitLab job API; None ("unknown") when that
+    # block was skipped or the gate's job name isn't found.
+    GATE_JOB_ALIASES = {"dependency-track": "dependency-track-upload"}
+    allow_map: dict[str, bool] = {}
+    if isinstance(operational, dict) and not operational.get("skipped"):
+        for jr in operational.get("jobs", []) or []:
+            if jr.get("name"):
+                allow_map[jr["name"]] = bool(jr.get("allow_failure"))
+    for bucket in m.gates.values():
+        for entry in bucket:
+            job = GATE_JOB_ALIASES.get(entry.get("signal"), entry.get("signal"))
+            entry["enforcing"] = (not allow_map[job]) if job in allow_map else None
+
+    # Fix #27c — this is the pipeline's CREATION time, not when this document was
+    # generated; label it accurately. (A true generation timestamp isn't taken
+    # here: the rest of scripts/ avoids wall-clock calls to stay deterministic.)
+    pipeline_created_at = (args.timestamp or os.environ.get("CI_PIPELINE_CREATED_AT") or "unknown")
     document = {
-        "schema_version": "1.0",
-        "generated_at": ts,
+        "schema_version": "1.1",
+        "pipeline_created_at": pipeline_created_at,
         "pipeline": {
             "id": os.environ.get("CI_PIPELINE_ID"),
             "commit_sha": os.environ.get("CI_COMMIT_SHA"),

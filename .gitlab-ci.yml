@@ -23,14 +23,13 @@ variables:
   VAULT_NAMESPACE: ""               # e.g. "admin" or "admin/gaips" on HCP Vault
   # Override in project CI/CD settings (or fetch from Vault via vault-secrets job):
   # MODEL_ENDPOINT, MODEL_SIGNING_IDENTITY, SIGSTORE_OIDC_ISSUER
-  # AI BOM enveloped signature (ai-bom-sign): set CYCLONEDX_SIGNING_KEY (RSA
-  # private key, PEM) and CYCLONEDX_SIGNING_PUB (matching public key) as masked
-  # CI/CD variables for a STABLE signer identity. If unset, the job generates an
-  # ephemeral keypair — verifiable within the run only, not anchored to a signer.
-  # Drift baseline auto-commit (model-baseline-commit): set GITLAB_PUSH_TOKEN to a
-  # masked Project Access Token (scope: write_repository) to let the first run
-  # commit evals/eval-baseline.json back to the default branch. If unset, the
-  # seeded baseline is published as an artifact to commit manually.
+  # AI BOM signing (ai-bom-sign) is cosign KEYLESS (Fulcio + Rekor, Fix #25) — it
+  # uses the same GitLab OIDC id_token as model-sign/dataset-sign, so no signing
+  # key variable is needed (the old CYCLONEDX_SIGNING_KEY/PUB are gone).
+  # Data-drift baseline auto-commit (data-drift-baseline-commit): set GITLAB_PUSH_TOKEN
+  # to a masked Project Access Token (scope: write_repository) to let the first run
+  # commit evals/dataset-reference.jsonl back to the default branch. If unset, the
+  # seeded reference is published as an artifact to sanitize + commit manually.
   HF_MODEL_IDS: ""    # comma-separated HF repo IDs to gate, e.g. "org/model-a,org/model-b"
   HF_TOKEN: ""        # HuggingFace token for gated/private repos (mask in CI settings)
   HF_AUTHOR_ALLOWLIST: ""   # comma-separated allowed repo authors/orgs; blank = any author allowed
@@ -176,11 +175,42 @@ variables:
         REQ_FILE=""
       fi
 
+# ── Tier-0 environment audit (referenced from default.after_script) ───────────
+# Fix #0-A. pip-audit against the ACTUAL installed environment of EVERY job — not
+# just a requirements manifest. Jobs across the pipeline pip-install their own
+# stacks inline (model-signing, sigstore, cryptography, presidio, modelaudit,
+# modelscan, evidently, ydata-profiling, great-expectations, huggingface_hub…),
+# none of which the manifest-only pip-audit job ever sees. Wiring this into
+# default.after_script audits each job's venv where those packages actually live.
+# Advisory by design (coverage, not a gate): after_script failures don't fail the
+# job, so a finding records a log signal + report without blocking. Teeth come
+# later — the hash-pinned lockfile audit (#0-B) and per-stage gating.
+.audit-env:
+  script:
+    - |
+      command -v pip >/dev/null 2>&1 || { echo "[audit-env] no pip on this image (${CI_JOB_NAME}) — skipping env audit"; exit 0; }
+      # after_script runs in a fresh shell — re-enter the job's venv if present so
+      # we audit the packages the job installed, not bare system python.
+      if [ -d "${VENV_DIR}" ]; then . "${VENV_DIR}/bin/activate" 2>/dev/null || true; fi
+      pip install --quiet pip-audit 2>/dev/null || { echo "[audit-env] could not install pip-audit (${CI_JOB_NAME}) — skipping"; exit 0; }
+      mkdir -p "${REPORTS_DIR}"
+      echo "[audit-env] auditing installed environment for job: ${CI_JOB_NAME}"
+      pip-audit \
+        --format json \
+        --output "${REPORTS_DIR}/pip-audit-env-${CI_JOB_NAME}.json" \
+        --progress-spinner off \
+      || echo "[audit-env] pip-audit reported findings for ${CI_JOB_NAME} (advisory) — see ${REPORTS_DIR}/pip-audit-env-${CI_JOB_NAME}.json"
+
 default:
   image: python:3.11-slim
   interruptible: true
   before_script:
     - !reference [.python-secure, before_script]
+  # Fix #0-A: every job audits its own installed environment after running.
+  # Inherited by all jobs that don't declare their own after_script; guards make
+  # it a clean no-op on non-Python images (e.g. the cyclonedx-cli signing job).
+  after_script:
+    - !reference [.audit-env, script]
   cache:
     key: pip-${CI_COMMIT_REF_SLUG}
     paths:
@@ -495,6 +525,71 @@ pip-audit:
       - "${REPORTS_DIR}/pip-audit-cyclonedx.json"
     expire_in: 7 days
   allow_failure: true
+
+# Fix #0-B — hash-pinned lockfile audit. The manifest pip-audit above resolves to
+# the root requirements.txt (pandas/requests/jinja2) and never reaches the full
+# pipeline stack declared in ci/requirements-ci.in. This job compiles that .in into
+# a fully pinned, hash-generated lockfile and audits THAT — covering model-signing,
+# sigstore, modelscan, huggingface_hub, presidio, evidently, ydata-profiling,
+# great-expectations, garak, giskard, pyrit, inspect-ai… against OSV/PyPI/GitHub
+# advisory DBs. The lockfile is published as an artifact so it can be committed as
+# ci/requirements-ci.txt to enable --require-hashes installs (the "teeth" half of
+# #0). Advisory for now; flip allow_failure:false once the lockfile is committed
+# and the full stack resolves cleanly in CI.
+lockfile-audit:
+  stage: sast
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  needs: ["setup"]
+  allow_failure: true
+  script:
+    - pip install --quiet pip-tools pip-audit
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      IN_FILE="${GAIPS_MATERIALS_DIR}/ci/requirements-ci.in"
+      LOCK="${REPORTS_DIR}/requirements-ci.txt"
+      if [ ! -f "${IN_FILE}" ]; then
+        echo "No requirements-ci.in present — nothing to lock/audit"; exit 0
+      fi
+      # Compile the .in into a fully pinned, hash-verified lockfile. ydata-profiling
+      # pins narrow numpy/pandas/matplotlib ranges; if the full set cannot co-resolve,
+      # fail loudly rather than silently auditing a partial set (drop/pin the
+      # offending package in requirements-ci.in, then re-run).
+      if ! pip-compile --quiet --generate-hashes --allow-unsafe \
+            --output-file "${LOCK}" "${IN_FILE}"; then
+        echo "ERROR: pip-compile could not resolve the full stack — see log above."
+        exit 1
+      fi
+      echo "Compiled hash-pinned lockfile → ${LOCK}"
+    - |
+      LOCK="${REPORTS_DIR}/requirements-ci.txt"
+      # Audit the pinned versions (no install needed — audit reads the manifest).
+      pip-audit \
+        --requirement "${LOCK}" \
+        --format json \
+        --output "${REPORTS_DIR}/lockfile-audit.json" \
+        --progress-spinner off || true
+      pip-audit \
+        --requirement "${LOCK}" \
+        --format cyclonedx-json \
+        --output "${REPORTS_DIR}/lockfile-audit-cyclonedx.json" \
+        --progress-spinner off || true
+      python3 - <<'PYEOF'
+      import json, os
+      d = json.load(open(os.environ["REPORTS_DIR"] + "/lockfile-audit.json"))
+      deps  = d.get("dependencies", [])
+      total = sum(len(x.get("vulns", [])) for x in deps)
+      pkgs  = sum(1 for x in deps if x.get("vulns"))
+      print(f"lockfile-audit: {total} vulnerability/ies across {pkgs} package(s) over {len(deps)} locked packages")
+      PYEOF
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/requirements-ci.txt"
+      - "${REPORTS_DIR}/lockfile-audit.json"
+      - "${REPORTS_DIR}/lockfile-audit-cyclonedx.json"
+    expire_in: 7 days
 
 pkg-integrity:
   stage: sast
@@ -2164,14 +2259,19 @@ artifact-signing-gate:
 
 # ─── AI EVALUATION ───────────────────────────────────────────────────────────
 
+# Fix #23: audits the AI/watermark stack (torch/transformers/markllm) up in the
+# sast stage alongside pip-audit and lockfile-audit — depends only on setup, so it
+# runs BEFORE markllm-watermark-eval (#35) actually installs those multi-GB deps,
+# rather than after artifact-signing-gate in ai-eval. Gating stays deferred
+# (allow_failure:true) for now.
 markllm-deps-audit:
-  stage: ai-eval
+  stage: sast
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image: python:3.10-slim
-  needs: ["artifact-signing-gate", "model-manifest"]
+  needs: ["setup"]
   allow_failure: true
   script:
     - pip install --quiet --upgrade pip pip-audit
@@ -2245,50 +2345,29 @@ markllm-watermark-eval:
       - "${REPORTS_DIR}/markllm-results.json"
     expire_in: 7 days
 
-# Model/behaviour drift: compare this run's eval metrics against the committed
-# baseline (evals/eval-baseline.json). Same eval set, so a metric moving beyond
-# the threshold means the model or its guardrails regressed between runs.
-model-drift-detection:
-  stage: guardrail
-  rules:
-    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
-      when: never
-    - when: on_success
-  # Report producer (never blocks). NOTE: this eval-metric drift unit is dead-by-
-  # construction in the static pipeline (its six live-scan inputs moved to live-scans);
-  # the former `drift-gate` that consumed it was removed as vacuous (Fix #24a). This
-  # job belongs in the live-scans pipeline alongside its inputs and a real gate.
-  allow_failure: true
-  variables:
-    DRIFT_THRESHOLD: "0.10"   # absolute metric movement that flags drift
-  script:
-    - mkdir -p "${REPORTS_DIR}"
-    - |
-      BASELINE="${GAIPS_MATERIALS_DIR}/evals/eval-baseline.json"
-      python3 "${GAIPS_MATERIALS_DIR}/scripts/detect_model_drift.py" \
-        --reports "${REPORTS_DIR}" \
-        --baseline "${BASELINE}" \
-        --out "${REPORTS_DIR}/model-drift.json" \
-        --threshold "${DRIFT_THRESHOLD}"
-    - |
-      # If this run seeded a baseline (none existed), surface it for the maintainer to commit.
-      if [ -f "${REPORTS_DIR}/eval-baseline.seed.json" ]; then
-        echo "Baseline seeded — commit ${REPORTS_DIR}/eval-baseline.seed.json to evals/eval-baseline.json"
-      fi
-  artifacts:
-    paths:
-      - "${REPORTS_DIR}/model-drift.json"
-      - "${REPORTS_DIR}/eval-baseline.seed.json"
-    expire_in: 30 days
+# NOTE: `model-drift-detection` was RELOCATED to the live-scans pipeline (Fix #24a).
+# It compares this run's eval METRICS to evals/eval-baseline.json, but its six
+# inputs (inspect-ai, garak, pyrit, giskard, guardrail-regression, promptfoo) are
+# produced only by the live-scan jobs — in the static pipeline they never exist,
+# so the unit (and the drift-gate that consumed it) was dead-by-construction. It
+# now lives in ci/live-scans.gitlab-ci.yml alongside those inputs. The remaining
+# drift control HERE is data/INPUT drift via evidently-drift (#38), bootstrapped
+# by data-drift-baseline-commit below.
 
-# Auto-commit the seeded drift baseline back to the repo on the FIRST run (when
-# none exists), so drift detection activates without a manual commit. Default
-# branch only; never overwrites an existing baseline; skips cleanly if no push
-# token is configured. Requires GITLAB_PUSH_TOKEN (Project Access Token, scope
-# write_repository) as a masked CI/CD variable, and write access to the branch.
-model-baseline-commit:
+# Fix #24b — data-drift baseline bootstrap. Auto-commit the seeded DATA-drift
+# reference (evals/dataset-reference.jsonl) on the FIRST run, so evidently-drift
+# (#38) leaves seed-mode and starts gating without a manual commit. This replaces
+# the former eval-baseline auto-commit, which seeded the WRONG control: the
+# eval-metric baseline and its drift unit moved to the live-scans pipeline (Fix
+# #24a), leaving the dataset reference as the real drift control the static
+# pipeline was starving. The reference is SANITIZED before commit — never a raw
+# cp — because the raw evidently seed can carry NaN-filled columns from
+# heterogeneous records. Default branch only; never overwrites an existing
+# reference; skips cleanly with no push token. Requires GITLAB_PUSH_TOKEN
+# (Project Access Token, scope write_repository) as a masked CI/CD variable.
+data-drift-baseline-commit:
   stage: guardrail
-  needs: ["model-drift-detection"]
+  needs: ["evidently-drift"]
   allow_failure: true   # a failed auto-commit must never break the build
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
@@ -2298,29 +2377,54 @@ model-baseline-commit:
     - apt-get update -qq && apt-get install -y -qq git
   script:
     - |
-      SEED="${REPORTS_DIR}/eval-baseline.seed.json"
-      DEST="${GAIPS_MATERIALS_DIR}/evals/eval-baseline.json"
+      SEED="${REPORTS_DIR}/dataset-reference.seed.jsonl"
+      DEST="${GAIPS_MATERIALS_DIR}/evals/dataset-reference.jsonl"
       if [ ! -f "${SEED}" ]; then
-        echo "No baseline seeded this run — nothing to commit"; exit 0
+        echo "No dataset reference seeded this run — nothing to commit"; exit 0
       fi
       if [ -f "${DEST}" ]; then
-        echo "Baseline already present at ${DEST} — not overwriting"; exit 0
+        echo "Reference already present at ${DEST} — not overwriting"; exit 0
       fi
       if [ -z "${GITLAB_PUSH_TOKEN}" ]; then
         echo "GITLAB_PUSH_TOKEN not set — auto-commit disabled."
-        echo "Commit ${SEED} → ${DEST} manually to activate drift detection."
+        echo "Sanitize + commit ${SEED} → ${DEST} manually to activate data-drift detection."
         exit 0
       fi
-      cp "${SEED}" "${DEST}"
+      # Sanitize, don't raw-cp: drop null / non-finite values per record and
+      # re-emit strict JSONL, so a malformed seed can never become the committed
+      # reference. Aborts the commit if the seed yields zero valid records.
+      mkdir -p "$(dirname "${DEST}")"
+      python3 - "${SEED}" "${DEST}" <<'PYEOF'
+      import json, math, sys
+      src, dst = sys.argv[1], sys.argv[2]
+      out = []
+      with open(src, encoding="utf-8") as fh:
+          for line in fh:
+              line = line.strip()
+              if not line:
+                  continue
+              rec = json.loads(line)
+              clean = {
+                  k: v for k, v in rec.items()
+                  if v is not None and not (isinstance(v, float) and not math.isfinite(v))
+              }
+              if clean:
+                  out.append(clean)
+      if not out:
+          sys.exit("Seed produced zero valid records — refusing to commit an empty reference")
+      with open(dst, "w", encoding="utf-8") as fh:
+          fh.write("\n".join(json.dumps(r, sort_keys=True) for r in out) + "\n")
+      print(f"Sanitized {len(out)} record(s) → {dst}")
+      PYEOF
       git config user.email "gaips-ci@${CI_SERVER_HOST}"
       git config user.name "GAIPS CI"
       git add "${DEST}"
-      git commit -m "ci: seed eval drift baseline [skip ci]"
+      git commit -m "ci: seed data-drift reference [skip ci]"
       # ci.skip + [skip ci] both prevent this push from triggering a new pipeline.
       git push -o ci.skip \
         "https://oauth2:${GITLAB_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
         "HEAD:${CI_DEFAULT_BRANCH}"
-      echo "Committed eval-baseline.json → ${CI_DEFAULT_BRANCH} (drift detection now active)"
+      echo "Committed dataset-reference.jsonl → ${CI_DEFAULT_BRANCH} (data-drift detection now active)"
 
 # Data/feature drift on the INPUT side — complements model-drift-detection (which
 # watches eval METRICS). Evidently's DataDriftPreset (PSI) compares a committed
@@ -2397,7 +2501,6 @@ evidence-summary:
     - dvc-verify
     - evidently-drift
     - tamper-verification
-    - model-drift-detection
     - markllm-watermark-eval
   script:
     - pip install jinja2
@@ -2470,7 +2573,6 @@ sign-evidence:
     - dvc-verify
     - evidently-drift
     - tamper-verification
-    - model-drift-detection
     - markllm-watermark-eval
     - artifact-signing-gate
     - evidence-summary
@@ -2668,7 +2770,6 @@ ai-bom-assemble:
     - evidently-drift
     - dataset-sign
     - markllm-deps-audit
-    - model-drift-detection
     - evidence-summary
   script:
     - mkdir -p "${SBOM_DIR}"
@@ -2730,54 +2831,59 @@ ai-bom-sign:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  image:
-    name: "${IMAGE_CYCLONEDX}"
-    entrypoint: [""]
-  before_script: []          # cyclonedx-cli image has no Python
+  # Fix #25: keyless Sigstore signing (Fulcio cert + Rekor transparency log), the
+  # same identity-bound mechanism as model-sign / dataset-sign / sign-evidence —
+  # NOT an ephemeral, identity-less RSA key that only verifies within one run.
+  # Uses the default python:3.11-slim image (not the .NET cyclonedx-cli image): we
+  # need curl + a shell to install cosign, not the CycloneDX CLI.
   needs: ["ai-bom-validate"]
-  allow_failure: true        # advisory: signing failure should not block BOM delivery
+  # Hardened to a gate (was allow_failure:true): an unsigned AI BOM must not be
+  # delivered green. Skips cleanly only when there is genuinely no BOM to sign.
+  allow_failure: false
+  # id_tokens issues a per-job OIDC JWT; aud "sigstore" is required by Fulcio.
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: "sigstore"
   script:
     - |
       XML="${SBOM_DIR}/aibom.cyclonedx.xml"
       if [ ! -f "${XML}" ]; then
-        echo "No XML BOM present (ai-bom-validate skipped) — signing skipped"
+        echo "No XML BOM present (ai-bom-validate skipped) — nothing to sign"
         exit 0
       fi
+    # python:3.11-slim ships no curl — install it (+ CA certs) before fetching cosign.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
     - |
-      # Obtain the RSA signing key. Preferred: a STABLE key from CI/CD variables
-      # (CYCLONEDX_SIGNING_KEY + CYCLONEDX_SIGNING_PUB, PEM) so verifiers can trust
-      # one signer identity across runs. Fallback: an ephemeral keypair — the
-      # signature verifies within this run only, not against a persistent identity.
-      if [ -n "${CYCLONEDX_SIGNING_KEY}" ]; then
-        printf '%s' "${CYCLONEDX_SIGNING_KEY}" > "${SBOM_DIR}/aibom-signing.key"
-        [ -n "${CYCLONEDX_SIGNING_PUB}" ] && \
-          printf '%s' "${CYCLONEDX_SIGNING_PUB}" > "${SBOM_DIR}/aibom-signing.pub"
-        echo "Using configured CYCLONEDX_SIGNING_KEY (stable signer identity)"
-      else
-        echo "CYCLONEDX_SIGNING_KEY not set — generating EPHEMERAL keypair (intra-run verification only)"
-        /cyclonedx keygen \
-          --private-key-file "${SBOM_DIR}/aibom-signing.key" \
-          --public-key-file "${SBOM_DIR}/aibom-signing.pub"
+      # Install cosign (Go binary, not on PyPI) — checksum-verified, as elsewhere.
+      curl -sSfL \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+        -o /tmp/cosign-linux-amd64
+      curl -sSfL \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" \
+        -o /tmp/cosign_checksums.txt
+      grep -E "^[0-9a-f]{64}  cosign-linux-amd64$" /tmp/cosign_checksums.txt \
+        | (cd /tmp && sha256sum --check --strict)
+      install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
+    - |
+      XML="${SBOM_DIR}/aibom.cyclonedx.xml"
+      if [ -z "${SIGSTORE_ID_TOKEN}" ]; then
+        # A BOM exists but we cannot keyless-sign it. Do NOT pass green with an
+        # unsigned BOM — that is exactly what the old ephemeral-RSA fallback did.
+        echo "ERROR: SIGSTORE_ID_TOKEN unavailable (id_tokens requires GitLab 15.7+) — cannot sign the AI BOM"
+        exit 1
       fi
-    - |
-      # Native CycloneDX enveloped signature — embedded directly in the BOM,
-      # verifies as-is with `cyclonedx verify all` (no canonical reconstruction).
-      /cyclonedx sign bom "${SBOM_DIR}/aibom.cyclonedx.xml" \
-        --key-file "${SBOM_DIR}/aibom-signing.key"
-    - |
-      # Prove the embedded signature round-trips before publishing.
-      if [ -f "${SBOM_DIR}/aibom-signing.pub" ]; then
-        /cyclonedx verify all "${SBOM_DIR}/aibom.cyclonedx.xml" \
-          --key-file "${SBOM_DIR}/aibom-signing.pub"
-        echo "AI BOM enveloped signature verified"
-      else
-        echo "No public key available (CYCLONEDX_SIGNING_PUB unset) — skipping in-job verification"
-      fi
-    - rm -f "${SBOM_DIR}/aibom-signing.key"   # never publish the private key
+      # SIGSTORE_ID_TOKEN is read by cosign automatically. Detached keyless
+      # signature + Fulcio certificate (recorded in Rekor), mirroring dataset-sign.
+      cosign sign-blob --yes \
+        --output-signature "${SBOM_DIR}/aibom.cyclonedx.sig" \
+        --output-certificate "${SBOM_DIR}/aibom.cyclonedx.pem" \
+        "${XML}"
+      echo "AI BOM signed via Sigstore keyless (Fulcio + Rekor)"
   artifacts:
     paths:
-      - "${SBOM_DIR}/aibom.cyclonedx.xml"     # now carries the enveloped signature
-      - "${SBOM_DIR}/aibom-signing.pub"       # public key for offline verification
+      - "${SBOM_DIR}/aibom.cyclonedx.xml"     # the signed bytes
+      - "${SBOM_DIR}/aibom.cyclonedx.sig"     # detached keyless signature
+      - "${SBOM_DIR}/aibom.cyclonedx.pem"     # Fulcio cert for offline verify-blob
     expire_in: 90 days
 
 # NOTE: `drift-gate` was REMOVED (Fix #24a). In the static pipeline it was vacuous
@@ -2926,22 +3032,24 @@ publish-signed-artifacts:
         echo "$2" >> "${STAGE_DIR}/artifacts-manifest.txt"
         echo "  staged → $2"
       }
-      # AI-BOM (enveloped XML signature) + its public verification key
+      # AI-BOM (cosign keyless blob signature, Fix #25) — the signed XML plus its
+      # detached signature + Fulcio cert: the trio the PreSync hook verify-blobs.
       stage "${SBOM_DIR}/aibom.cyclonedx.xml" "aibom.cyclonedx.xml"
-      stage "${SBOM_DIR}/aibom-signing.pub"   "aibom-signing.pub"
+      stage "${SBOM_DIR}/aibom.cyclonedx.sig" "aibom.cyclonedx.sig"
+      stage "${SBOM_DIR}/aibom.cyclonedx.pem" "aibom.cyclonedx.pem"
       # Dataset cosign blob signature — normalise to dataset.dat|dataset.sig|dataset.pem
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
         ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       [ -n "${DATASET_FILE}" ] && stage "${DATASET_FILE}" "dataset.dat"
       stage "${EVIDENCE_DIR}/dataset-input/dataset.sig" "dataset.sig"
       stage "${EVIDENCE_DIR}/dataset-input/dataset.pem" "dataset.pem"
-      # Model bundle (model_signing format) — only when the actual weights AND
-      # their model.sig are present in MODEL_DIR. NOTE: model-sign publishes only
-      # **/model.sig as artifacts, not the weights, so via `needs` alone this stays
-      # empty and the bundle is correctly skipped — a bundle without weights would
-      # fail `model_signing verify` at deploy. To publish a real bundle, have this
-      # job run in the same stage as a model-download step, or mount MODEL_DIR.
-      # The PreSync hook verifies this with `model_signing verify`, NOT cosign.
+      # Model bundle (model_signing format) — staged only when the actual weights
+      # AND their model.sig are both present in MODEL_DIR. Fix #26a: this job
+      # `needs` model-fixture-download (which populates MODEL_DIR) and model-sign
+      # (which writes **/model.sig), so on the default fixture path BOTH are
+      # present and a real bundle is published — it is skipped only when no weights
+      # were fetched (a bundle without weights would fail `model_signing verify` at
+      # deploy). The PreSync hook verifies this with `model_signing verify`, NOT cosign.
       HAVE_WEIGHTS=0
       for ext in pkl pt safetensors gguf bin h5 onnx; do
         find "${MODEL_DIR}" -type f -name "*.${ext}" -print -quit 2>/dev/null | grep -q . && HAVE_WEIGHTS=1 && break
@@ -2957,22 +3065,51 @@ publish-signed-artifacts:
     - |
       STAGE_DIR="${EVIDENCE_DIR}/publish"
       BASE="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}"
+      RESULT="${STAGE_DIR}/publish-result.json"
       if [ ! -s "${STAGE_DIR}/artifacts-manifest.txt" ]; then
-        echo "Nothing signed to publish (no AI-BOM/dataset/model) — skipping upload"; exit 0
+        echo "Nothing signed to publish (no AI-BOM/dataset/model) — skipping upload"
+        printf '{"status":"skipped","reason":"nothing to publish","uploaded":0,"failed":0}\n' > "${RESULT}"
+        exit 0
       fi
+      # Fix #26b — track per-file outcomes. A partial upload must NOT pass green:
+      # the deploy gate would fetch some artifacts and 404 on others. Count
+      # failures, record a publish-result signal, and exit non-zero if any failed.
+      UPLOADED=0; FAILED=0
       while IFS= read -r f; do
         echo "PUT ${BASE}/${f}"
-        curl -sSf --retry 3 \
-          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-          --upload-file "${STAGE_DIR}/${f}" \
-          "${BASE}/${f}"
-        echo "  uploaded ${f}"
+        if curl -sSf --retry 3 \
+            --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+            --upload-file "${STAGE_DIR}/${f}" \
+            "${BASE}/${f}"; then
+          echo "  uploaded ${f}"; UPLOADED=$((UPLOADED + 1))
+        else
+          echo "  FAILED ${f}"; FAILED=$((FAILED + 1))
+        fi
       done < "${STAGE_DIR}/artifacts-manifest.txt"
-      echo "Published signed artifacts to ${BASE}"
-      echo "→ Point the PreSync ConfigMap ARTIFACT_BASE_URL at: ${BASE}"
+      STATUS="ok"; [ "${FAILED}" -gt 0 ] && STATUS="partial"
+      printf '{"status":"%s","base_url":"%s","uploaded":%s,"failed":%s}\n' \
+        "${STATUS}" "${BASE}" "${UPLOADED}" "${FAILED}" > "${RESULT}"
+      # Fix #26c — the package version is branch-scoped (EVIDENCE_PACKAGE_VERSION
+      # defaults to the ref slug). The PreSync ConfigMap ARTIFACT_BASE_URL must
+      # track the DEPLOYED ref: on the default branch this BASE is canonical; on a
+      # feature branch it is only a preview. Repoint ARTIFACT_BASE_URL at the
+      # default branch's package once merged, or the deploy verifies stale bytes.
+      if [ "${CI_COMMIT_BRANCH:-}" = "${CI_DEFAULT_BRANCH:-}" ]; then
+        echo "→ Canonical (default-branch) publish. Point the PreSync ConfigMap ARTIFACT_BASE_URL at: ${BASE}"
+      else
+        echo "→ Branch-scoped PREVIEW publish (${CI_COMMIT_REF_SLUG}). Do NOT repoint the deploy here;"
+        echo "  after merge, ARTIFACT_BASE_URL should track the '${CI_DEFAULT_BRANCH}' package version."
+      fi
+      if [ "${FAILED}" -gt 0 ]; then
+        echo "ERROR: ${FAILED} artifact(s) failed to upload — partial publish, refusing to report success"
+        exit 1
+      fi
+      echo "Published ${UPLOADED} signed artifact(s) to ${BASE}"
   artifacts:
+    when: always   # persist the publish-result signal even on a partial-upload failure
     paths:
       - "${EVIDENCE_DIR}/publish/artifacts-manifest.txt"
+      - "${EVIDENCE_DIR}/publish/publish-result.json"
     expire_in: 90 days
 
 # ─── METRICS DASHBOARD ───────────────────────────────────────────────────────

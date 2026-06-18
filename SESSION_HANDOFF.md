@@ -105,6 +105,30 @@
 >   YAML parses, embedded Python compiles, unit test confirms path-only change → PASS, real hash change → FAIL.
 >   ⚠️ On the re-run the tamper baseline migrates to relative-path format on its first green run. `VAULT_ADDR` still unset
 >   (best-effort cache durability, unchanged).
+>
+> **Those two were committed `bd26e57` + PUSHED (`d7585b7..bd26e57`).** A second pipeline run on `bd26e57` came back
+> green except ONE advisory job:
+> - **`lockfile-audit` — `pip-compile` ResolutionImpossible.** P2-1 wired this job into the AI-BOM `needs`, so its
+>   compile finally runs — and the `ci/requirements-ci.in` set can't co-resolve: **`inspect-evals`** demands
+>   `huggingface_hub>=1.2` / `pillow>=11.3` while `transformers==4.57.6` + `markllm==0.1.5` pin `<1.0` / `Pillow==9.4.0`.
+>   **Root insight (user catch):** the AI red-team/eval tools (`garak`/`giskard`/`inspect-ai`/`inspect-evals`/`pyrit`)
+>   belong to the **live-scans** pipeline, NOT this static one — they were stale in `requirements-ci.in`. **Fix:**
+>   (a) dropped them from this pipeline's audit scope (which also removed the conflict source); (b) split the source
+>   into independently-resolvable GROUP files — `requirements-ci.in` (core), `requirements-ci-markllm.in`,
+>   `requirements-ci-dataquality.in` — and rewrote `lockfile-audit` to **compile+audit EACH group and merge** into one
+>   `lockfile-audit.json` (pip-audit-native shape `build_ai_bom.py` reads); a group that still can't resolve is a loud
+>   **WARNING, not a failure** (covered by the per-job `.audit-env`). Validated offline: YAML parses, embedded merge
+>   Python compiles, merge/dedup + unresolved-NOTE unit-tested, POSIX-clean shell loop. (Two stray group files I first
+>   created — `requirements-ci-redteam.in`, `requirements-ci-inspect-evals.in` — were removed; those tools aren't here.)
+>
+> **Also this turn — README per-job reference.** Added a **"Per-Job Reference — Purpose & Step-by-Step"** section to
+> `docs/gaips-materials/README.md` documenting **all 50 jobs across 11 stages** (purpose + plain-English steps + output
+> file + gate posture), in the user's requested format. Authored via 6 parallel sub-agents (one per stage group) that
+> read each job block + backing script; assembled and verified (50 `####` blocks, 11 `### Stage` headers).
+>
+> **➡️ NEXT:** push this turn's commit → watch the 3rd run; `lockfile-audit` should now compile the core/markllm/
+> dataquality groups (or WARN per group) and go green. Still open (unchanged): the protected/default-branch validation
+> run for the signing/identity legs.
 
 ---
 

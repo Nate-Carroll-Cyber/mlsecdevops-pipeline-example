@@ -407,3 +407,846 @@ The authoritative map of **what each job emits** — every GitLab `artifacts:` p
 | Job | Artifacts (file — type) | Retention |
 | --- | --- | --- |
 | `sign-evidence` | `evidence/sign-evidence.json` (.json — whole-run hash-manifest), `evidence/sign-evidence.sig` (.sig — detached cosign), `evidence/sign-evidence.pem` (.pem — Fulcio cert) | 90 days |
+
+## Per-Job Reference — Purpose & Step-by-Step
+
+> A plain-English walkthrough of **every job in every stage**: what it is for, what it actually does step by step, and the output file(s) it leaves behind. This complements the at-a-glance tables in the *Pipeline Walkthrough* and *Evidence & Report Artifacts* sections above — read those for the quick map, this for the detail. Each heading shows the gate posture: **hard gate** (`allow_failure: false` — can fail the pipeline) vs **advisory** (`allow_failure: true` — reports without blocking). Nearly every job also skips when the commit message carries the `[sigstore-discovery]` marker (the one-shot identity probe run).
+
+### Stage 1 — Setup
+
+#### `setup` — stage: `setup` · advisory (allow_failure) · output: `evidence/version-info.json`
+
+**What this job is for**
+This is the first job in the pipeline and lays the groundwork every later stage assumes. It creates the shared evidence/SBOM/reports directories, installs the project's Python requirements if any exist, and records the exact Git revision the run is built from so all downstream artifacts (the AI BOM, the signed evidence bundle assembled in the `attest` stage) can be traced to a precise source state. It runs alongside `model-manifest` and `vault-secrets` in the setup stage and is the named upstream dependency of the SAST jobs.
+
+**Step by step, in plain English**
+1. Installs `git` and CA certificates, since the slim Python image ships neither and provenance capture needs Git.
+2. Resolves a requirements file via the shared `.resolve-reqs` logic (root `requirements.txt`, else the CI lockfile, else the `.in` source), and `pip install`s it if found, otherwise skips cleanly.
+3. Creates the `sbom/`, `evidence/`, and `reports/` directories used by the whole pipeline.
+4. Writes a one-line `evidence/pipeline.env` recording the pipeline ID and short commit SHA.
+5. Picks a timestamp from `CI_PIPELINE_CREATED_AT` (or the current UTC time as fallback).
+6. Runs `scripts/write_version_info.py`, which shells out to Git for the commit, short commit, branch, tag, `git describe`, and a working-tree "dirty" flag, filling any gaps from `CI_*` environment variables, and writes it all to `evidence/version-info.json`.
+7. A missing Git reports `dirty` as "unknown" rather than falsely "clean".
+
+**Output file(s):** `evidence/version-info.json` — JSON provenance record (commit, branch, tag, describe, dirty flag, CI context); also `evidence/pipeline.env` — one-line pipeline-ID/commit marker.
+
+#### `model-manifest` — stage: `setup` · hard gate · output: GitLab dotenv report (`model-baseline.env`)
+
+**What this job is for**
+This job turns the reviewed `evals/model-baseline.json` into the single source of truth for the approved model's identity and the CI variables it implies. By emitting those variables as a GitLab dotenv report, downstream jobs like `model-fixture-download` and the MarkLLM jobs inherit `MODEL_FIXTURE_*` and `MARKLLM_*` from one validated place instead of the inline `variables:` defaults. It is a hard gate on purpose: a malformed or internally inconsistent baseline fails fast and cheaply here rather than after the expensive scan and model-integrity stages.
+
+**Step by step, in plain English**
+1. Skips the Python venv bootstrap (the backing script is stdlib-only) and runs with no dependencies on other jobs.
+2. Runs `scripts/build_model_baseline.py` against `evals/model-baseline.json`, asking it to emit a dotenv file named `model-baseline.env`.
+3. The script loads and parses the baseline JSON, failing if it is missing, not valid JSON, or not a JSON object.
+4. It validates that `model.path` and `model.sha256` are present and that the sha256 is a real 64-hex digest.
+5. It validates the `variables` map: each key must be a valid env-var name and each value a newline-free string.
+6. It cross-checks internal consistency, failing if `MODEL_FIXTURE_SHA256` or `MODEL_FIXTURE_PATH` disagree with the model's own `sha256`/`path` so the two can't silently drift.
+7. On success it writes each variable as a `KEY=value` line to `model-baseline.env`; the job then `cat`s the file for the log.
+
+**Output file(s):** GitLab dotenv report `model-baseline.env` — validated `MODEL_FIXTURE_*` / `MARKLLM_*` (and related) variables injected into later jobs; dotenv values override inline defaults but remain overridable by a Project/manual CI variable.
+
+#### `vault-secrets` — stage: `setup` · advisory (allow_failure) · output: dotenv report (`.vault-env`)
+
+**What this job is for**
+This job centrally brokers secrets from HashiCorp Vault into the pipeline as CI variables (model endpoint, signing identity, Sigstore issuer, HF token, registry token, Dependency-Track creds, etc.) so later jobs don't each need their own Vault wiring. It runs in setup alongside `setup` and `model-manifest` and is a named dependency of jobs such as `trivy-scan`. It is advisory and degrades gracefully: if `VAULT_ADDR` is unset it skips cleanly and the pipeline falls back to GitLab CI/CD variables.
+
+**Step by step, in plain English**
+1. Requests a per-job OIDC JWT (`VAULT_ID_TOKEN`) via `id_tokens`, with `CI_JOB_JWT_V2` as the legacy fallback.
+2. Touches an empty `.vault-env` so the dotenv artifact always exists, even when Vault is unreachable.
+3. If `VAULT_ADDR` is empty, prints a skip notice and exits 0 (clean skip; CI variables are used instead).
+4. Otherwise installs `hvac` and runs an inline Python script that builds an `hvac` client using `VAULT_ADDR` and optional `VAULT_NAMESPACE` (required on HCP/Enterprise Vault).
+5. Authenticates to Vault via JWT login against the `gaips-ci` role, erroring if no JWT is available.
+6. Reads a fixed set of KV v2 secret paths under the `secret` mount, mapping each to a CI variable name; per-secret failures are logged as warnings rather than failing the job.
+7. Writes the fetched `VAR=value` lines into `.vault-env`, published as a dotenv report and injected into later jobs.
+
+**Output file(s):** dotenv report `.vault-env` — fetched secrets as CI variables injected downstream (short ~30-minute expiry limits exposure; empty-but-present when Vault is skipped/unreachable).
+
+### Stage 2 — SAST
+
+#### `semgrep-sast` — stage: `sast` · advisory (allow_failure) · output: `reports/semgrep.json` (+ GitLab SAST report)
+
+**What this job is for**
+This job runs static application security testing over the whole repository to catch insecure code patterns, feeding findings into the GitLab Security Dashboard and MR widget. It is one of several SAST-stage scanners (alongside `secret-detection`, `gitleaks-scan`, `pip-audit`, and the dependency/integrity jobs) and depends on `setup`. It runs inside the pinned `IMAGE_SEMGREP` image, which already ships Semgrep, so there is no unpinned `pip install`.
+
+**Step by step, in plain English**
+1. Uses the pinned Semgrep container and skips the Python venv bootstrap (the image is self-contained).
+2. Creates the `reports/` directory.
+3. Runs `semgrep scan --config=auto` — a tokenless, rules-based scan (not the managed `semgrep ci` workflow that needs `SEMGREP_APP_TOKEN`).
+4. Outputs results as JSON to `reports/semgrep.json`, scanning the current directory.
+5. Publishes that file both as a GitLab `sast` report and as a plain artifact.
+
+**Output file(s):** `reports/semgrep.json` — Semgrep findings in JSON, registered as a GitLab SAST report.
+
+#### `secret-detection` — stage: `sast` · hard gate (trips only on Critical) · output: `gl-secret-detection-report.json`, `reports/secret-detection.json`
+
+**What this job is for**
+This is GitLab's native secret-detection analyzer, scanning the commit for leaked credentials and surfacing them in the Security Dashboard and MR widget. It complements `gitleaks-scan` (configurable rules, explicit history depth) and runs in the SAST stage after `setup`. It is a hard gate, but deliberately narrow: it fails the pipeline only when a Critical-severity secret is found.
+
+**Step by step, in plain English**
+1. Runs in the pinned GitLab secrets analyzer image with no Python bootstrap, scanning only HEAD (`GIT_DEPTH: 1`, historic scan off).
+2. Creates `reports/` and invokes the analyzer via `/analyzer run`.
+3. Copies the produced `gl-secret-detection-report.json` into `reports/secret-detection.json` so the evidence-summary stage can collect it.
+4. If no report was produced, prints a notice and exits 0.
+5. Using POSIX shell only (no Python/jq in the image), counts total findings and Critical findings, guarding the `grep -c` exit-1-on-zero pitfall so counts default to 0.
+6. Prints the finding and critical counts.
+7. If the Critical count is greater than zero, exits 1 (fails the pipeline); otherwise passes.
+
+**Output file(s):** `gl-secret-detection-report.json` — GitLab-native secret-detection report (registered as a `secret_detection` report); copy at `reports/secret-detection.json` for the evidence summary.
+
+#### `gitleaks-scan` — stage: `sast` · hard gate · output: `reports/gitleaks.json`, `reports/gitleaks.log`
+
+**What this job is for**
+This job runs Gitleaks as a second, configurable secret scanner that complements the GitLab-native `secret-detection` analyzer with project-specific rules and explicit git-history depth control. It runs in the SAST stage after `setup`, inside the pinned `IMAGE_GITLEAKS` GHCR image. It is a hard gate: any detected secret fails the pipeline.
+
+**Step by step, in plain English**
+1. Runs in the pinned Gitleaks image (entrypoint cleared) with no Python bootstrap and creates `reports/`.
+2. Runs `gitleaks detect` over the project directory using the repo's `.gitleaks.toml`, writing JSON to `reports/gitleaks.json`.
+3. Uses `--redact` so matched secret values are masked in the report and log, teeing console output to `reports/gitleaks.log`.
+4. Captures Gitleaks' real exit code from `PIPESTATUS` (the `tee` would otherwise mask it).
+5. Runs an inline Python snippet to count entries in the JSON report, defaulting to 0 on parse error.
+6. Prints the count of potential secrets detected.
+7. If the captured exit code is non-zero, exits 1. Artifacts are saved `when: always` so reports survive a failing run.
+
+**Output file(s):** `reports/gitleaks.json` — Gitleaks findings (values redacted); `reports/gitleaks.log` — redacted run log.
+
+#### `pip-audit` — stage: `sast` · advisory (allow_failure) · output: `reports/pip-audit.json`, `reports/pip-audit-cyclonedx.json`
+
+**What this job is for**
+This job audits the project's declared Python dependencies against known-vulnerability databases (OSV, PyPI Advisory DB, GitHub Advisory DB). It is the manifest-level dependency audit, scoped to the resolved root requirements; the broader hash-pinned, per-group coverage of the full pipeline stack lives in `lockfile-audit`, and each job's actually-installed packages are covered by the `.audit-env` after_script. It runs after `setup` and is advisory.
+
+**Step by step, in plain English**
+1. Installs `pip-audit` and creates `reports/`.
+2. Resolves a requirements file via the shared `.resolve-reqs` logic.
+3. If no requirements file is found, writes an empty `{"dependencies":[]}` report and exits cleanly.
+4. Otherwise installs the requirements, then runs `pip-audit --requirement` producing JSON at `reports/pip-audit.json` (capturing but not failing on its exit code).
+5. Runs `pip-audit` again in CycloneDX-JSON format to `reports/pip-audit-cyclonedx.json` (which carries CVSS data).
+6. Runs an inline Python snippet to total the vulnerabilities and affected packages and print the summary.
+
+**Output file(s):** `reports/pip-audit.json` — findings in pip-audit's native `{"dependencies":[...]}` shape; `reports/pip-audit-cyclonedx.json` — same audit in CycloneDX JSON (for CVSS analysis).
+
+#### `lockfile-audit` — stage: `sast` · advisory (allow_failure) · output: `reports/lockfile-audit.json`
+
+**What this job is for**
+This is the hash-pinned dependency audit (Fix #0-B) that covers the full static pipeline stack the manifest-level `pip-audit` never reaches (model-signing, sigstore, modelscan, huggingface_hub, presidio, evidently, ydata-profiling, great-expectations, the MarkLLM stack). Because those packages don't reliably co-resolve as one lockfile, the job treats EACH `ci/requirements-ci*.in` as an independent GROUP, compiles and audits each on its own, and merges the results. Groups that can't resolve stay covered at runtime by the per-job `.audit-env` after_script. It is advisory for now; the core group's lock can later be committed and the gate hardened.
+
+**Step by step, in plain English**
+1. Installs `pip-tools` and `pip-audit`, creates `reports/`, and truncates `reports/lockfile-unresolved-groups.txt`.
+2. Loops over every `ci/requirements-ci*.in` file, running `pip-compile --generate-hashes --allow-unsafe` to produce a fully hash-pinned per-group lock at `reports/<stem>.txt`.
+3. If a group fails to compile, it logs a loud WARNING (not a failure), removes any partial lock, and records the group in `lockfile-unresolved-groups.txt`.
+4. If no `.in` files exist at all, prints a notice and exits cleanly.
+5. Audits each successfully compiled lock with `pip-audit` in both JSON and CycloneDX-JSON formats (reading the manifest, no install).
+6. Merges all per-group JSON audits into one `reports/lockfile-audit.json` in pip-audit's native `{"dependencies":[...]}` shape (the shape `build_ai_bom.py` reads), deduplicating by `(name, version)`.
+7. Prints totals and notes which groups were unresolvable.
+
+**Output file(s):** `reports/lockfile-audit.json` — merged, deduplicated audit across all resolvable groups; plus per-group `reports/requirements-ci*.txt` locks, `reports/requirements-ci*-audit*.json` per-group audits, and `reports/lockfile-unresolved-groups.txt`.
+
+#### `pkg-integrity` — stage: `sast` · advisory (allow_failure) · output: `reports/pkg-integrity.env`, `reports/pkg-integrity-manifest.json`, `requirements.hashed.txt`
+
+**What this job is for**
+This job verifies the integrity of the Python dependency set: whether requirements are hash-pinned (PEP 476 / secure install) and whether they install cleanly with no hidden dependency conflicts. It complements the vulnerability-focused `pip-audit` and `lockfile-audit` by focusing on install reproducibility and hash enforcement. It runs after `setup` and is advisory.
+
+**Step by step, in plain English**
+1. Installs `pip-tools`, creates `reports/`, and resolves a requirements file via `.resolve-reqs`.
+2. If no requirements file exists, records `hash_mode=skipped` in `reports/pkg-integrity.env` and exits cleanly.
+3. If requirements already contain `--hash=` lines, installs with `--require-hashes` and records `hash_mode=enforced`.
+4. If not hash-pinned, warns, picks a `.in` source (else the requirements file itself), runs `pip-compile --generate-hashes` to produce `requirements.hashed.txt`, and records `hash_mode=warn_generated`.
+5. Creates a throwaway `/tmp/verify-venv`, installs the requirements there (honouring hashes when present), and runs `pip check` to fail on broken/missing dependencies.
+6. While that venv is active, snapshots its package list to `reports/pkg-list.json`.
+7. Combines the package list and hash mode into `reports/pkg-integrity-manifest.json` and prints the verified package count.
+
+**Output file(s):** `reports/pkg-integrity.env` — `hash_mode` (skipped/enforced/warn_generated); `reports/pkg-integrity-manifest.json` — verified-venv package manifest plus hash mode; `requirements.hashed.txt` — generated hash-pinned lockfile (when requirements lacked hashes).
+
+#### `conda-pkg-verify` — stage: `sast` · advisory (allow_failure) · output: `reports/conda/`
+
+**What this job is for**
+This job verifies the dependency set under Conda, proving packages can be resolved exclusively from the trusted `conda-forge` channel with no leakage from the Anaconda `defaults`/`main` channels. It complements the pip-side integrity work in `pkg-integrity` and runs after `setup` inside the pinned `IMAGE_MINICONDA` image. Advisory until a full conda environment spec is defined.
+
+**Step by step, in plain English**
+1. Runs in the pinned Miniconda image (manages its own Python) and creates `reports/conda/`.
+2. Hardens conda config: enables SSL verification, sets strict channel priority, and adds `conda-forge`; it does not trust config-list editing to drop `defaults`.
+3. Creates an isolated `ci-verify` env with `--override-channels --channel conda-forge`, so resolution ignores every other channel including `defaults`.
+4. Attempts to install `requirements.txt` packages from conda-forge only, falling back gracefully, then runs `conda run ... pip check`.
+5. Exports the resolved environment and installed package list to JSON under `reports/conda/`.
+6. Proves isolation from the resolved package set (not config strings): a denial regex flags any package whose channel matches `defaults`/`pkgs/main`/`anaconda`/etc.
+7. Prints the resolved package count; exits 1 if any package leaked from a defaults/Anaconda channel (advisory overall).
+
+**Output file(s):** `reports/conda/` — `env-manifest.json` (exported reproducible env) and `installed-packages.json` (resolved package list with channels).
+
+#### `markllm-deps-audit` — stage: `sast` · advisory (allow_failure) · output: `reports/markllm-deps-audit.json`
+
+**What this job is for**
+This is a dedicated vulnerability audit of the heavy MarkLLM watermark stack — `torch`, `transformers`, `markllm` at their pinned versions — that the main `pip-audit` and the core `lockfile-audit` group don't cover (those pins are heavy and conflict-prone, e.g. `huggingface_hub<1.0`). It runs after `setup` in a `python:3.10-slim` image and is advisory. Its report feeds `ai-bom-assemble`'s `vulnerabilities[]` and is re-checked by `ai-bom-content-gate`.
+
+**Step by step, in plain English**
+1. Skips on `[sigstore-discovery]` commits; otherwise runs after `setup` in `python:3.10-slim`.
+2. Installs `pip-audit` and creates `reports/`.
+3. Synthesizes a three-line requirement set from the pins (`torch==`, `transformers==`, `markllm==`) via process substitution and runs `pip-audit` over it — resolving their dependency tree and checking each package against OSV/PyPI/GitHub advisory DBs, writing JSON (`|| true`, so findings don't fail the step here).
+4. An inline Python snippet totals the vulnerabilities and affected packages.
+5. It prints each finding's package, advisory id, and `fix_versions` for explainability.
+6. Advisory (`allow_failure: true`): records findings without blocking — known to surface RCE-class advisories in `torch`/`transformers` that currently have no fix.
+
+**Output file(s):** `reports/markllm-deps-audit.json` — pip-audit findings for the pinned MarkLLM stack; consumed by `ai-bom-assemble` and `ai-bom-content-gate`.
+
+### Stage 3 — SBOM
+
+#### `syft-cyclonedx` — stage: `sbom` · advisory (allow_failure) · output: `sbom/sbom.cyclonedx.json`, `sbom/sbom.cyclonedx.xml`
+
+**What this job is for**
+This job produces the project's Software Bill of Materials (SBOM) in CycloneDX format, cataloguing every dependency present in the repository. The CycloneDX SBOM is the direct input that `grype-scan` consumes to find known vulnerabilities, so this sits at the head of the supply-chain evidence chain. It runs alongside `syft-spdx` (same inventory, different format).
+
+**Step by step, in plain English**
+1. Runs inside the pinned Syft container image (no Python, so venv bootstrap and pip cache are skipped).
+2. Skips on the `[sigstore-discovery]` probe commit.
+3. Waits only on `setup`.
+4. Creates the SBOM output directory.
+5. Runs Syft over the whole repository and writes the inventory as CycloneDX JSON.
+6. Runs Syft again to write the same inventory as CycloneDX XML.
+7. Uploads both files as artifacts. Advisory.
+
+**Output file(s):** `sbom/sbom.cyclonedx.json`, `sbom/sbom.cyclonedx.xml` — the dependency inventory in CycloneDX JSON and XML; the JSON is the input for `grype-scan`.
+
+#### `syft-spdx` — stage: `sbom` · advisory (allow_failure) · output: `sbom/sbom.spdx.json`, `sbom/sbom.spdx`
+
+**What this job is for**
+This job generates the same dependency inventory as `syft-cyclonedx` but in the SPDX format, giving downstream consumers and auditors an alternative, widely-recognized SBOM standard. It exists to maximize interoperability of the supply-chain evidence; some tools and compliance regimes expect SPDX rather than CycloneDX.
+
+**Step by step, in plain English**
+1. Runs inside the pinned Syft container image (no Python).
+2. Skips on the `[sigstore-discovery]` probe commit.
+3. Waits only on `setup`.
+4. Creates the SBOM output directory.
+5. Runs Syft over the whole repository and writes the inventory as SPDX JSON.
+6. Runs Syft again to write the inventory in SPDX tag-value (plain text) form.
+7. Uploads both files as artifacts. Advisory.
+
+**Output file(s):** `sbom/sbom.spdx.json`, `sbom/sbom.spdx` — the dependency inventory in SPDX JSON and SPDX tag-value formats.
+
+#### `dvc-verify` — stage: `sbom` · advisory (allow_failure) · output: `reports/dvc-status.json`
+
+**What this job is for**
+This job adds DVC (Data Version Control) lineage checking on top of the digest/signature/version-info provenance the rest of the pipeline records. Where the SBOM jobs inventory code dependencies, this verifies that large datasets and models in the workspace match their pinned DVC versions (and pulls them from a remote store when one is configured). It is opt-in and skips cleanly when the repo is not using DVC.
+
+**Step by step, in plain English**
+1. Skips on the `[sigstore-discovery]` probe commit; otherwise runs after `setup`.
+2. Creates the reports output directory.
+3. Checks for a `.dvc/` directory; if absent, writes a `{"skipped":true,...}` status file and exits 0 (DVC not initialized).
+4. Installs `dvc[all]` and prints the DVC version.
+5. If `DVC_REMOTE_URL` is set, configures it and runs `dvc pull` (a pull failure is a warning, not a hard error); otherwise reports tracked-vs-workspace status only.
+6. Records which DVC-tracked artifacts differ from their pinned versions via `dvc data status --granular --json`, with fallbacks.
+7. Prints the resulting status JSON and uploads it. Advisory.
+
+**Output file(s):** `reports/dvc-status.json` — machine-readable report of DVC-tracked artifacts that differ from their pinned versions (or a skip/no-output note).
+
+### Stage 4 — Vulnerability Scan
+
+#### `grype-scan` — stage: `vuln-scan` · advisory (allow_failure) · output: `reports/grype.json`
+
+**What this job is for**
+This job scans the project's dependencies for known vulnerabilities (CVEs) by feeding the CycloneDX SBOM produced by `syft-cyclonedx` into Grype. It depends directly on `syft-cyclonedx` and runs in parallel with the broader filesystem/image scanning done by `trivy-scan`. It clean-skips if the SBOM input is missing.
+
+**Step by step, in plain English**
+1. Runs inside the pinned Grype container image (no Python).
+2. Skips on the `[sigstore-discovery]` probe commit; otherwise depends on `syft-cyclonedx`.
+3. Creates the reports output directory.
+4. Checks whether the CycloneDX SBOM exists; if not, writes a `{"skipped":true,...}` report and exits 0.
+5. Runs Grype against the CycloneDX SBOM and writes results as JSON.
+6. Runs Grype again to print a human-readable table to the log.
+7. Uploads the JSON report. Advisory.
+
+**Output file(s):** `reports/grype.json` — Grype's JSON vulnerability findings derived from the CycloneDX SBOM (or a skip note if the SBOM was missing).
+
+#### `trivy-scan` — stage: `vuln-scan` · advisory (allow_failure) · output: `reports/trivy-fs.json`, `reports/trivy-image.json`
+
+**What this job is for**
+This job uses Trivy to scan both the repository filesystem and the built container image for vulnerabilities and secrets, complementing the SBOM-driven `grype-scan` with a direct source-and-image scan. Its image report is also wired into GitLab's native container-scanning report.
+
+**Step by step, in plain English**
+1. Runs inside the pinned Trivy container image (no Python).
+2. Skips on the `[sigstore-discovery]` probe commit; otherwise runs after `setup` and `vault-secrets`.
+3. Creates the reports output directory.
+4. Scans the filesystem with Trivy, skipping `.pip-cache` (third-party download cruft that produced a false-positive "JWT token" finding), writing JSON with exit code forced to 0.
+5. Runs the same filesystem scan again to print a human-readable table.
+6. Scans the container image `${CI_REGISTRY_IMAGE}:${CI_COMMIT_SHA}` and writes JSON; if the image is unavailable, falls back to an empty `{"Results":[]}` report so the artifact always exists.
+7. Uploads both JSON reports and registers the image report as GitLab's `container_scanning` report. Advisory.
+
+**Output file(s):** `reports/trivy-fs.json`, `reports/trivy-image.json` — Trivy's JSON findings for the repository filesystem and the built container image respectively.
+
+### Stage 5 — Model Integrity
+
+This is the largest stage: a model-signing chain, a fan-out of malware/format scanners, a parallel dataset chain, and a converging hard gate (`artifact-signing-gate`).
+
+#### `model-signing-install` — stage: `model-integrity` · hard gate · output: none
+
+**What this job is for**
+This is the toolchain installer/gate at the head of the model-integrity stage. It verifies the signing stack (`model-signing` + `sigstore` Python packages) installs and imports, and that the pinned cosign binary matches its published checksum, so any breakage fails fast here rather than wasting time in the downstream jobs (`model-digest`, `modelscan`, etc.) that each reinstall the same stack.
+
+**Step by step, in plain English**
+1. Skips on the `[sigstore-discovery]` probe commit; otherwise runs after `setup`.
+2. Installs the version-pinned `model-signing` and `sigstore` Python packages.
+3. Imports `model_signing` and prints its version to confirm the install works.
+4. Installs `curl` and `ca-certificates` (needed to fetch cosign, a Go binary not on PyPI).
+5. Downloads the pinned cosign Linux binary and its checksums file from the Sigstore GitHub releases.
+6. Verifies the binary against its checksum line with `sha256sum --check --strict` (a mismatch fails the job).
+7. Installs the verified cosign binary and prints its version. Any failure hard-fails the pipeline.
+
+**Output file(s):** None — this is a gate/installer; it produces no artifact.
+
+#### `model-fixture-download` — stage: `model-integrity` · hard gate · output: `models/`, `evidence/model-fixture-download.json`
+
+**What this job is for**
+This job fetches the model fixture that the rest of the model-integrity chain operates on, pinning it to a known SHA-256 so a swapped or corrupted download is caught immediately. It feeds `model-digest` (hashing), `model-sign` (signing), and `modelscan`. A checksum mismatch stops the pipeline; when no fixture URL is configured it clean-skips.
+
+**Step by step, in plain English**
+1. Skips on the `[sigstore-discovery]` probe commit; otherwise runs after `setup` and `model-manifest`.
+2. Runs as a curl-only job; installs `curl` and `ca-certificates`.
+3. Creates the model and evidence output directories.
+4. If `MODEL_FIXTURE_URL` is unset, writes a `{"skipped":true,...}` evidence file and exits 0.
+5. Downloads the fixture from `MODEL_FIXTURE_URL` to its path under the model directory.
+6. If `MODEL_FIXTURE_SHA256` is set, verifies the download with `sha256sum --check --strict` (a mismatch hard-fails).
+7. Records the byte size and writes an evidence JSON with the repo-relative path, expected SHA-256, and byte count.
+8. Uploads the model directory and the evidence file as artifacts.
+
+**Output file(s):** `models/` — the downloaded, checksum-pinned model fixture; `evidence/model-fixture-download.json` — record of the download (path, sha256, byte count, or skip reason).
+
+#### `model-digest` — stage: `model-integrity` · advisory (allow_failure) · output: `evidence/model-digests.txt`
+
+**What this job is for**
+This job computes SHA-256 digests of every model file downloaded by `model-fixture-download`, producing the canonical digest list that flows into `tamper-verification` (baseline comparison), `sign-evidence` (recorded digests), and the AI-BOM. Per Fix #32 it records repo-relative paths rather than absolute runner paths, so those consumers receive clean, portable path strings.
+
+**Step by step, in plain English**
+1. Skips on the `[sigstore-discovery]` probe commit; otherwise runs after `model-signing-install` and `model-fixture-download`.
+2. Uses no Python deps or pip cache — the loop is pure `find`/`sha256sum`.
+3. Creates the evidence directory and an empty digest file.
+4. Iterates over known model file extensions (`pkl pt safetensors gguf bin h5 onnx`) under the model directory.
+5. For each file, computes its SHA-256.
+6. Strips the project-dir prefix to record a repo-relative path (Fix #32), then appends `"<rel-path>  sha256:<hash>"` to the digest file.
+7. If no model files are found, writes a `WARNING: No model files found...` line instead.
+8. Prints the digest file and uploads it.
+
+**Output file(s):** `evidence/model-digests.txt` — one line per model file (`<repo-relative-path>  sha256:<hash>`), or a warning line if none were found.
+
+#### `model-sign` — stage: `model-integrity` · hard gate · output: `models/**/model.sig`
+
+**What this job is for**
+This job keylessly signs each model directory with cosign/Sigstore using a GitLab-issued per-job OIDC token, producing the `model.sig` bundles that `signature-verification` later validates against the pinned signer identity. It is a hard gate so a signing failure cannot pass green and leave `signature-verification` with nothing to verify.
+
+**Step by step, in plain English**
+1. Skips on the `[sigstore-discovery]` probe commit; otherwise runs after `model-digest`, `model-fixture-download`, and `vault-secrets`.
+2. GitLab issues a per-job OIDC JWT (`SIGSTORE_ID_TOKEN`, audience `sigstore`), which Fulcio requires for keyless signing.
+3. Installs the pinned `model-signing` and `sigstore` packages.
+4. Logs whether `MODEL_SIGNING_IDENTITY` and `SIGSTORE_OIDC_ISSUER` are configured (informational here).
+5. Finds each immediate subdirectory of the model directory and runs `python -m model_signing sign sigstore` with the per-job token, writing a `model.sig` into each.
+6. Counts how many directories were signed.
+7. If zero were signed but real model files exist, hard-fails ("models present but unsigned"); if there are genuinely no model directories, it reports nothing to sign and passes.
+8. Uploads all `model.sig` bundles. A signing failure hard-fails the pipeline.
+
+**Output file(s):** `models/**/model.sig` — one Sigstore signature bundle per signed model directory.
+
+#### `sigstore-identity-discover` — stage: `model-integrity` · advisory (allow_failure) · output: `.sigstore-identity-discover/probe/model.sig`
+
+**What this job is for**
+This is a manual, one-shot diagnostic probe used to discover the exact signer identity and OIDC issuer that GitLab's keyless signing produces, so an operator can copy them into the protected `MODEL_SIGNING_IDENTITY` and `SIGSTORE_OIDC_ISSUER` variables that `signature-verification` enforces against. It signs a throwaway probe file rather than a real model. It runs only on `main` with the `[sigstore-discovery]` marker, set to manual.
+
+**Step by step, in plain English**
+1. Only offered (manually) when the branch is `main` and the commit message contains `[sigstore-discovery]`. Has no `needs`, so it can run standalone.
+2. GitLab issues the same per-job OIDC JWT (`SIGSTORE_ID_TOKEN`, aud `sigstore`) used by `model-sign`.
+3. Installs the pinned `model-signing` and `sigstore` packages plus `cryptography`.
+4. Creates a probe directory and writes a tiny placeholder probe file.
+5. Signs the probe directory with `model_signing sign sigstore`, producing a `model.sig` bundle.
+6. An inline Python script loads the bundle, decodes the signing certificate, and extracts the SubjectAlternativeName URI (signer identity) and the Fulcio OIDC issuer extension.
+7. Prints a clearly delimited "COPY THESE" block with `MODEL_SIGNING_IDENTITY` and `SIGSTORE_OIDC_ISSUER`.
+8. Uploads the probe `model.sig`. Advisory.
+
+**Output file(s):** `.sigstore-identity-discover/probe/model.sig` — the throwaway probe signature bundle whose certificate yields the identity/issuer values.
+
+#### `signature-verification` — stage: `model-integrity` · hard gate · output: `evidence/signature-verification.txt`, `evidence/signature-verification.jsonl`
+
+**What this job is for**
+This is the enforcing verifier for the signatures produced by `model-sign`: it confirms each `model.sig` is cryptographically valid against the pinned `MODEL_SIGNING_IDENTITY` and `SIGSTORE_OIDC_ISSUER`, then records what was verified via `scripts/explain_signature.py`. Because those pinned values are protected CI/CD variables (injected only on protected branches/tags), it is protection-aware: on an unprotected branch it deliberately defers rather than failing.
+
+**Step by step, in plain English**
+1. Skips on the `[sigstore-discovery]` probe commit; otherwise runs after `model-sign`, `model-fixture-download`, and `vault-secrets`.
+2. Installs the pinned `model-signing` and `sigstore` packages and pre-creates the two (initially empty) evidence files so `artifacts: when: always` never warns.
+3. Logs the identity/issuer it will verify against plus the branch's protected status.
+4. If `MODEL_SIGNING_IDENTITY` or `SIGSTORE_OIDC_ISSUER` is unset: on a protected ref this is a real misconfiguration and the job hard-fails; on an unprotected ref it records whether a `model.sig` is present, writes a "DEFERRED" evidence record, and exits 0 (verification is enforced later on the protected branch).
+5. Otherwise, for each `model.sig` it runs `model_signing verify sigstore` against the pinned identity and issuer — the authoritative check.
+6. After each successful verify, runs `scripts/explain_signature.py`, which records the certificate SAN (matched identity), the Fulcio OIDC issuer, each Rekor entry (logIndex + integratedTime), and the signed in-toto subject digests, plus a recomputed-vs-signed sha256 per file (a mismatch is a non-fatal WARNING).
+7. If zero signatures were verified but real model files exist, hard-fails (the anti-vacuous-pass guard); if there are no models either, it passes.
+8. Uploads both evidence files (`when: always`).
+
+**Output file(s):** `evidence/signature-verification.txt` — human-readable record of each verified signature (identity, issuer, Rekor entries, subjects); `evidence/signature-verification.jsonl` — one JSON record per verified (or deferred) signature.
+
+#### `tamper-verification` — stage: `model-integrity` · hard gate · output: `evidence/integrity.env`, `evidence/model-digests-baseline.txt`
+
+**What this job is for**
+This is the cross-pipeline drift gate: it compares the model digests from `model-digest` against a stored baseline so a model file whose content changes (or is added/removed) between pipelines is detected as tampering. The baseline is kept durably in Vault when `VAULT_ADDR` is set, falling back to a best-effort job cache otherwise.
+
+**Step by step, in plain English**
+1. Skips on the `[sigstore-discovery]` probe commit; otherwise runs after `model-digest`. GitLab issues a per-job `VAULT_ID_TOKEN`.
+2. Installs `hvac` and reads the current digests from `evidence/model-digests.txt`.
+3. If `VAULT_ADDR` is set, authenticates to Vault and reads the baseline from `secret/gaips/tamper-baseline/<project-slug>`; on first run it seeds the baseline. If Vault fails it falls back to the file baseline.
+4. Without Vault, it reads the baseline from the cached `model-digests-baseline.txt`, seeding from current digests if none exists.
+5. If the stored baseline only recorded an empty-model placeholder but current digests are real, it reseeds with the current digests.
+6. Comparison is content-based and path-insensitive: it reduces both baseline and current to the SET of sha256 hashes, so a path-format change (e.g. the Fix #32 absolute→relative move) is NOT treated as tampering — only an actual hash change or an added/removed file is.
+7. If both sets are non-empty and differ, it prints each digest missing-from-current and each new-in-current as "TAMPER DETECTED" and exits 1. Otherwise it prints "Tamper check PASSED".
+8. On a content match it migrates the stored baseline to the current relative-path form (file + Vault), so the baseline self-heals and stops carrying stale absolute-path lines, then writes `tamper_check_passed=true` to `integrity.env`.
+9. Uploads `integrity.env` and the file-fallback baseline.
+
+**Output file(s):** `evidence/integrity.env` — `tamper_check_passed=true` on success; `evidence/model-digests-baseline.txt` — the file-fallback baseline digest list (Vault is authoritative when `VAULT_ADDR` is set).
+
+#### `modelscan` — stage: `model-integrity` · advisory (allow_failure) · output: `reports/modelscan.json`, `reports/modelscan.log`
+
+**What this job is for**
+This is the local serialized-model scanner: it inspects pickle/PyTorch/TensorFlow/Keras artifacts under the model directory for unsafe operators (e.g. arbitrary-code execution embedded in a pickle). It runs early in model-integrity, feeding `modelaudit-scan` (which lists it in `needs`). Although advisory, its report is consumed by `artifact-signing-gate`, which fails if `modelscan.json` is missing or reports CRITICAL issues.
+
+**Step by step, in plain English**
+1. Skips on `[sigstore-discovery]` commits; otherwise runs after `model-signing-install` and `model-fixture-download`.
+2. Installs `modelscan` and ensures the reports and model directories exist.
+3. Searches for any supported serialized format (`.pt .pth .bin .ckpt .pb .h5 .keras .npy .pkl .pickle .joblib .dill`); if none, writes a "skipped" stub report plus an empty log and exits clean.
+4. Runs `modelscan scan`, writing JSON to `modelscan.json` and teeing console output to `modelscan.log`.
+5. Interprets the exit code: 0 (clean), 1 (findings), 3 (no supported files) are tolerated; any other code is treated as a real error.
+6. Parses the JSON summary and prints a CRITICAL/HIGH/MEDIUM/LOW/SCANNED tally.
+7. Notes (without failing) when zero artifacts were scanned.
+8. Exits non-zero only on a CRITICAL issue; even then `allow_failure: true` keeps it advisory.
+
+**Output file(s):** `reports/modelscan.json` — scan results (or a "skipped" stub); `reports/modelscan.log` — the raw scan transcript.
+
+#### `modelaudit-scan` — stage: `model-integrity` · hard gate · output: `reports/modelaudit.json`, `reports/modelaudit-summary.json`, `reports/modelaudit.log`
+
+**What this job is for**
+This is the second, stricter pass over local model files using the ModelAudit CLI, run after `modelscan`. Unlike the advisory `modelscan`, this is a hard gate: it fails on operational errors, CRITICAL findings, or any reported warnings. It runs in its own pinned `python:3.11-slim` image with telemetry disabled, and covers GGUF/safetensors/ONNX/manifests/archives that ModelScan does not.
+
+**Step by step, in plain English**
+1. Skips on `[sigstore-discovery]` commits; runs in `python:3.11-slim` with `before_script` cleared and telemetry off.
+2. Asserts Python >= 3.10, upgrades pip/setuptools/wheel, installs `modelaudit[all]` pinned to `MODELAUDIT_VERSION`, and prints the version.
+3. If no files exist under the model directory, writes "skipped" stubs for both JSON reports plus an empty log and exits clean.
+4. Runs `modelaudit scan` in JSON mode, capturing the log and report and recording the exit code.
+5. If no report was produced, synthesizes a "failed" JSON report carrying the exit code.
+6. Walks the report to count severities (CRITICAL, warning-class, INFO) and writes the rolled-up `modelaudit-summary.json`.
+7. Applies the gate per ModelAudit's exit contract: exit 2 (operational failure), any CRITICAL, or exit 1 (warnings) fail the job.
+8. Always uploads all three artifacts; `allow_failure: false` makes this a real blocker.
+
+**Output file(s):** `reports/modelaudit.json` — full findings; `reports/modelaudit-summary.json` — derived severity counts and pass/fail flag; `reports/modelaudit.log` — raw CLI transcript.
+
+#### `modelfile-audit` — stage: `model-integrity` · advisory (allow_failure) · output: `reports/modelfile-audit.json`, `evidence/modelfile-digests.txt`
+
+**What this job is for**
+This job records integrity evidence for Ollama `Modelfile` definitions by hashing them, so their exact contents are pinned and auditable. It is a lightweight, stdlib-only companion to the binary scanners (`modelscan`, `modelaudit-scan`, `clamav-scan`); where those inspect model weights, this fingerprints the build recipes. Advisory; cleanly skips when no Modelfiles exist.
+
+**Step by step, in plain English**
+1. Skips on `[sigstore-discovery]` commits; otherwise runs after `setup` with the pip cache disabled.
+2. Ensures the reports and evidence directories exist.
+3. Searches for Modelfiles recursively under the model directory plus `Modelfile` at the repo root and one level below, de-duplicating by resolved path.
+4. If none are found, writes a "skipped" `modelfile-audit.json` and exits clean.
+5. For each Modelfile, reads its text and computes a SHA-256.
+6. Writes `rel-path  sha256:<digest>` lines to `evidence/modelfile-digests.txt` (separate file to avoid a write race with `model-digest`).
+7. Writes structured results to `reports/modelfile-audit.json` and prints how many were hashed.
+
+**Output file(s):** `reports/modelfile-audit.json` — per-Modelfile SHA-256 digests (or a "skipped" marker); `evidence/modelfile-digests.txt` — plaintext path/digest evidence lines.
+
+#### `clamav-scan` — stage: `model-integrity` · hard gate · output: `reports/clamav-model.log`, `reports/clamav-model.txt`, `reports/clamav-model.json`
+
+**What this job is for**
+This is the antivirus/malware gate over the model bytes, run in the pinned `clamav/clamav` image. It is the only hard-gating malware control in the pipeline, so it is deliberately defensive about proving a scan actually happened (it refuses to pass on an empty scan). It complements the model-format scanners `modelscan` and `modelaudit-scan` by checking for conventional malware.
+
+**Step by step, in plain English**
+1. Skips on `[sigstore-discovery]` commits; otherwise runs after `model-signing-install` and `model-fixture-download`, with `before_script` cleared (the image has no Python).
+2. Ensures the reports and model directories exist, then runs `freshclam` to refresh virus signatures (non-fatal: a failed update falls back to the cached DB).
+3. Runs `clamscan` recursively with large file/scan-size limits, writing the detailed log and console output, and records the exit code.
+4. Counts infected files by tallying ` FOUND` lines.
+5. Parses the summary to extract "Scanned files" and "Known viruses" counts.
+6. Writes `clamav-model.json` (scanned dir, infected count, scanned-file count, signature count, exit code) and prints a one-line status.
+7. Fails on exit 1 (virus) or any other non-zero (scan error).
+8. Empty-scan guard: fails if "Scanned files" parsed to < 1; if the summary couldn't be parsed, falls back to a `find` file count and fails only when nothing exists to scan. `allow_failure: false`.
+
+**Output file(s):** `reports/clamav-model.log` — detailed clamscan log; `reports/clamav-model.txt` — console transcript and exit line; `reports/clamav-model.json` — parsed summary (infected/scanned/signatures/exit).
+
+#### `hf-artifact-scan` — stage: `model-integrity` · hard gate · output: `reports/hf-scan/`
+
+**What this job is for**
+This is a HuggingFace provenance/policy gate over EXTERNAL Hub repositories, not a byte scanner. Rather than re-downloading weights (already covered by `clamav-scan`, `modelscan`, and the model digest/sign/verify jobs), it queries `huggingface_hub.model_info` to enforce policy: rejecting Hub-disabled repos, enforcing an author allowlist, and detecting commit-SHA drift from pins. It is opt-in and cleanly skips when `HF_MODEL_IDS` is unset.
+
+**Step by step, in plain English**
+1. Skips on `[sigstore-discovery]` commits; otherwise runs after `setup` and `vault-secrets`.
+2. Creates `reports/hf-scan/` first, then checks `HF_MODEL_IDS`; if empty, writes a "skipped" `summary.json` and exits clean.
+3. Installs `huggingface_hub` only when there are repos to gate.
+4. Parses `HF_MODEL_IDS`, the optional `HF_AUTHOR_ALLOWLIST`, and optional `HF_PINNED_SHAS` (`id=sha`); reads optional `HF_TOKEN`.
+5. For each model id, calls `model_info` and records author, sha, disabled/gated/private flags, and file count.
+6. Evaluates policy per repo: a disabled repo, an author not on the allowlist (when set), or a live sha differing from its pin are violations; any `model_info` exception is also a violation.
+7. Aggregates per-repo records into `reports/hf-scan/summary.json` and prints OK or the specific violations.
+8. Exits non-zero on any violation; with `allow_failure: false`, that fails the pipeline.
+
+**Output file(s):** `reports/hf-scan/summary.json` — per-repo provenance records and policy violations, or a "skipped" marker when `HF_MODEL_IDS` is unset.
+
+#### `dataset-download` — stage: `model-integrity` · advisory (allow_failure) · output: `evidence/dataset-input/`
+
+**What this job is for**
+This is the head of the dataset chain. It puts a dataset on disk so the downstream gates (`dataset-scan`, `dataset-redact`, `eval-dataset-validate`, `great-expectations-validate`, `ydata-profile`, `dataset-sign`) have something to operate on. Advisory so it can skip gracefully; when the chain is intentionally turned off it deliberately stages nothing so every downstream job hits its own clean skip.
+
+**Step by step, in plain English**
+1. Creates `evidence/dataset-input/` and the reports directory.
+2. If `DATASETS_DISABLED=true`, writes a `skipped` report and exits 0, staging no dataset.
+3. If `DATASET_FILENAME` is unset, falls back to the committed CI fixture (`evals/ci-dataset.jsonl`): copies it in, computes its SHA-256, writes `dataset-digest.txt`, writes a `fixture:true` report, and exits.
+4. Otherwise (download mode) it requires an integrity pin: if `DATASET_EXPECTED_SHA256` is unset and `DATASET_ALLOW_UNVERIFIED` is not `true`, it errors out (fail-closed).
+5. Installs `curl`/CA certs and downloads the file from the GitLab generic package registry using the job token.
+6. Computes the download's SHA-256 and writes it to `dataset-digest.txt`.
+7. If a pin was given, compares the digest to `DATASET_EXPECTED_SHA256` and fails on mismatch; if unverified mode was opted into, logs a warning and proceeds.
+8. Emits the final `reports/dataset-download.json` (filename, size, sha256).
+
+**Output file(s):** `evidence/dataset-input/` — the staged dataset bytes (fixture or downloaded); also `evidence/dataset-digest.txt` and `reports/dataset-download.json`.
+
+#### `dataset-scan` — stage: `model-integrity` · hard gate · output: `reports/dataset-scan.json`
+
+**What this job is for**
+The first hard gate on the data, sitting after `dataset-download` and before `dataset-redact`. It ensures the dataset is malware-free (ClamAV) and structurally well-formed (JSON/JSONL parses) before anything downstream redacts, validates, or loads it. It fails closed: a missing-but-expected dataset is a broken chain, not a skip.
+
+**Step by step, in plain English**
+1. Locates the dataset file under `evidence/dataset-input/`.
+2. If none found: skips clean only when `DATASETS_DISABLED=true`; otherwise treats it as a broken chain and fails.
+3. Installs ClamAV and runs `freshclam`, falling back to the cached DB on failure.
+4. Runs `clamscan --infected`, teeing output and capturing the exit code.
+5. Parses the summary for infected count, files scanned, and signatures loaded, then writes `reports/dataset-clamav.json`.
+6. Fails on ClamAV exit 1 (infected) or any other non-zero (scan error).
+7. Empty-scan guard: if 0 files were scanned it fails; if the summary couldn't be parsed it verifies the file is non-empty instead.
+8. Runs a Python structural check: `.json` must parse as JSON, `.jsonl`/`.ndjson` each non-blank line must parse; any HIGH finding is written to `reports/dataset-scan.json` and fails the job.
+
+**Output file(s):** `reports/dataset-scan.json` — structural-scan result with findings; also `reports/dataset-clamav.log`, `reports/dataset-clamav.json`, `reports/clamav-dataset.txt` (AV evidence).
+
+#### `dataset-redact` — stage: `model-integrity` · hard gate · output: `reports/dataset-redact.json`
+
+**What this job is for**
+Defence-in-depth on data confidentiality, run after `dataset-scan` clears the data and before it is validated, profiled, or signed. It strips secrets (via gitleaks findings) and PII (via Presidio) out of the dataset in place, so the redacted bytes are what every later job consumes. It needs both `dataset-scan` (ordering) and `dataset-download` (which carries the `dataset-input/` artifact). Backing script: `scripts/redact_dataset.py`.
+
+**Step by step, in plain English**
+1. Locates the dataset under `dataset-input/` (ignoring any `dataset.sig`/`dataset.pem`).
+2. If none found: skips clean only when `DATASETS_DISABLED=true`; otherwise fails as a broken chain.
+3. Installs `curl`/CA certs, then downloads and checksum-verifies the pinned gitleaks release before installing it.
+4. Installs Presidio (`presidio-analyzer`, `presidio-anonymizer`, `click`) and downloads the spaCy `en_core_web_sm` model.
+5. Runs `gitleaks detect --no-git` over the dataset, producing a secrets report at `/tmp` (kept internal, never published).
+6. Calls `scripts/redact_dataset.py` with the dataset, the gitleaks report, and the `REDACT_MAX_SECRETS=0` / `REDACT_MAX_PII=-1` thresholds.
+7. The script walks string values inside JSON/JSONL records, replacing matched secrets with `[REDACTED-SECRET]` and Presidio PII with `<ENTITY>` tokens, rewriting the file in place; it records counts only, never raw values.
+8. It writes the report (original/redacted SHA, counts, PII-by-type) first, then exits non-zero if findings exceed the thresholds — so the data is always redacted even when the gate fails (zero-tolerance for secrets; PII gate disabled by default with `-1`).
+
+**Output file(s):** `reports/dataset-redact.json` — redaction counts, before/after SHA-256, and any threshold breaches; also republishes `evidence/dataset-input/` containing the redacted data.
+
+#### `eval-dataset-validate` — stage: `model-integrity` · hard gate · output: `reports/eval-dataset-validation.json`
+
+**What this job is for**
+A contract gate that runs after `dataset-redact` and confirms every record conforms to `evals/eval-dataset.schema.json` before any AI-eval job loads the data. It catches off-contract/malformed records up front. It is the STRUCTURE gate that `great-expectations-validate` later complements with a CONTENT gate. Backing script: `scripts/validate_eval_dataset.py`.
+
+**Step by step, in plain English**
+1. Locates the redacted dataset under `dataset-input/` (ignoring sig/pem files).
+2. If none found: skips clean only when `DATASETS_DISABLED=true`; otherwise fails as a broken chain.
+3. Installs `jsonschema`, then invokes `scripts/validate_eval_dataset.py` with the dataset and schema.
+4. The script iterates records (JSON array, single object, or JSONL/NDJSON) and validates each with a Draft7 validator.
+5. Collects per-record errors (record number, JSON path, message), capping at `--max-errors` (default 20).
+6. On unparseable JSON/JSONL it writes a `valid:false` parse-error report and exits 1.
+7. Writes `reports/eval-dataset-validation.json` with record count, error count, and the error list.
+8. Exits non-zero if any schema errors were found.
+
+**Output file(s):** `reports/eval-dataset-validation.json` — validity flag, record count, and any per-record schema errors.
+
+#### `great-expectations-validate` — stage: `model-integrity` · advisory (soft gate) · output: `reports/great-expectations.json`
+
+**What this job is for**
+The content-quality gate one rung above `eval-dataset-validate`'s structure check: it asserts null rates, value ranges, uniqueness, and cardinality — things a JSON Schema cannot express — over the redacted, on-contract data. It is currently a soft gate (`allow_failure: true`), intended to flip to a hard gate once expectations are tuned. It pairs with `ydata-profile` (profile → read alerts → refine the suite). Backing script: `scripts/run_great_expectations.py`.
+
+**Step by step, in plain English**
+1. Installs `great-expectations` and `pandas`, then creates the reports and `evidence/great-expectations/` dirs.
+2. Locates the dataset; if absent, skips clean only under `DATASETS_DISABLED=true`, else reports a broken chain (non-blocking because advisory).
+3. Invokes `scripts/run_great_expectations.py`, which loads the JSON/JSONL into a pandas DataFrame.
+4. Uses the suite from `evals/great-expectations-suite.json` if present; otherwise infers a conservative suite (row-count floor, non-null/unique id, non-empty prompt/question/expected fields, mostly-non-null category).
+5. Drops any column-targeting expectations whose column is absent from this dataset.
+6. Builds a file-backed GX context, data source, batch, suite, validation definition, and checkpoint, then runs the checkpoint.
+7. Best-effort renders Data Docs and copies the HTML site into `evidence/great-expectations/`.
+8. Writes `reports/great-expectations.json` and exits non-zero if expectations failed — but `allow_failure: true` keeps that non-blocking for now.
+
+**Output file(s):** `reports/great-expectations.json` — checkpoint pass/fail and per-expectation results; also `evidence/great-expectations/` (Data Docs site).
+
+#### `ydata-profile` — stage: `model-integrity` · advisory (allow_failure) · output: `reports/ydata-profile.json`
+
+**What this job is for**
+An advisory automated profile of the redacted dataset (types, distributions, null counts, cardinality, correlations, alerts), running after `dataset-redact`. It never gates — it exists to inform the `great-expectations-validate` suite: the intended workflow is profile, read the alerts, then author/refine expectations. Backing script: `scripts/run_ydata_profile.py`.
+
+**Step by step, in plain English**
+1. Installs `setuptools<81` (pinned because ydata-profiling still imports `pkg_resources`), `ydata-profiling`, and `pandas`.
+2. Creates the reports and `evidence/ydata-profile/` dirs.
+3. Locates the dataset; if absent, skips clean only under `DATASETS_DISABLED=true`, else reports a broken chain (non-blocking).
+4. Invokes `scripts/run_ydata_profile.py`, which loads the JSON/JSONL into a pandas DataFrame.
+5. Builds a `ProfileReport` with `minimal=True` (skips expensive correlations/interactions to keep CI fast on large text columns).
+6. Writes the HTML profile to `evidence/ydata-profile/profile.html`.
+7. Writes the JSON profile to `reports/ydata-profile.json`.
+8. Returns success regardless of dataset content — evidence only, never fails on quality grounds.
+
+**Output file(s):** `reports/ydata-profile.json` — machine-readable dataset profile; also `evidence/ydata-profile/profile.html`.
+
+#### `dataset-sign` — stage: `model-integrity` · advisory (allow_failure) · output: `evidence/dataset-input/` (`.sig`/`.pem`)
+
+**What this job is for**
+Signs the dataset only after it is clean, redacted, and on-contract, attesting the redacted bytes (never the raw download). It needs both `eval-dataset-validate` (proving validation passed) and `dataset-redact` (which carries the redacted bytes). It uses cosign keyless signing via the GitLab OIDC token, the same mechanism as `model-sign`. Advisory, so it skips gracefully when no dataset is present.
+
+**Step by step, in plain English**
+1. Ensures `evidence/dataset-input/` exists and locates the dataset (ignoring existing `.sig`/`.pem`).
+2. If none found: skips clean under `DATASETS_DISABLED=true`, else fails as a broken chain.
+3. Installs `curl`/CA certs, then downloads cosign and checksum-verifies it before installing.
+4. Re-locates the dataset file to sign.
+5. If `SIGSTORE_ID_TOKEN` is present (from the `id_tokens` block, aud `sigstore`), runs `cosign sign-blob --yes` over the dataset.
+6. Cosign performs keyless signing, getting a Fulcio certificate recorded in Rekor.
+7. Writes the detached signature to `dataset-input/dataset.sig` and the certificate to `dataset-input/dataset.pem`.
+8. If no token is available, logs that the dataset is left unsigned rather than failing.
+
+**Output file(s):** `evidence/dataset-input/` — republished dataset plus `dataset.sig` (detached signature) and `dataset.pem` (Fulcio certificate).
+
+#### `artifact-signing-gate` — stage: `model-integrity` · hard gate · output: none
+
+**What this job is for**
+The enforcing chokepoint of the model-integrity stage: no evaluation job runs unless model integrity has passed. It depends on the nine integrity checks (`signature-verification`, `tamper-verification`, `modelscan`, `modelaudit-scan`, `modelfile-audit`, `clamav-scan`, `hf-artifact-scan`, `dataset-scan`, `eval-dataset-validate`) and is a defence-in-depth backstop. It produces no artifact — it only passes or fails — and must stay `allow_failure: false`, or the gate becomes a no-op.
+
+**Step by step, in plain English**
+1. Skips the venv bootstrap (`before_script: []`) since it only needs stdlib.
+2. Fails closed if `evidence/integrity.env` is missing (tamper-verification never wrote evidence).
+3. Sources `integrity.env` and fails unless `tamper_check_passed=true`.
+4. Loads `reports/modelscan.json`; fails if missing, or if the summary reports any CRITICAL issues.
+5. Loads `reports/modelaudit-summary.json`; fails if missing.
+6. Fails if ModelAudit had an operational scan failure or reported any CRITICAL issues.
+7. If every check passes, prints "Artifact signing gate PASSED — proceeding to evaluation" and exits 0.
+
+**Output file(s):** None — this is a gate; it produces no artifact (it gates the AI-eval stage on tamper evidence plus the ModelScan/ModelAudit reports).
+
+### Stage 6 — AI Evaluation
+
+#### `markllm-watermark-eval` — stage: `ai-eval` · advisory (allow_failure) · output: `reports/markllm-results.json`
+
+**What this job is for**
+This is the pipeline's live AI-watermarking self-test: it proves the model can both produce a watermarked generation and have that watermark detected, end to end. It runs after `artifact-signing-gate` and `model-manifest`. It is advisory because the eval pulls a multi-GB transformers model and a heavy watermark stack onto a small runner, so a load or runtime failure records evidence without blocking; that verdict is later read by `evidence-summary`.
+
+**Step by step, in plain English**
+1. Skips on `[sigstore-discovery]` commits; otherwise runs on success.
+2. Installs pinned `markllm`, `torch`, and `transformers` and creates the reports directory.
+3. Resolves the model id: `MARKLLM_MODEL_ID` wins if set, otherwise derives `<org>/<repo>` from `MODEL_FIXTURE_URL`, stripping a trailing `-GGUF`/`-GGML` so the GGUF integrity fixture maps to the transformers repo MarkLLM loads; hard-errors if none can be resolved.
+4. Runs `run_markllm_watermark_eval.py`, which loads the tokenizer and causal LM (CUDA if available, else CPU), builds a `TransformersConfig`, and loads the watermark algorithm (default `KGW`).
+5. For two fixed prompts it generates watermarked text and then runs detection on that text, recording the prompt, output, length, and detection result.
+6. Writes a JSON report with `status` (`passed`/`failed`), per-prompt results, and metrics; any import/load/generation failure writes a `failed` report and exits non-zero.
+7. Artifacts are uploaded `when: always`.
+
+**Output file(s):** `reports/markllm-results.json` — the watermark generate-then-detect self-test result, including per-prompt outputs, detection results, and an overall pass/fail `status` that `evidence-summary` reads as a required verdict.
+
+### Stage 7 — Guardrail / Drift
+
+#### `data-drift-baseline-commit` — stage: `guardrail` · advisory (allow_failure) · output: none
+
+**What this job is for**
+This job bootstraps input-side drift detection by committing the drift reference that `evidently-drift` seeds on its first run. It `needs: ["evidently-drift"]` and consumes that job's `dataset-reference.seed.jsonl`. Once it commits `evals/dataset-reference.jsonl`, `evidently-drift` leaves seed-mode and begins comparing against a real reference. Advisory so a failed auto-commit never breaks the build; runs on the default branch only.
+
+**Step by step, in plain English**
+1. Runs only on the default branch and never on `[sigstore-discovery]` commits; installs git in `before_script`.
+2. Exits cleanly if `evidently-drift` did not seed a reference this run (no seed file).
+3. Exits cleanly if a reference already exists at `evals/dataset-reference.jsonl` — it never overwrites an existing reference.
+4. Exits cleanly if `GITLAB_PUSH_TOKEN` is not set, printing manual instructions instead.
+5. Sanitizes the seed rather than raw-copying it: an inline Python script drops null and non-finite (NaN/inf) values per record and re-emits strict, key-sorted JSONL (the raw seed can carry NaN-filled columns); it aborts if sanitization yields zero records.
+6. Configures a CI git identity and commits the sanitized `evals/dataset-reference.jsonl` with a `[skip ci]` message.
+7. Pushes to the default branch using `oauth2:${GITLAB_PUSH_TOKEN}` with `-o ci.skip` so it does not trigger a new pipeline.
+
+**Output file(s):** None (no CI artifact). Its effect is a git commit of `evals/dataset-reference.jsonl` to the default branch, which activates `evidently-drift` comparisons on later runs.
+
+#### `evidently-drift` — stage: `guardrail` · advisory (allow_failure) · output: `reports/evidently-drift.json`
+
+**What this job is for**
+This is the input-side data/feature drift check, complementing the eval-metric drift control (`model-drift-detection`, now in the live-scans pipeline). It uses Evidently's `DataDriftPreset` (PSI) to compare a committed reference snapshot of the dataset against the current one, adding text descriptors over prompt columns. On the very first run, before any reference is committed, it seeds one for `data-drift-baseline-commit` to commit.
+
+**Step by step, in plain English**
+1. Skips on `[sigstore-discovery]` commits; otherwise runs after `dataset-redact` and `eval-dataset-validate`.
+2. Installs `evidently` and `pandas` and creates the reports and `evidence/evidently/` directories.
+3. Clean-skips when no dataset is present: if none is found under `evidence/dataset-input`, writes `{"skipped":true,...}` and exits 0.
+4. Otherwise runs `run_evidently_report.py` with the current dataset, the committed reference (`evals/dataset-reference.jsonl`), and output paths.
+5. Seed-mode on first run: if no reference exists yet, it strips null/non-finite values and writes a seeded JSONL reference plus a `seeded:true` summary, then returns without a comparison.
+6. When a reference exists, it builds Evidently `Dataset`/`DataDefinition` objects, runs `DataDriftPreset(method="psi")` (plus `TextEvals` if text columns are present), and saves the HTML report.
+7. It walks the serialized snapshot for the drift verdict, writes the JSON summary, and exits non-zero if drift is detected (recorded but non-blocking).
+8. If a reference was seeded, prints a hint to commit `dataset-reference.seed.jsonl`.
+
+**Output file(s):** `reports/evidently-drift.json` — drift summary (skipped/seeded/pass/fail + drifted-column stats); `reports/dataset-reference.seed.jsonl` — first-run seeded reference (consumed by `data-drift-baseline-commit`); `evidence/evidently/` — directory with the human-readable `drift-report.html`.
+
+### Stage 8 — Evidence
+
+#### `evidence-summary` — stage: `evidence` · hard gate · output: `evidence/evidence-summary.md`
+
+**What this job is for**
+This is the pipeline's consolidating gate: it gathers reports from across the run (its `needs` lists ~25 upstream jobs) and renders a single evidence summary that records not just whether each artifact is present but what its verdict is. It is a hard gate so a missing required artifact stops the run. Its sibling `sign-evidence` mirrors the same collection set to hash-and-sign the whole bundle afterward.
+
+**Step by step, in plain English**
+1. Skips on `[sigstore-discovery]` commits; otherwise installs `jinja2` and creates the evidence directory.
+2. Runs `write_ci_evidence_summary.py` against the reports directory — invoked WITHOUT `--enforce-verdicts`, so it runs in advisory-verdict mode (teeth deferred).
+3. For each required artifact (`semgrep.json`, `markllm-results.json`) it reads a 3-state VERDICT — pass / fail / inert (present but no pass/fail signal) — and treats a missing file as `absent`.
+4. For advisory artifacts (e.g. `evidently-drift.json`, `modelaudit-summary.json`, `great-expectations.json`, `dependency-track.json`) it records the same 3-state verdict but never gates on them.
+5. Builds the `evidence-summary.md` tables (Artifact / Present / Verdict / Detail) plus a Gate section, and emits warnings to the log for failing verdicts.
+6. Hard-fails (exit 1) only when a REQUIRED artifact is MISSING; a present-but-failing required verdict merely warns and would only block under `--enforce-verdicts`.
+7. Bundles `eval-baseline.seed.json` into the evidence dir if a drift baseline was seeded this run.
+8. Copies the committed `evals/model-baseline.json` into the evidence dir so the report records the exact model identity the run was pinned to.
+
+**Output file(s):** `evidence/evidence-summary.md` — the rendered report (per-artifact presence + verdict tables and the gate decision); `evidence/eval-baseline.seed.json` — present only when a drift baseline was seeded; `evidence/model-baseline.json` — a copy of the approved model identity/variable manifest.
+
+### Stage 9 — AI BOM
+
+#### `ai-bom-assemble` — stage: `ai-bom` · hard gate · output: `sbom/aibom.cyclonedx.json`
+
+**What this job is for**
+This is the keystone assembly step: it merges every prior pipeline element — the software SBOM, ML model components (digests, signatures, ModelScan/ModelAudit/ClamAV verdicts, HuggingFace card metadata), datasets, AI evaluation evidence, and parsed vulnerabilities — into one CycloneDX 1.6 AI BOM. It consumes artifacts from a large `needs` list because GitLab only downloads artifacts from jobs named in `needs`. Its JSON output is then schema-checked by `ai-bom-validate`, substance-checked by `ai-bom-content-gate`, and signed by `ai-bom-sign`.
+
+**Step by step, in plain English**
+1. Creates the `sbom/` output directory.
+2. Stamps a build timestamp from `CI_PIPELINE_CREATED_AT` (falling back to `date` for local runs).
+3. Runs `scripts/build_ai_bom.py`, pointing it at the SBOM, reports, evidence, and model directories.
+4. The script gathers software components from the syft SBOM plus the MarkLLM watermark stack, kept as two disjoint counts (Fix #30a).
+5. It builds machine-learning-model components from `model-digests.txt`, embeds the cosign `model.sig`/`dataset.sig` signatures as base64 `data:` URIs, and folds in scan verdicts, the populated `modelCard` (Fix #30b), and `gaips:model.verified` (Fix #32b).
+6. It adds data components from the dataset digest and download/scan reports, and attaches AI-eval and data-quality evidence to the root component.
+7. It parses the audit reports (pip-audit, lockfile-audit, markllm-deps-audit, grype, trivy) into a CycloneDX `vulnerabilities[]` array with `affects[].ref` per component (Fix #29), and records count properties.
+8. Writes the assembled document to `sbom/aibom.cyclonedx.json`. Any missing input is skipped, never fatal, so the BOM degrades gracefully.
+
+**Output file(s):** `sbom/aibom.cyclonedx.json` — the consolidated, canonical CycloneDX 1.6 AI BOM that every downstream ai-bom job operates on.
+
+#### `ai-bom-validate` — stage: `ai-bom` · hard gate · output: `sbom/aibom.cyclonedx.xml`
+
+**What this job is for**
+This job proves the AI BOM produced by `ai-bom-assemble` is well-formed against the CycloneDX 1.6 schema, then renders it to XML — the byte form that `ai-bom-sign` signs. It runs in the .NET `cyclonedx-cli` image (no Python), so the substance checks live separately in `ai-bom-content-gate`. It is a FORM check only.
+
+**Step by step, in plain English**
+1. Runs in the `cyclonedx-cli` image with the entrypoint cleared (no Python or venv setup).
+2. Hard-validates `sbom/aibom.cyclonedx.json` with `/cyclonedx validate --input-format json --input-version v1_6 --fail-on-errors`.
+3. Calls the binary by absolute path because PATH may not include `/` once the entrypoint is cleared.
+4. Converts the validated JSON to XML with `/cyclonedx convert ... --output-format xml --output-version v1_6`.
+5. Writes the XML to `sbom/aibom.cyclonedx.xml` — the artifact `ai-bom-sign` signs.
+
+**Output file(s):** `sbom/aibom.cyclonedx.xml` — the schema-valid XML rendering of the AI BOM, produced as the signing target for `ai-bom-sign`.
+
+#### `ai-bom-content-gate` — stage: `ai-bom` · advisory (allow_failure) · output: none
+
+**What this job is for**
+Where `ai-bom-validate` proves the BOM is well-formed, this job asserts it is substantive — that it actually says something. It re-runs the same vulnerability parser `ai-bom-assemble` used (so it must pull the identical audit surface: `pip-audit`, `lockfile-audit`, `markllm-deps-audit`, `grype-scan`, `trivy-scan`) and checks that every model component is signed and verified. Advisory by default per the project's teeth-last posture; `--enforce` makes it a hard gate once the pipeline is otherwise green.
+
+**Step by step, in plain English**
+1. Runs `scripts/assert_ai_bom_content.py` against `sbom/aibom.cyclonedx.json` and the reports dir, in a Python image.
+2. If the BOM is absent (assemble skipped), it prints a notice and exits cleanly.
+3. Counts vulnerabilities the audit reports found using `build_ai_bom._vulnerabilities()` — the exact parser that populates the BOM — and flags an empty BOM `vulnerabilities[]` when audits found vulns.
+4. For every `machine-learning-model` component, checks `gaips:signed=true` (error if not signed).
+5. Checks `gaips:model.verified=true`, but only WARNS when unverified (signature-verification legitimately defers on unprotected refs).
+6. Prints `::warning::`/`::error::` annotations and a pass/fail summary.
+7. Without `--enforce` (the configured default), it always exits 0 even on substance gaps.
+
+**Output file(s):** None — a pure gate. It gates (advisory) on vulnerability coverage and on every model component being signed (and ideally verified) in the BOM.
+
+#### `ai-bom-sign` — stage: `ai-bom` · hard gate · output: `sbom/aibom.cyclonedx.xml`, `.sig`, `.pem`
+
+**What this job is for**
+This seals the AI BOM with a cosign keyless signature, making the auditor's keystone inventory tamper-evident. It signs the XML from `ai-bom-validate` using Sigstore keyless signing — Fulcio issues an identity-bound certificate, the signature is recorded in Rekor — driven by GitLab's `SIGSTORE_ID_TOKEN` (same mechanism as `model-sign`, `dataset-sign`, `sign-evidence`), so no signing-key variable is needed. Hardened to a hard gate: an unsigned BOM must not ship green. It skips cleanly only when there is genuinely no XML BOM (validate skipped).
+
+**Step by step, in plain English**
+1. Issues a per-job OIDC token via `id_tokens` with `aud: "sigstore"`.
+2. Checks for `sbom/aibom.cyclonedx.xml`; if absent, prints a notice and exits 0 — the only clean-skip path.
+3. Installs `curl` + CA certs (the `python:3.11-slim` image ships neither).
+4. Downloads cosign at the pinned `COSIGN_VERSION`, verifies its SHA-256 against the checksums, and installs it.
+5. If `SIGSTORE_ID_TOKEN` is unavailable (needs GitLab 15.7+), it errors out and exits 1 — it refuses to pass green with an unsigned BOM.
+6. Runs `cosign sign-blob --yes` over the XML, emitting a detached signature and the Fulcio certificate.
+7. Cosign reads the token automatically; the signature is logged to Rekor.
+
+**Output file(s):** `sbom/aibom.cyclonedx.xml` (the signed bytes), `sbom/aibom.cyclonedx.sig` (detached keyless signature), `sbom/aibom.cyclonedx.pem` (Fulcio cert for offline `verify-blob`) — the trio `publish-signed-artifacts` ships for the Argo PreSync hook.
+
+#### `dependency-track-upload` — stage: `ai-bom` · hard gate when configured · output: `reports/dependency-track.json`
+
+**What this job is for**
+This pushes the BOMs into Dependency-Track for continuous analysis, turning the point-in-time grype/trivy scan into ongoing monitoring against new CVEs and policy conditions over time. It uploads the syft SBOM as the parent project and the AI BOM nested beneath it. It is a hard gate on blocking policy violations, but skips cleanly when `DT_API_URL`/`DT_API_KEY` are unset, so the pipeline runs unchanged until a DT instance is wired in. Backing script: `scripts/dependency_track_upload.py`.
+
+**Step by step, in plain English**
+1. Installs `requests` and runs `scripts/dependency_track_upload.py`.
+2. If `DT_API_URL`/`DT_API_KEY` are unset, writes a `skipped` report and exits 0.
+3. POSTs the app SBOM with `autoCreate=true` to get a processing token, then POSTs the AI BOM nested under the app project (`parentName`/`parentVersion`).
+4. Polls each BOM's processing token until DT finishes ingesting.
+5. Resolves each uploaded project's UUID and pulls its findings and policy violations.
+6. Evaluates the gate for every uploaded project — including the nested AI BOM, whose model/data components get no CVE match but ARE policy targets.
+7. Writes the report and fails (exit 1) if any project could not be resolved, or if any non-suppressed violation matches `DT_FAIL_ON` (default `FAIL`); VEX-suppressed violations never gate.
+
+**Output file(s):** `reports/dependency-track.json` — per-project findings, policy violations, the gate fail-states, and the skip reason when DT is unconfigured.
+
+### Stage 10 — Deploy Prep
+
+#### `image-sign` — stage: `deploy-prep` · advisory (allow_failure) · output: none
+
+**What this job is for**
+This is the image half of the sign→verify-at-deploy loop: it applies a cosign keyless signature to the already-built workload image so the `kyverno-verify-image-signatures` policy can admit a Pod only when its image carries a signature from this CI identity. Advisory because Kyverno is the real deploy-time gate. It skips cleanly when `IMAGE_REF` is unset, and `needs` `dependency-track-upload`.
+
+**Step by step, in plain English**
+1. If `IMAGE_REF` is empty, prints a skip notice and exits 0.
+2. Installs `curl` + CA certs, then downloads and checksum-verifies cosign at `COSIGN_VERSION`.
+3. Logs in to the registry using `IMAGE_REGISTRY_*` vars, falling back to GitLab's `CI_REGISTRY_*` creds.
+4. Signs the image with `cosign sign --yes "${IMAGE_REF}"`, using the `id_tokens` `SIGSTORE_ID_TOKEN` for keyless Fulcio+Rekor signing.
+5. Self-verifies that a signature from a gitlab/oauth2 issuer is present and Rekor-logged, using permissive identity/issuer regexps (strict matching is Kyverno's job).
+6. Warns rather than fails if the post-sign verify doesn't match the issuer regexp.
+
+**Output file(s):** None — no CI artifact; the signature is pushed to the registry alongside the image. It enables (but does not enforce) the Kyverno admission gate.
+
+#### `publish-signed-artifacts` — stage: `deploy-prep` · advisory (allow_failure) · output: `evidence/publish/artifacts-manifest.txt`, `evidence/publish/publish-result.json`
+
+**What this job is for**
+This is the evidence half of the deploy loop: it uploads the signed artifacts the Argo CD PreSync hook fetches at deploy time to the GitLab Generic Package Registry, using the job's `CI_JOB_TOKEN`. It publishes the signed AI-BOM trio (`.xml`/`.sig`/`.pem` from `ai-bom-sign`), the signed dataset (normalised to `dataset.dat`/`.sig`/`.pem`), and the model bundle (from `model-sign` + `model-fixture-download`), and emits the `ARTIFACT_BASE_URL` pointer the PreSync ConfigMap must use. Advisory since a publish hiccup is re-publishable. It `needs` `ai-bom-sign`, `dataset-sign`, `model-sign`, and `model-fixture-download`.
+
+**Step by step, in plain English**
+1. If `CI_API_V4_URL`/`CI_PROJECT_ID` are unset, prints a notice and exits 0.
+2. Stages the signed AI-BOM trio into `evidence/publish/`, recording each into `artifacts-manifest.txt`.
+3. Stages the dataset, normalising it to `dataset.dat` (the cosign blob signature is over the bytes, not the name) plus its `.sig`/`.pem`.
+4. Detects model weights and a `model.sig` in the model directory; if both present, tars a `model-bundle.tar` (verified by `model_signing verify` at deploy), otherwise skips it.
+5. If nothing was staged, writes a `skipped` `publish-result.json` and exits 0.
+6. Iterates the manifest, `curl --upload-file` PUTting each file to `${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}/<file>` with the `JOB-TOKEN` header, counting uploads and failures.
+7. Writes `publish-result.json` (status ok/partial/skipped, base URL, counts) and prints whether this is a canonical default-branch publish or a branch-scoped preview for `ARTIFACT_BASE_URL`.
+8. Exits non-zero on any partial upload so a half-published set is not reported as success.
+
+**Output file(s):** `evidence/publish/artifacts-manifest.txt` — the exact list of files published; `evidence/publish/publish-result.json` — upload status, base URL, and uploaded/failed counts (persisted `when: always`).
+
+#### `metrics-normalize` — stage: `deploy-prep` · advisory (allow_failure) · output: `reports/operational-metrics.json`
+
+**What this job is for**
+This folds every CI signal into one normalised JSON document — answering "what do the artifacts say?" where `evidence-summary` answers "were they produced?". It reads the security, supply-chain, model-integrity, AI-eval, and data-quality reports plus the GitLab pipeline/job API into a single document the `pages` dashboard renders. It has no `needs`: as a final-stage job it inherits artifacts from all earlier stages by default. Advisory — reporting only.
+
+**Step by step, in plain English**
+1. Installs `requests` (only the GitLab-API block uses it) and creates the reports dir.
+2. Runs `scripts/write_operational_metrics.py` over the reports, evidence, and sbom directories.
+3. Parses each domain defensively; a missing or malformed input is recorded in `sources` as absent/error and omitted, never aborting.
+4. Reads provenance from version-info, then calls the GitLab Pipelines/Jobs API when `GITLAB_API_TOKEN` (read_api) is set, skipping cleanly when it is not.
+5. Marks each derived gate as enforcing vs advisory by reading each job's `allow_failure` from the job API.
+6. Emits three views of the same data — grouped `sections`, a flat `metrics` map, and pass/fail/skip `gates` — plus pipeline metadata and the `sources` presence table.
+7. Writes `reports/operational-metrics.json` and prints it; always exits 0.
+
+**Output file(s):** `reports/operational-metrics.json` — the normalised, tool-agnostic operational-metrics document consumed by `pages`.
+
+#### `pages` — stage: `deploy-prep` · advisory (allow_failure) · output: `public/`
+
+**What this job is for**
+This turns the normalised JSON from `metrics-normalize` into a self-contained static dashboard served by GitLab Pages. The job must be named `pages` and publish a `public/` directory for Pages to serve it. It `needs` `metrics-normalize`'s artifacts and is advisory — a dashboard must survive partial input and never gate the run.
+
+**Step by step, in plain English**
+1. Runs `scripts/render_metrics_dashboard.py` with `--metrics reports/operational-metrics.json` and `--out-dir public`.
+2. Creates the `public/` output directory.
+3. Reads the normalised document and renders a single `index.html` with inline CSS and SVG only — no external CDN or JavaScript — so it works under a strict CSP and survives offline archival.
+4. Lays out four bands: a gate banner (passed/failed/skipped + per-signal ledger), pipeline/ops summary, section cards (security, supply chain, model integrity, AI eval, data), and a sources/metrics table.
+5. Copies the metrics JSON into `public/` alongside the HTML for download.
+6. Writes `public/index.html` and prints the output path.
+
+**Output file(s):** `public/` — the directory GitLab Pages serves, containing `index.html` (the rendered dashboard) and a downloadable copy of `operational-metrics.json`.
+
+### Stage 11 — Attest
+
+#### `sign-evidence` — stage: `attest` · hard gate · output: `evidence/sign-evidence.json`, `.sig`, `.pem`
+
+**What this job is for**
+This is the terminal job of the whole pipeline: it seals the entire run by building a hash-manifest of every report, SBOM, and evidence artifact produced, then signs that manifest with cosign keyless (Fulcio + Rekor) and self-verifies it. Placed in the last `attest` stage with a `needs` list mirroring `evidence-summary` plus all ai-bom and deploy-prep jobs, it captures everything — including the signed AI-BOM — into one signed bundle an auditor can trust end-to-end.
+
+**Step by step, in plain English**
+1. Installs `curl` + CA certs and creates the evidence directory.
+2. An inline stdlib-only Python script walks the reports, SBOM, and evidence directories, SHA-256-hashing every file (excluding its own output trio) into an `artifacts[]` manifest with sizes.
+3. Records model identity — the approved baseline SHA vs the digests `model-digest` recorded — and computes `digest_match`.
+4. Reads `signature-verification.jsonl` to mark whether the model was actually VERIFIED (true/false/unknown with a reason), so the bundle is self-declaring.
+5. Captures full pipeline provenance (id, URL, commit, ref, runner, signing job) and writes `evidence/sign-evidence.json`.
+6. Downloads and checksum-verifies cosign at `COSIGN_VERSION`.
+7. Using `id_tokens` `SIGSTORE_ID_TOKEN`, runs `cosign sign-blob --yes` over the manifest, emitting the detached `.sig` and Fulcio `.pem` (logged to Rekor).
+8. Self-verifies with `cosign verify-blob` against the just-produced cert/signature; if self-verify fails, the job fails rather than shipping an unverified seal.
+
+**Output file(s):** `evidence/sign-evidence.json` (the whole-run hash-manifest + provenance + model verdict), `evidence/sign-evidence.sig` (detached keyless signature), `evidence/sign-evidence.pem` (Fulcio cert) — the terminal, self-verified seal over the entire run.

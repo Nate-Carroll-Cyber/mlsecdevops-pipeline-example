@@ -529,14 +529,17 @@ pip-audit:
 
 # Fix #0-B — hash-pinned lockfile audit. The manifest pip-audit above resolves to
 # the root requirements.txt (pandas/requests/jinja2) and never reaches the full
-# pipeline stack declared in ci/requirements-ci.in. This job compiles that .in into
-# a fully pinned, hash-generated lockfile and audits THAT — covering model-signing,
-# sigstore, modelscan, huggingface_hub, presidio, evidently, ydata-profiling,
-# great-expectations, garak, giskard, pyrit, inspect-ai… against OSV/PyPI/GitHub
-# advisory DBs. The lockfile is published as an artifact so it can be committed as
-# ci/requirements-ci.txt to enable --require-hashes installs (the "teeth" half of
-# #0). Advisory for now; flip allow_failure:false once the lockfile is committed
-# and the full stack resolves cleanly in CI.
+# pipeline stack declared in the ci/requirements-ci*.in GROUP files. This job
+# compiles EACH group into a fully pinned, hash-generated lockfile and audits THEM
+# — covering this (static) pipeline's stack: model-signing, sigstore, modelscan,
+# huggingface_hub, presidio, evidently, ydata-profiling, great-expectations, the
+# markllm watermark stack… against OSV/PyPI/GitHub advisory DBs. (The AI red-team
+# tools — garak/giskard/pyrit/inspect-ai/inspect-evals — live in the separate
+# live-scans pipeline, NOT here.) The per-group locks are published as artifacts;
+# the CORE group's lock can be committed as ci/requirements-ci.txt to enable
+# --require-hashes installs (the "teeth" half of #0). Advisory for now; flip
+# allow_failure:false once that lockfile is committed and the core group resolves
+# cleanly in CI.
 lockfile-audit:
   stage: sast
   rules:
@@ -549,47 +552,85 @@ lockfile-audit:
     - pip install --quiet pip-tools pip-audit
     - mkdir -p "${REPORTS_DIR}"
     - |
-      IN_FILE="${GAIPS_MATERIALS_DIR}/ci/requirements-ci.in"
-      LOCK="${REPORTS_DIR}/requirements-ci.txt"
-      if [ ! -f "${IN_FILE}" ]; then
-        echo "No requirements-ci.in present — nothing to lock/audit"; exit 0
+      # The pipeline's deps don't reliably co-resolve as one lockfile: the markllm
+      # watermark stack pins old huggingface_hub<1.0 / Pillow==9.4.0, and the data
+      # quality group (evidently + ydata-profiling) pins narrow numpy/pandas ranges.
+      # These run in isolated per-job venvs anyway, so each requirements-ci*.in is an
+      # independently-resolvable GROUP: compile + hash-pin each on its own. A group
+      # that still can't resolve is a loud WARNING (not a failure) — its packages
+      # stay covered at runtime by the per-job .audit-env after_script.
+      CI_DIR="${GAIPS_MATERIALS_DIR}/ci"
+      : > "${REPORTS_DIR}/lockfile-unresolved-groups.txt"
+      found=0
+      for IN_FILE in "${CI_DIR}"/requirements-ci*.in; do
+        [ -e "${IN_FILE}" ] || continue
+        found=1
+        STEM=$(basename "${IN_FILE}" .in)
+        LOCK="${REPORTS_DIR}/${STEM}.txt"
+        if pip-compile --quiet --generate-hashes --allow-unsafe \
+              --output-file "${LOCK}" "${IN_FILE}"; then
+          echo "Compiled hash-pinned lockfile → ${LOCK}"
+        else
+          echo "WARNING: group '${STEM}' could not be resolved into a single lockfile —"
+          echo "         its packages are audited at runtime by the per-job .audit-env."
+          rm -f "${LOCK}"
+          echo "${STEM}" >> "${REPORTS_DIR}/lockfile-unresolved-groups.txt"
+        fi
+      done
+      if [ "${found}" -eq 0 ]; then
+        echo "No requirements-ci*.in present — nothing to lock/audit"; exit 0
       fi
-      # Compile the .in into a fully pinned, hash-verified lockfile. ydata-profiling
-      # pins narrow numpy/pandas/matplotlib ranges; if the full set cannot co-resolve,
-      # fail loudly rather than silently auditing a partial set (drop/pin the
-      # offending package in requirements-ci.in, then re-run).
-      if ! pip-compile --quiet --generate-hashes --allow-unsafe \
-            --output-file "${LOCK}" "${IN_FILE}"; then
-        echo "ERROR: pip-compile could not resolve the full stack — see log above."
-        exit 1
-      fi
-      echo "Compiled hash-pinned lockfile → ${LOCK}"
     - |
-      LOCK="${REPORTS_DIR}/requirements-ci.txt"
-      # Audit the pinned versions (no install needed — audit reads the manifest).
-      pip-audit \
-        --requirement "${LOCK}" \
-        --format json \
-        --output "${REPORTS_DIR}/lockfile-audit.json" \
-        --progress-spinner off || true
-      pip-audit \
-        --requirement "${LOCK}" \
-        --format cyclonedx-json \
-        --output "${REPORTS_DIR}/lockfile-audit-cyclonedx.json" \
-        --progress-spinner off || true
+      # Audit each resolved group lock (no install needed — audit reads the manifest).
+      for LOCK in "${REPORTS_DIR}"/requirements-ci*.txt; do
+        [ -e "${LOCK}" ] || continue
+        STEM=$(basename "${LOCK}" .txt)
+        pip-audit --requirement "${LOCK}" --format json \
+          --output "${REPORTS_DIR}/${STEM}-audit.json" --progress-spinner off || true
+        pip-audit --requirement "${LOCK}" --format cyclonedx-json \
+          --output "${REPORTS_DIR}/${STEM}-audit-cyclonedx.json" --progress-spinner off || true
+      done
+    - |
+      # Merge the per-group pip-audit JSONs into one lockfile-audit.json in the
+      # pip-audit-native {"dependencies":[...]} shape that build_ai_bom.py reads
+      # (P2-1); dedup by (name, version).
       python3 - <<'PYEOF'
-      import json, os
-      d = json.load(open(os.environ["REPORTS_DIR"] + "/lockfile-audit.json"))
-      deps  = d.get("dependencies", [])
-      total = sum(len(x.get("vulns", [])) for x in deps)
-      pkgs  = sum(1 for x in deps if x.get("vulns"))
-      print(f"lockfile-audit: {total} vulnerability/ies across {pkgs} package(s) over {len(deps)} locked packages")
+      import json, glob, os
+      reports = os.environ["REPORTS_DIR"]
+      merged, seen = [], set()
+      for path in sorted(glob.glob(reports + "/requirements-ci*-audit.json")):
+          try:
+              doc = json.load(open(path))
+          except Exception as exc:
+              print(f"WARN: could not read {os.path.basename(path)} ({exc})")
+              continue
+          if not isinstance(doc, dict):
+              continue
+          for dep in doc.get("dependencies", []):
+              key = (dep.get("name"), dep.get("version"))
+              if key in seen:
+                  continue
+              seen.add(key)
+              merged.append(dep)
+      with open(reports + "/lockfile-audit.json", "w") as f:
+          json.dump({"dependencies": merged}, f, indent=2)
+      total = sum(len(d.get("vulns", [])) for d in merged)
+      pkgs  = sum(1 for d in merged if d.get("vulns"))
+      print(f"lockfile-audit: {total} vulnerability/ies across {pkgs} package(s) "
+            f"over {len(merged)} locked packages (merged from per-group locks)")
+      unresolved_path = reports + "/lockfile-unresolved-groups.txt"
+      if os.path.exists(unresolved_path):
+          groups = [g for g in open(unresolved_path).read().split() if g]
+          if groups:
+              print("NOTE: groups not lockable as a single set "
+                    "(covered by per-job .audit-env): " + ", ".join(groups))
       PYEOF
   artifacts:
     paths:
-      - "${REPORTS_DIR}/requirements-ci.txt"
+      - "${REPORTS_DIR}/requirements-ci*.txt"
       - "${REPORTS_DIR}/lockfile-audit.json"
-      - "${REPORTS_DIR}/lockfile-audit-cyclonedx.json"
+      - "${REPORTS_DIR}/requirements-ci*-audit*.json"
+      - "${REPORTS_DIR}/lockfile-unresolved-groups.txt"
     expire_in: 7 days
 
 pkg-integrity:

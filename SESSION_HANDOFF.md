@@ -1,4 +1,4 @@
-# Session Handoff — GAIPS Model Pipeline (updated 2026-06-19, session 6)
+# Session Handoff — GAIPS Model Pipeline (updated 2026-06-19, session 8)
 
 > **NAMING:** This is the **GAIPS model pipeline**. The repo/dir is named `counter-spy` and
 > holds untracked, unrelated project dirs (`services/`, `packages/`, `src/`, `ctf-frontend/`)
@@ -11,7 +11,26 @@
 
 ---
 
-# ▶️ STATUS (2026-06-19, session 6): 🟢 **Doc/code assurance pass complete (working tree, uncommitted).** Reviewed the 6 doc-vs-code discrepancies in the assurance/last-mile layer, fixed code where it doesn't block dev and corrected docs everywhere else, and independently re-validated each. RESUME AT: **the drift-activation end-to-end review** (scoped below) + the still-open protected/default-branch signing/identity validation run (from session 5).
+# ▶️ STATUS (2026-06-19, session 8): 🟢 **Q2 resolved + gandalf dataset onboarded — COMMITTED (`e910b2c`, NOT pushed).**
+
+**Q2 outcome — reframed, not forced.** The goal "drift detection to catch dataset modification" is **integrity/tamper detection**, which is a **hashing** job — *not* statistical PSI drift (PSI is fuzzy; it misses surgical edits, exactly the attack case). That control **already exists**: `dataset-download`'s `DATASET_EXPECTED_SHA256` pin (checked on **raw, pre-redaction** bytes → deterministic, immune to Presidio non-determinism) + `dataset-sign` (cosign over the redacted bytes) + the AI-BOM `data` component. So `evidently-drift` (PSI) stays a **soft, distribution-monitoring** gate, honestly inert until a realistically-sized *"normal"* reference exists — unchanged. The gandalf set is single-class adversarial, so it is deliberately **not** a PSI "normal" baseline; it serves the integrity path, where content is irrelevant.
+
+**Onboarded the real dataset** — Lakera `gandalf_ignore_instructions` test split (112 rows, **MIT**, cite arXiv:2501.07927), all committed in `e910b2c`:
+- `scripts/parquet_to_jsonl.py` — offline HF Parquet→JSONL converter (`pyarrow`; never runs in CI) → `evals/gandalf-ignore-instructions-test.jsonl`, **112/112 schema-valid** (text→prompt, synth `id`, `category`, kept `similarity`). SHA `667e2f64…b05cd6`.
+- `evals/dataset-baseline.json` — reviewed source of truth: HF source + revision `04737b65…`, MIT + citation, `DATASET_EXPECTED_SHA256` pin (mirrors `model-baseline.json`).
+- `dataset-download` ([.gitlab-ci.yml:1811](.gitlab-ci.yml#L1811)) — `DATASET_FIXTURE_FILE` config (default the gandalf set; `ci-dataset.jsonl` still available) + **fixture-mode SHA-pin check**, so dataset-tamper detection works **without** a package registry.
+- `build_ai_bom.py` — `--dataset-baseline` stamps CycloneDX `licenses` (SPDX MIT) + `gaips:dataset.source/.revision/.split/.citation` provenance + a `website` ref onto the data component, closing the model/dataset provenance asymmetry. Unit-checked (license+props emit; no-baseline path unchanged).
+- Docs: README (dataset-download purpose/tasks/output, new *Parquet→JSONL* section, AI-BOM provenance, Directory Map), `ci/SBOM.md` (provenance+pin remediation rows; `pyarrow` scoped out), `PIPELINE_JOB_VALIDATION.md` (RESOLVED/ADDED notes on `dataset-download` + `ai-bom-assemble`).
+
+**Commit `e910b2c` also folded in the pending Q1/Q3/Q4 drift work** — it was intermixed in the shared files (`.gitlab-ci.yml`, README, `PIPELINE_JOB_VALIDATION.md`) plus `run_evidently_report.py`, so a clean per-feature split wasn't feasible non-interactively. Verified locally: scripts `py_compile`, both pipelines parse, 112/112 schema-valid, BOM provenance path.
+
+**RESUME AT:** **push** `gaips-pipeline-required-fixes` when ready (nothing pushed all session); then the still-open **protected/default-branch signing/identity validation run** (from session 5) — `signature-verification`/`model.verified` *and* drift activation both require a default-branch run to exercise. Optional follow-up: only the *test* split was onboarded; train (777)/val (111) remain if a larger eval corpus is wanted.
+
+---
+
+# ▶️ STATUS (2026-06-19, session 7): 🟢 **Drift-activation end-to-end review done; Q1/Q3/Q4 fixed (now committed session 8 — `e910b2c`).** Traced the seed→commit→compare chain in code. Confirmed activation has NEVER run (default-branch-only job + no `evals/dataset-reference.jsonl` on disk). **Fixed:** Q1 — corrected the misleading "drift now active" log + documented the two-default-branch-run activation ([.gitlab-ci.yml:2450](.gitlab-ci.yml#L2450)); Q3 — pinned `evidently==0.7.21`/`pandas==3.0.3` and made `run_evidently_report.py` **fail CLOSED** when the drift verdict can't be located (was a silent "no drift" green); Q4 — reconciled stale `PIPELINE_JOB_VALIDATION.md` (renamed-job + "wrong baseline / no activation path" banners marked RESOLVED, script line refs corrected). **STILL OPEN — Q2 (to discuss next):** the committed reference is fixture-derived (2 rows, disjoint `question`/`prompt` schemas, constant `category`, redacted/non-deterministic) → PSI comparison is statistically vacuous (fixture-vs-itself = green forever); drift must stay a soft gate until a realistically-sized real-data reference exists. RESUME AT: **discuss Q2** + the still-open protected/default-branch signing/identity validation run (from session 5).
+
+> **STATUS (2026-06-19, session 6): 🟢 Doc/code assurance pass — now COMMITTED.** (Was "working tree, uncommitted"; the 6-finding assurance pass was committed at the start of session 7, plus the session-5 handoff `b72f5fb`.) Reviewed the 6 doc-vs-code discrepancies in the assurance/last-mile layer, fixed code where it doesn't block dev and corrected docs everywhere else, and independently re-validated each.
 
 > **What this session did (all in the working tree — NOTHING committed yet).** Six findings on the
 > assurance "last mile" (signing/completeness/enrichment/explainability):
@@ -53,22 +72,32 @@
 > null/non-finite values, re-emits strict JSONL, aborts on zero valid records — [.gitlab-ci.yml:2479](.gitlab-ci.yml#L2479)),
 > default-branch only, never overwrites, skips without `GITLAB_PUSH_TOKEN`.
 >
-> **Open questions to actually verify (not yet done):**
-> 1. **End-to-end activation has never run.** `data-drift-baseline-commit` is gated on
->    `$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH` and needs a `GITLAB_PUSH_TOKEN` PAT (`write_repository`). The branch
->    work to date has been on a feature branch, so the seed → commit → "drift now active" loop is **unproven on the
->    default branch**. Fold this into the session-5 protected-branch validation run.
-> 2. **Is the committed reference statistically meaningful?** Prior notes flagged the seed coming from a tiny/
->    over-redacted fixture (the `evals/ci-dataset.jsonl` path / 2-row concerns). The sanitizer prevents a *malformed*
->    reference but cannot make a 2-row reference useful for PSI drift. Verify the reference the fixture produces is
->    fit for purpose, or document that real data is required to activate meaningfully.
-> 3. **Data-drift is still a soft gate.** Both `evidently-drift` and `data-drift-baseline-commit` are
->    `allow_failure: true` ("flip to false once a reference is committed + tuned" — [.gitlab-ci.yml:2523](.gitlab-ci.yml#L2523)).
->    Decide/record when the teeth go on; until then the assurance story should not imply drift *blocks*.
-> 4. **Reconcile the stale validation docs.** `PIPELINE_JOB_VALIDATION.md` (≈2046/2090/2115/2122) and the
->    drift-related notes in this handoff (≈372/731/1144/1152) describe the pre-#24a/#24b world and now contradict
->    the code — a customer/auditor reading them would be misled. Update them to current state (same explainability
->    class as finding #6) once the above is verified.
+> **Open questions — session-7 outcomes (Q1/Q3/Q4 ✅ done; Q2 ⏸️ open for discussion):**
+> 1. **✅ DONE (verified + documented). End-to-end activation has never run.** Confirmed three ways:
+>    `data-drift-baseline-commit` is gated on `$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH` (all work has been on a
+>    feature branch → job never instantiated); `evals/dataset-reference.jsonl` does not exist on disk; so the
+>    compare branch of `run_evidently_report.py` has only ever taken the seed path. **Non-obvious:** activation
+>    spans **TWO** default-branch runs — the commit uses `-o ci.skip` + `[skip ci]`, so the *next* pipeline is the
+>    first to compare. Documented in the job comment + log lines; fold the actual run into the session-5
+>    protected-branch validation run.
+> 2. **⏸️ OPEN — DISCUSS NEXT. The committed reference is NOT statistically meaningful.** The fixture is 2 rows
+>    with disjoint schemas (`question` in row 1, `prompt` in row 2), a constant `category` (zero variance), and is
+>    seeded from the **redacted** data (#28 non-deterministically redacts `ci-benign-002`→`<PERSON>`). PSI over 2
+>    rows is noise, and because reference and current both derive from the same fixture the first comparison is
+>    fixture-vs-itself → "no drift" forever — vacuous green, the drift-gate theater class one layer down. The #24b
+>    sanitizer prevents a *malformed* reference but cannot make 2 rows useful. **Decision needed:** author a
+>    realistically-sized, schema-consistent, deterministic real-data reference before activation means anything.
+> 3. **✅ DONE. Data-drift kept as a soft gate, hardened against silent green.** Both jobs stay `allow_failure: true`
+>    (correct until Q2 is resolved). Pinned `evidently==0.7.21`/`pandas==3.0.3` (was unpinned/bleeding-edge) and made
+>    the verdict extraction **fail CLOSED** — `run_evidently_report.py` now exits non-zero if it can't locate the
+>    drift verdict in Evidently's snapshot, instead of printing "no drift" and exiting 0. Gate-on preconditions
+>    recorded: real reference (Q2) + tuned PSI thresholds. The assurance story must NOT imply drift blocks yet.
+> 4. **✅ DONE. Stale validation docs reconciled.** `PIPELINE_JOB_VALIDATION.md` got RESOLVED banners on the renamed
+>    `model-baseline-commit`→`data-drift-baseline-commit` section and the "wrong baseline / no activation path"
+>    CRITICAL (now commits `dataset-reference.jsonl` with sanitize), and the script line refs in the "how activation
+>    works" paragraph were corrected (`:100-125`/`:127-196`/`:192-195` + the new fail-closed `:180-190`). Pre-#24b
+>    text retained for traceability. (This handoff's own older drift notes ≈372/731/1144 are left as the historical
+>    session-3/4 record — superseded by this STATUS block + the #24b APPLIED checkbox at ≈763.)
 >
 > **Scope note:** session 6 deliberately did NOT touch the live-scans pipeline or the eval-metric drift chain —
 > those are correct in their own context. This review is about the **static/root** pipeline's data-drift control.

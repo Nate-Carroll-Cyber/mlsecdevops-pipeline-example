@@ -1,4 +1,4 @@
-# Session Handoff — GAIPS Model Pipeline (updated 2026-06-19, session 9)
+# Session Handoff — GAIPS Model Pipeline (updated 2026-06-19, session 10)
 
 > **NAMING:** This is the **GAIPS model pipeline**. The repo/dir is named `counter-spy` and
 > holds untracked, unrelated project dirs (`services/`, `packages/`, `src/`, `ctf-frontend/`)
@@ -8,6 +8,88 @@
 > `/Users/nate/Documents/Counter-Spy Claude.ai/SESSION_HANDOFF.md`. Pipeline def:
 > `/Users/nate/Documents/Counter-Spy Claude.ai/.gitlab-ci.yml`. GAIPS materials (scripts/docs/deployment):
 > `/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/`. All repo-relative paths below are under the repo root.
+
+---
+
+# ▶️ STATUS (2026-06-19, session 10): 🟢 **Session-9 onboarding CONFIRMED GREEN + provenance validated; disk [Errno 28] fixed at the ROOT (CPU-only torch), not band-aided; markllm gate decoupled; lockfile-audit scoped + core/dataquality hash-locks COMMITTED. Merging to `main` for the protected signing/identity run (#2).**
+
+> **LATEST (session 10 cont.):** Feature push #1 (`29dd004`, pipeline `2615287408`) came back GREEN: semgrep WARNING fixed (down to 1 INFO `run-as-non-root`, left as a documented limitation — the PreSync hook apt-gets root tools at runtime); `lockfile-audit` core-first reorder WORKED — the security-critical CORE lock now generates (`requirements-ci.txt`, 108 pkgs). The markllm group still `[Errno 28]`'d (its multi-GB closure alone is too big for a small runner) AND pip-audit was disk-failing by *installing* the 236-pkg dataquality lock. **Per user decision ("scope markllm out, commit core+dataquality, move on"), commit `8c71db6`:** (1) skip the markllm group in `lockfile-audit` (redundant — `markllm-deps-audit` already vuln-audits it at the same pins); (2) `pip-audit --no-deps` (verified flag — audits the fully-pinned `--generate-hashes` lock WITHOUT a venv install) → kills the dataquality `[Errno 28]`; (3) **committed** `docs/gaips-materials/ci/requirements-ci.txt` (108) + `requirements-ci-dataquality.txt` (236), runner paths sanitized, as the reproducibility/vuln-audit reference. **NOT wiring `--require-hashes`** — jobs install targeted per-job subsets, not whole groups, so it'd be wrong-grained; version pinning already bounds installs (the disk durability goal is met). `8c71db6` is committed locally, lockfile-audit change will be validated ON the `main` run (advisory, won't block).
+>
+> **#2 prereqs verified via API:** default branch = `main` (protected). `MODEL_SIGNING_IDENTITY` + `SIGSTORE_OIDC_ISSUER` exist and are `protected=True` → that's WHY `signature-verification` (#19) + keyless identity binding deferred on the feature branch; on `main` they run for REAL (the payoff of #2). `GITLAB_PUSH_TOKEN` MISSING → `data-drift-baseline-commit` will SKIP (no baseline push) — fine, drift is deliberately not chased (vacuous on the single-class gandalf set). `DT_API_*`/`MODEL_ENDPOINT`/`VAULT_ADDR` missing → inert by design. **Plan:** push feature with `-o ci.skip` (no redundant run), open MR → `main`, merge → ONE protected pipeline validates the signing/identity legs + all of session 10's work.
+
+**Verified session-9's work end-to-end (pipeline `2615013930`, sha `02bc8d4`, all 48 jobs green).** Pulled the
+CI-produced `sbom/aibom.cyclonedx.json` and confirmed `ai-bom-assemble` — which had NEVER run in CI before the
+disk fix — stamped the dataset provenance exactly as required: data component `gandalf-ignore-instructions-test.jsonl`
+carries `licenses:[{license:{id:MIT}}]`, full `gaips:dataset.*` props (source `Lakera/gandalf_ignore_instructions`,
+revision `04737b65…`, split `test`, citation arXiv:2501.07927, retrieved 2026-06-19, signed/redacted/scan.passed),
+a `website` externalReference, AND the cosign `.sig`+Fulcio `.pem` from `dataset-sign` embedded as externalRefs.
+**Onboarding is fully validated.** (Note: git had already advanced past the session-9 handoff — `02bc8d4`
+"exclude identifier/label fields from PII redaction" [the F4 over-redaction fix] + doc commit `ef1a3f1` landed after
+the session-9 doc was written.)
+
+**Then user steer: "stopping the bleeding vs fixing the problem."** Session 9's medium-runner moves (and a medium-runner
+change I'd just made to `lockfile-audit`) were disk *headroom*, not a fix. The real wound: **CI pulled the ~2 GB CUDA
+build of torch (`nvidia-*` wheels) onto CPU-only runners.**
+
+**#1 ROOT FIX — CPU-only torch (commit `4c02a5e`, PUSHED, pipeline `2615236934` GREEN):**
+- `markllm-watermark-eval` installs `torch==2.12.0+cpu` from `https://download.pytorch.org/whl/cpu` (~200 MB, no
+  nvidia deps), landed BEFORE markllm/transformers so they don't re-fetch CUDA torch. **Confirmed working:** the eval
+  ran to `markllm-results.json` `status:passed` (loading+watermarking requires a real torch). Its medium runner is
+  now justified solely by the ~3 GB MODEL download, not torch (comment corrected).
+- `requirements-ci-markllm.in` pins `torch==2.12.0+cpu` via `--extra-index-url` so the hash-lock is CPU-bound.
+- Reverted my `lockfile-audit` medium-runner band-aid back to the SMALL runner.
+- CPU wheel existence verified on the PyTorch index (`torch-2.12.0+cpu-cp310-cp310-manylinux_2_28_x86_64.whl`).
+
+**#3 — markllm gate decoupled (same commit `4c02a5e`):** `markllm-results.json` moved `EXPECTED`→`ADVISORY` in
+[write_ci_evidence_summary.py:18](docs/gaips-materials/scripts/write_ci_evidence_summary.py#L18). It is `allow_failure`
+and evals a NON-signed model, yet `required-MISSING always fails` meant a markllm disk/OOM that stopped it writing the
+file hard-failed `evidence-summary` (the session-7→9 cascade). `EXPECTED` is now **`semgrep.json` only**; markllm
+verdict still shown/logged. Unit-tested: markllm-absent→PASS, semgrep-absent→FAIL. Docs synced (README job+gate steps;
+SBOM torch/transformers/markllm rows now ✅ Pinned, torch CPU-only; `PIPELINE_JOB_VALIDATION.md` RESOLVED banner on the
+EXPECTED demotion — F2's "thin required set" point still open).
+
+**Then found `lockfile-audit` STILL `[Errno 28]` even with CPU torch — and the real cause was different:** it compiles
+all THREE dep groups sequentially in ONE small-runner job, and pip RETAINS every downloaded wheel in `~/.cache/pip`
+across the compiles. The 236-package `dataquality` group fills the cache first → markllm/core then exhaust disk (each
+group ALONE is small). **Fix (commit `29dd004`):** `PIP_NO_CACHE_DIR=1` so each `pip-compile` frees its downloads on
+exit, + compile the light, security-critical CORE group FIRST. Same commit also clears the WARNING semgrep finding on
+the ArgoCD PreSync hook (added container `securityContext: allowPrivilegeEscalation:false + seccomp RuntimeDefault`;
+`runAsNonRoot` intentionally NOT set — the hook apt-get installs cosign/curl/python at runtime, needs root; documented).
+
+**Audit of the green pipeline (what's actually left, vs inert-by-design):** 48 jobs = 21 hard-gate + 27 advisory.
+Scanned all advisory traces. Only real items: (a) `lockfile-audit` `[Errno 28]` (fixing in `29dd004`); (b)
+`metrics-normalize` shows `gates: 11 passed, 1 failed` = the `semgrep-sast` "2 finding(s)" (advisory) — both are K8s
+hardening on the PreSync hook (1 WARNING fixed in `29dd004`; 1 INFO `run-as-non-root` left as a documented limitation).
+Everything else advisory is inert BY DESIGN (`image-sign` no container image; `vault-secrets` no `VAULT_ADDR`; DT unset)
+or working (`dataset-download` gandalf fixture; scanners with expected findings).
+
+**Git state (branch `gaips-pipeline-required-fixes`, all PUSHED to `gitlab`):**
+```
+29dd004  ci(gaips): fix lockfile-audit [Errno 28] + harden PreSync securityContext   ← feature push #1 (CI RUNNING)
+4c02a5e  ci(gaips): fix [Errno 28] at the root (CPU-only torch) + decouple markllm gate
+ef1a3f1  docs(gaips): document redaction identifier-skip, CI disk fixes, dataset fixture var
+02bc8d4  fix(gaips): exclude identifier/label fields from PII redaction               ← session-9's F4 fix (validated green)
+```
+
+**⚠️ PAT — still must be revoked.** The session-9 temporary GitLab PAT (`glpat-…`, used again THIS session for polling +
+artifact pulls) is in this transcript. Revoke it.
+
+**RESUME AT:** the **feature push #1 run** (pipeline `2615287408`, sha `29dd004`) is in flight (a background poller is
+watching it). Confirm two things: (1) `lockfile-audit` now emits ALL THREE `requirements-ci*.txt` hash-locks with ZERO
+`[Errno 28]`; (2) `semgrep-sast` is down to the single INFO finding. **If green → execute the 2-push plan:**
+1. **Harvest the 3 hash-locks** from `lockfile-audit`'s artifact, **commit** them to `docs/gaips-materials/ci/` as
+   `requirements-ci*.txt`, **wire `--require-hashes`** into the relevant installs, and **drop `allow_failure`** on the
+   now-green audits (#0/#23 "teeth"). These locks are PRODUCED BY run #1 — that's why this can't share #1's push.
+2. **Merge to `main`** for the **protected/default-branch legs that can ONLY run there** (the long-standing #2):
+   `signature-verification` (#19, real verify vs DEFER), keyless identity binding (`ai-bom-sign`/`model-sign` Fulcio
+   identity), and `data-drift-baseline-commit` (needs default branch + `GITLAB_PUSH_TOKEN`). The teeth from step 1 ride
+   this same `main` run, so steps 1+2 = ONE billable protected run.
+
+**Open items NOT fixable by a push (infra / decisions):** DependencyTrack (#34/#45) needs a DT instance +
+`DT_API_URL`/`DT_API_KEY`. **Drift is statistically vacuous on the gandalf set** (single-class adversarial, deliberately
+NOT a PSI baseline — handoff Q2); the real tamper control (SHA-pin + signing) already works, so do NOT spend runs
+"activating" drift until a realistically-sized "normal" reference corpus is chosen. `image-sign`/`vault-secrets` are
+inert by design (separate app-pipeline image; CI-vars instead of Vault).
 
 ---
 

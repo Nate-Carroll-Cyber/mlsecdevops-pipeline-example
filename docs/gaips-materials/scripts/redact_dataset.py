@@ -55,9 +55,12 @@ def _load_secrets(gitleaks_report: Path | None) -> list[str]:
 
 
 class Redactor:
-    def __init__(self, secrets: list[str]):
+    def __init__(self, secrets: list[str], skip_keys: set[str] | None = None):
         # Longest-first so overlapping secrets redact greedily.
         self.secrets = sorted(set(secrets), key=len, reverse=True)
+        # Record keys whose string values are structural identifiers/labels (per the
+        # eval-dataset contract), NOT free-text PII candidates — never redacted.
+        self.skip_keys = skip_keys or set()
         self.secret_hits = 0
         self.pii_hits = 0
         self.pii_by_type: dict[str, int] = {}
@@ -80,13 +83,19 @@ class Redactor:
                 text = self._anonymizer.anonymize(text=text, analyzer_results=results).text
         return text
 
-    def walk(self, obj: Any) -> Any:
+    def walk(self, obj: Any, key: str | None = None) -> Any:
         if isinstance(obj, str):
+            # Skip structural identifier/label fields: scanning them for PII is a false
+            # positive that corrupts them (e.g. a synthetic id 'gandalf-ignore-test-0001'
+            # mis-tagged DATE_TIME, collapsing unique ids into duplicates and breaking
+            # downstream uniqueness/identity). Free-text fields are still fully redacted.
+            if key in self.skip_keys:
+                return obj
             return self.redact_text(obj)
         if isinstance(obj, list):
-            return [self.walk(x) for x in obj]
+            return [self.walk(x, key) for x in obj]
         if isinstance(obj, dict):
-            return {k: self.walk(v) for k, v in obj.items()}
+            return {k: self.walk(v, k) for k, v in obj.items()}
         return obj
 
 
@@ -101,6 +110,10 @@ def main() -> None:
                         help="fail if secret redactions exceed this count (-1 = disabled)")
     parser.add_argument("--max-pii", type=int, default=-1,
                         help="fail if PII redactions exceed this count (-1 = disabled)")
+    parser.add_argument("--skip-keys", default="id,case_id,category",
+                        help="comma-separated record keys left un-redacted — structural "
+                             "identifiers/labels per the eval-dataset contract, not free-text "
+                             "PII candidates (default: id,case_id,category)")
     args = parser.parse_args()
 
     report_path = Path(args.report)
@@ -117,7 +130,8 @@ def main() -> None:
 
     original_sha = _sha256(dataset)
     secrets = _load_secrets(Path(args.gitleaks_report) if args.gitleaks_report else None)
-    redactor = Redactor(secrets)
+    skip_keys = {k.strip() for k in (args.skip_keys or "").split(",") if k.strip()}
+    redactor = Redactor(secrets, skip_keys=skip_keys)
 
     if AnalyzerEngine is None:
         # Secrets can still be redacted without Presidio; PII cannot.
@@ -163,6 +177,7 @@ def main() -> None:
         "secret_redactions": redactor.secret_hits,
         "pii_redactions": redactor.pii_hits,
         "pii_by_type": redactor.pii_by_type,
+        "skipped_keys": sorted(redactor.skip_keys),
         "thresholds": {"max_secrets": args.max_secrets, "max_pii": args.max_pii},
         "threshold_breaches": breaches,
     }

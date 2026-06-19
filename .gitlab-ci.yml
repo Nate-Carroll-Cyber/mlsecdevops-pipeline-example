@@ -1454,8 +1454,11 @@ modelaudit-scan:
     PROMPTFOO_DISABLE_TELEMETRY: "1"
   script:
     - python3 -c "import sys; assert sys.version_info >= (3, 10), 'modelaudit requires Python >=3.10'"
-    - pip install --quiet --upgrade pip setuptools wheel
-    - pip install --quiet "modelaudit[all]==${MODELAUDIT_VERSION}"
+    # --no-cache-dir: don't keep a second copy of the wheels in pip's cache. modelaudit[all]
+    # is a heavy install and shares the small runner's ephemeral disk with the ~750 MB model
+    # fixture artifact — caching doubled the wheel footprint and tripped [Errno 28] no-space.
+    - pip install --quiet --no-cache-dir --upgrade pip setuptools wheel
+    - pip install --quiet --no-cache-dir "modelaudit[all]==${MODELAUDIT_VERSION}"
     - python3 -c "import importlib.metadata as m; print('modelaudit', m.version('modelaudit'))"
     - mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"
     - |

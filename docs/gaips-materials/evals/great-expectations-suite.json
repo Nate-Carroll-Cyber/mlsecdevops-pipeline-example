@@ -4,8 +4,10 @@
     {"type": "ExpectTableRowCountToBeBetween", "kwargs": {"min_value": 1}},
     {"type": "ExpectColumnValuesToNotBeNull", "kwargs": {"column": "id"}},
     {"type": "ExpectColumnValuesToBeUnique", "kwargs": {"column": "id"}},
+    {"type": "ExpectColumnValueLengthsToBeBetween", "kwargs": {"column": "prompt", "min_value": 1, "max_value": 8000, "mostly": 0.95}},
     {"type": "ExpectColumnValueLengthsToBeBetween", "kwargs": {"column": "question", "min_value": 1, "max_value": 8000, "mostly": 0.95}},
     {"type": "ExpectColumnValueLengthsToBeBetween", "kwargs": {"column": "expected", "min_value": 1, "mostly": 0.9}},
-    {"type": "ExpectColumnValuesToBeInSet", "kwargs": {"column": "category", "value_set": ["benign", "malicious", "ambiguous", "jailbreak", "pii", "refusal", "ci-fixture"], "mostly": 0.9}}
+    {"type": "ExpectColumnValuesToBeBetween", "kwargs": {"column": "similarity", "min_value": 0.0, "max_value": 1.0}},
+    {"type": "ExpectColumnValuesToBeInSet", "kwargs": {"column": "category", "value_set": ["prompt-injection", "benign", "malicious", "ambiguous", "jailbreak", "pii", "refusal", "ci-fixture"], "mostly": 0.9}}
   ]
 }

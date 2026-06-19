@@ -225,7 +225,11 @@ default:
   after_script:
     - !reference [.audit-env, script]
   cache:
-    key: pip-${CI_COMMIT_REF_SLUG}
+    # Bumped pip- -> pip-v2- to abandon the bloated shared cache: heavy jobs had pushed
+    # multi-GB torch/tensorflow/CUDA wheels into it over successive runs, so every job that
+    # restored it ran the small runner out of disk ([Errno 28]). v2 starts empty; the
+    # bloaters below opt out with cache:{} so it stays small.
+    key: pip-v2-${CI_COMMIT_REF_SLUG}
     paths:
       - .pip-cache/
 
@@ -561,6 +565,10 @@ lockfile-audit:
     - when: on_success
   needs: ["setup"]
   allow_failure: true
+  # cache:{} — pip-compile --generate-hashes downloads the heavy groups' wheels
+  # (torch/tf/CUDA) into the pip cache dir to hash them, bloating the shared cache and
+  # filling the small runner's disk. This job doesn't benefit from a warm cache.
+  cache: {}
   script:
     - pip install --quiet pip-tools pip-audit
     - mkdir -p "${REPORTS_DIR}"
@@ -2414,6 +2422,15 @@ markllm-watermark-eval:
     - when: on_success
   image: python:3.10-slim
   needs: ["artifact-signing-gate", "model-manifest"]
+  # Medium runner for disk headroom: this job installs the multi-GB torch/transformers
+  # stack and pulls a transformers model — it OOM'd disk ([Errno 28]) on a small runner,
+  # and because its markllm-results.json is a REQUIRED artifact for evidence-summary, that
+  # disk failure cascaded into a BLOCKING evidence-summary failure. (Same fix as modelaudit-scan.)
+  tags: ["saas-linux-medium-amd64"]
+  # cache:{} — this is the main cache bloater: it installs the multi-GB torch/transformers
+  # watermark stack. Keeping it out of the shared pip cache stops that bloat reaching every
+  # other job's runner disk (the [Errno 28] root cause). It re-downloads its own deps.
+  cache: {}
   # Advisory: the live eval pulls a multi-GB transformers model and a heavy
   # watermark stack onto a small runner, so a load/runtime failure records
   # evidence (markllm-results.json) without blocking the security pipeline.

@@ -1,5 +1,15 @@
 # GAIPS Pipeline — Job Validation & Documentation
 
+> **✅ STATUS UPDATE (2026-06-19): full pipeline run GREEN (48/48 jobs) on the real gandalf dataset.**
+> After onboarding the Lakera `gandalf_ignore_instructions` test split, the pipeline was driven to a fully green
+> run (`02bc8d4`). Fixes landed this session: (1) **runner disk exhaustion** (`[Errno 28]`) from unpinned heavy
+> deps + a bloated shared pip cache — cache key bumped to `pip-v2-`, `cache:{}` on the bloaters, `modelaudit-scan`
+> + `markllm-watermark-eval` moved to `saas-linux-medium-amd64` (see `ci/SBOM.md` → Remediation Status; durable
+> follow-up = pin `requirements-ci.txt`); (2) **Presidio over-redaction** corrupting record ids — `redact_dataset.py`
+> now skips `id`/`case_id`/`category` (see the `dataset-redact` note below); (3) `great-expectations-suite.json`
+> updated for the gandalf schema. The AI-BOM `data` component now carries the dataset's MIT license + HF provenance,
+> verified in the green run's `aibom.cyclonedx.json`.
+
 > **⚠️ STATUS UPDATE (session 4, 2026-06-18): the fixes this audit motivated are now APPLIED.**
 > All remaining required-fixes — **#0** (audit coverage), **#23**, **#24a/b**, **#25** (ai-bom-sign →
 > cosign keyless), **#26**, **#27**, **#28** — were implemented this session (local commit `459a562`,
@@ -1631,6 +1641,16 @@ mail-server-bearing stack to scan 418 bytes** every run (use the clamav image in
 ---
 
 ## dataset-redact  (stage: model-integrity, `allow_failure: false`)  🔴 BROKEN CHAIN — the redaction security control NEVER RUNS and FAILS OPEN: it `needs: dataset-scan`, which doesn't carry the dataset forward, so it receives an empty input and skips green on every run
+
+> **➕ ADDED (dataset onboarding, 2026-06-19) — identifier fields excluded from PII redaction.** Once the chain
+> ran end-to-end on the real gandalf dataset (commit `02bc8d4`), Presidio over-redaction surfaced: it mis-tagged
+> the synthetic ids (`gandalf-ignore-test-NNNN` → `DATE_TIME`, one → `PERSON`), collapsing 112 unique ids to 89
+> in the redacted output — which broke `great-expectations-validate` id-uniqueness *and* corrupted record identity
+> in the signed dataset + AI-BOM `data` component. Fix: `redact_dataset.py` now takes `--skip-keys` (default
+> `id,case_id,category`) and leaves those structural eval-dataset contract fields verbatim while still fully
+> redacting the free-text fields (`prompt`/`question`/`expected`); the report records `skipped_keys`. Verified:
+> the green run's redacted dataset has 112 unique ids and GX passes. The pre-fix BROKEN-CHAIN audit text below is
+> the historical record (the chain-carry issue itself was resolved earlier under #32).
 
 **Purpose:** Fourteenth instantiated `model-integrity` job (`.gitlab-ci.yml:1641`, `needs:[dataset-scan]`,
 **`allow_failure: false`**). The data-confidentiality step of the chain: strip **secrets (gitleaks)** and

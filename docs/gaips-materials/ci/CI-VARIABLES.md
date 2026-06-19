@@ -74,8 +74,9 @@ verification identifiers, not secrets; leave variable expansion off.
 | `MODEL_FIXTURE_SHA256` | default/you | No | `5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a` | Expected SHA-256 for `MODEL_FIXTURE_URL`; the download job fails if it does not match. |
 | `DATASET_PACKAGE_NAME` | you | No | `""` | Generic Package Registry package holding the dataset. |
 | `DATASET_PACKAGE_VERSION` | you | No | `latest` | Dataset package version tag. |
-| `DATASET_FILENAME` | you | No | `""` | Dataset filename to download from the Generic Package Registry. Blank → use committed `evals/ci-dataset.jsonl` fixture so the dataset scan/sign/publish path still runs. |
-| `DATASET_EXPECTED_SHA256` | you | No | `""` | Optional integrity pin — `dataset-download` fails on mismatch. |
+| `DATASET_FILENAME` | you | No | `""` | Dataset filename to download from the Generic Package Registry. Blank → fixture mode (stages the committed `DATASET_FIXTURE_FILE`) so the dataset scan/redact/sign/publish path still runs. |
+| `DATASET_FIXTURE_FILE` | repo | No | `gandalf-ignore-instructions-test.jsonl` | Committed fixture under `evals/` staged in fixture mode (when `DATASET_FILENAME` is blank). Defaults to the approved Lakera `gandalf_ignore_instructions` test split; set to `ci-dataset.jsonl` for the minimal plumbing fixture. |
+| `DATASET_EXPECTED_SHA256` | repo | No | (pinned in `evals/dataset-baseline.json`) | Integrity/tamper pin checked against the staged bytes in **both** download mode and fixture mode — `dataset-download` fails on mismatch, so any modification to the dataset trips the pipeline. Verified on raw, pre-redaction bytes (deterministic). |
 | `REDACT_MAX_SECRETS` | default | No | `0` | `dataset-redact` hard-fails if secret findings exceed this (0 = zero tolerance). |
 | `REDACT_MAX_PII` | default | No | `-1` | PII-count gate; `-1` disables the gate (data is still redacted). |
 | `EVIDENCE_SIGNING_REQUIRED` | default | No | `false` | `sign-evidence` enforcement (teeth-last). `false` → a missing `SIGSTORE_ID_TOKEN` emits the unsigned manifest and exits 0 (dev not blocked). `true` → a missing token is a hard failure; the run refuses to ship an unsigned evidence seal. |

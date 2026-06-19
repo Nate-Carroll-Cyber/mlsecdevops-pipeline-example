@@ -1,0 +1,29 @@
+{
+  "schema_version": "1.0",
+  "kind": "dataset-baseline",
+  "description": "Approved evaluation dataset identity, provenance, and the CI variables it implies. Mirrors model-baseline.json for the data side: dataset.sha256 is the integrity pin the dataset-download job verifies the staged fixture against (DATASET_EXPECTED_SHA256), and build_ai_bom.py reads this file to stamp license + source provenance onto the CycloneDX `data` component (which otherwise carries only a digest). This is the single reviewed source of truth for the approved dataset — change it (and re-run) to roll the dataset forward.",
+  "dataset": {
+    "name": "gandalf-ignore-instructions-test",
+    "file": "gandalf-ignore-instructions-test.jsonl",
+    "sha256": "667e2f643fc1881925787056274cab8829e13dc528c781125b1663a9bdb05cd6",
+    "record_count": 112,
+    "schema": "evals/eval-dataset.schema.json"
+  },
+  "provenance": {
+    "platform": "huggingface",
+    "source": "Lakera/gandalf_ignore_instructions",
+    "source_url": "https://huggingface.co/datasets/Lakera/gandalf_ignore_instructions",
+    "revision": "04737b65e90a6794ec227012e4a255a7def6344b",
+    "split": "test",
+    "retrieved": "2026-06-19",
+    "transform": "parquet_to_jsonl.py — map text->prompt, synthesise deterministic id, tag category=prompt-injection, carry similarity"
+  },
+  "license": {
+    "id": "MIT",
+    "citation": "Gandalf the Red: Adaptive Security for LLMs (arXiv:2501.07927)"
+  },
+  "variables": {
+    "DATASET_FIXTURE_FILE": "gandalf-ignore-instructions-test.jsonl",
+    "DATASET_EXPECTED_SHA256": "667e2f643fc1881925787056274cab8829e13dc528c781125b1663a9bdb05cd6"
+  }
+}

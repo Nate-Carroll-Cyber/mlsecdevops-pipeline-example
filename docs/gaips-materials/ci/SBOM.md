@@ -2,8 +2,10 @@
 
 **Pipeline:** `.gitlab-ci.yml` (repo root)  
 **Date:** 2026-06-08  
-**Last updated:** 2026-06-13  
+**Last updated:** 2026-06-19  
 **Scope:** All tools, images, and packages installed or invoked by the pipeline at runtime. This is the pipeline's own dependency surface — not the project code it scans.
+
+> **Out of scope — offline ingest tooling.** `scripts/parquet_to_jsonl.py` converts a Hugging Face Parquet split to schema-valid JSONL and needs `pyarrow`, but it runs **once, offline, before commit** — it is never installed or invoked by any CI job. `pyarrow` is therefore deliberately absent from the package tables below; the CI dataset chain operates only on the committed JSONL.
 
 > **Pin status key**  
 > ✅ Pinned — explicit version locked in the CI file  
@@ -173,3 +175,5 @@ All packages below are installed fresh in each job container. None are pinned in
 | "Signed ≠ verified" + absolute artifact paths | ✅ Fixed (#32) | `model-digest` records repo-relative paths (clears #40-F4/#41-F5); `build_ai_bom` + `sign-evidence` emit `model.verified`/`verified_reason` from `signature-verification` #19 (honestly `false`/deferred until #19 on a protected ref). |
 | Evidence-summary gate checked file presence, not verdicts | ✅ Fixed (#33, WARN-first) | `write_ci_evidence_summary.py` reads 3-state verdicts (pass/fail/inert); missing-required still hard-fails, present-but-failing warns by default and blocks under `--enforce-verdicts`. |
 | Dependency-Track policy gate not wired (best-built gate inert) | 🟡 Infra-ready (#34) | Client code complete; turnkey [`deployment/dependency-track/`](../deployment/dependency-track/) (docker-compose + runbook) added. **Remaining action:** stand up the instance, set `DT_API_URL`/`DT_API_KEY`, define a `FAIL` policy, validate on a re-run. |
+| AI-BOM `data` components carried no provenance/license (asymmetric with models, which fold in full HF metadata) | ✅ Fixed | `build_ai_bom.py` now reads the reviewed `evals/dataset-baseline.json` (via `--dataset-baseline`) and stamps a CycloneDX `licenses` entry (SPDX `MIT`) plus `gaips:dataset.source/.revision/.split/.citation` onto the dataset component. Paired with `evals/dataset-baseline.json` as the single source of truth for `DATASET_EXPECTED_SHA256`. |
+| Dataset-tamper detection required a package registry (fixture mode applied no integrity pin) | ✅ Fixed | `dataset-download` now verifies the committed fixture against `DATASET_EXPECTED_SHA256` in fixture mode too (configurable via `DATASET_FIXTURE_FILE`). The check is on raw pre-redaction bytes, so it is deterministic. Default fixture is the Lakera `gandalf_ignore_instructions` test split (112 records, MIT). |

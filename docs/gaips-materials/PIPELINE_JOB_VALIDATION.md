@@ -1455,6 +1455,16 @@ HF safetensors/pickle formats, unlike #21 on the GGUF) and the **`huggingface_hu
 
 ## dataset-download  (stage: model-integrity, `allow_failure: true`)  ✅ (real work — genuinely stages + hashes a dataset and writes honest `fixture:true` evidence; opens the dataset chain) ⚠️ but on a 418-byte toy fixture, and the *download* path (with its integrity check) is untested + opt-in
 
+> **✅ RESOLVED (dataset onboarding, 2026-06-19) — both caveats addressed.** The toy fixture is replaced
+> by a real committed dataset: the Lakera `gandalf_ignore_instructions` test split (112 schema-valid
+> records, MIT), produced offline by `scripts/parquet_to_jsonl.py` and pinned in `evals/dataset-baseline.json`.
+> The fixture filename is now configurable via `DATASET_FIXTURE_FILE` (default the gandalf set; `ci-dataset.jsonl`
+> still available as the minimal plumbing fixture). **Fixture mode now applies the integrity pin too:** when
+> `DATASET_EXPECTED_SHA256` is set, the staged fixture is verified against it (`exit 1` on mismatch), so
+> dataset-tamper detection works *without* a package registry — closing the "download path untested + opt-in"
+> gap for the common case. The check is on the raw, pre-redaction bytes, so it is deterministic and immune to
+> Presidio's non-deterministic redaction. Local-validated; pre-fix audit text below preserved verbatim.
+
 **Purpose:** Twelfth instantiated `model-integrity` job (`.gitlab-ci.yml:1457`, `needs:[setup, vault-secrets]`)
 and the **opener of the dataset chain** (download → scan → redact → validate → sign). Stages a dataset into
 `${EVIDENCE_DIR}/dataset-input/`, hashes it, and publishes the file + `dataset-digest.txt` +
@@ -2030,6 +2040,17 @@ that stays here (Fix #24b: re-point it at evidently-drift #38's `dataset-referen
 
 ## model-baseline-commit  (stage: guardrail, `allow_failure: true`)  ⛔ DOES NOT INSTANTIATE on this branch (default-branch-only; not a skip — absent from the run, like `sigstore-identity-discover`)
 
+> **🔧 UPDATE (2026-06-19, session 6 — SUPERSEDES the analysis below; retained as the historical audit record).**
+> This job was **renamed `data-drift-baseline-commit` and re-pointed** (Fix #24b, `459a562`). The "🛑 CRITICAL —
+> commits the WRONG baseline (`eval-baseline.seed.json → evals/eval-baseline.json`)" finding is **RESOLVED**: the
+> current job commits **`reports/dataset-reference.seed.jsonl → evals/dataset-reference.jsonl`** with a **sanitize
+> step** (drops null/non-finite, aborts on zero valid records — [.gitlab-ci.yml:2462-2509](../../.gitlab-ci.yml#L2462)),
+> NOT a raw `cp`, and the dead eval-metric unit (`model-drift-detection`) moved to live-scans (Fix #24a). So the
+> data-drift control (#38) now HAS an activation path; it is no longer "structurally stuck in seed-mode." Two caveats
+> remain open: **activation spans two default-branch runs** ([skip ci] commit → compare next run), and the
+> **fixture-derived reference is statistically vacuous** (2 rows; see #38 F8 below) — drift stays a soft gate until a
+> realistically-sized reference is committed. The pre-#24b text below is left intact for traceability.
+
 `rules: if $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH` (line 2291) → no job on the `gaips-pipeline-required-fixes`
 run; present in git (`8061900:2277`, working tree `2284`, added `fa04752`) — **not removed**, just gated off.
 `needs:[model-drift-detection]`; sole purpose = auto-commit the seeded `eval-baseline.json` to the default
@@ -2055,6 +2076,15 @@ default-branch-only); #38 evidently-drift next.**
 ---
 
 ## evidently-drift  (stage: guardrail, `allow_failure: true`)  ⚠️🔴 ran in SEED-MODE — never compared, never imported Evidently
+
+> **🔧 UPDATE (2026-06-19, session 6).** **F2 (no activation path) is RESOLVED** — `data-drift-baseline-commit`
+> (Fix #24b) now bootstraps `evals/dataset-reference.jsonl` (see the UPDATE banner on the renamed job above). **F6
+> (unpinned stack) is addressed** — the job now installs `evidently==0.7.21`/`pandas==3.0.3` and the script now
+> **fails CLOSED** if it can't locate the drift verdict (no more silent "no drift" green). **F1/F8 remain open by
+> design:** the reference is fixture-derived (2 rows) so even once activated the comparison is statistically
+> vacuous — drift stays `allow_failure:true` until a realistically-sized reference is committed and PSI tuned
+> (the "Q2" item). Activation also spans **two** default-branch runs. F4/F5 (seed `<PERSON>` over-redaction +
+> `NaN`) are mitigated by the #24b sanitize step but the underlying #28 redaction-quality bug is still open.
 
 **Purpose:** The pipeline's input-side **data-drift** control (the complement to #36's *eval-metric* drift). It is meant to compare this run's eval dataset against a committed reference snapshot (`evals/dataset-reference.jsonl`) via Evidently's `DataDriftPreset(method="psi")` + `TextEvals` text descriptors, write an HTML drift report into the 90-day evidence bundle + a JSON summary, and (currently `allow_failure:true`) harden to a hard gate once a reference is committed and tuned.
 
@@ -2084,7 +2114,7 @@ Seed contents (pasted `dataset-reference.seed.jsonl`):
 
 **🔴🔴 drift-gate watch (carry to #39+):** #38 emits `drift_detected:false` (seed default) and #36 emits `{skipped:true}`. If **`drift-gate`** (line 2645) PASSes on these, the entire guardrail-drift layer is **theater**. Verify its logic explicitly when documenting it. → **[RESOLVED at #44, 2026-06-18: `drift-gate` DID pass on the `{skipped}` report (confirmed theater) and was subsequently REMOVED. Consequence: `evidently-drift` #38 data drift is now UNGATED in the static pipeline — if enforcement is wanted, add a small gate over #38 once it has a real reference; see the #44 UPDATE note.]**
 
-**How activation works (for understanding — the compare logic already exists, it's just gated behind a missing file):** `run_evidently_report.py` contains the **full** drift-comparison path; it never runs only because it early-returns at the **seed branch** ([:96-107](scripts/run_evidently_report.py#L96-L107)) when `evals/dataset-reference.jsonl` is absent. The instant that reference file exists, control falls through to the real run ([:109-164](scripts/run_evidently_report.py#L109-L164)): Evidently builds the current+reference `Dataset`s, runs `DataDriftPreset(method="psi")` + `TextEvals`, saves `evidence/evidently/drift-report.html`, writes the full `evidently-drift.json` verdict (`drift_detected`, `drifted_columns`, `drift_share`, record counts), and **`raise SystemExit(1)` on detected drift** ([:160-163](scripts/run_evidently_report.py#L160-L163)). ⇒ **No code change is needed to make it *document* drift — only a committed reference.** (And because the script already `exit 1`s on drift, *enforcing* it needs only dropping this job's `allow_failure: true` — no separate gate, especially now that `drift-gate` is removed.)
+**How activation works (for understanding — the compare logic already exists, it's just gated behind a missing file):** `run_evidently_report.py` contains the **full** drift-comparison path; it never runs only because it early-returns at the **seed branch** ([:100-125](scripts/run_evidently_report.py#L100-L125)) when `evals/dataset-reference.jsonl` is absent. The instant that reference file exists, control falls through to the real run ([:127-196](scripts/run_evidently_report.py#L127-L196)): Evidently builds the current+reference `Dataset`s, runs `DataDriftPreset(method="psi")` + `TextEvals`, saves `evidence/evidently/drift-report.html`, writes the full `evidently-drift.json` verdict (`drift_detected`, `drifted_columns`, `drift_share`, record counts), and **`raise SystemExit(1)` on detected drift** ([:192-195](scripts/run_evidently_report.py#L192-L195)). It now also **fails CLOSED** if the verdict can't be located in Evidently's snapshot ([:180-190](scripts/run_evidently_report.py#L180-L190)), so a serialization-shape change can't surface as a silent green. ⇒ **No code change is needed to make it *document* drift — only a committed reference.** (And because the script already `exit 1`s on drift, *enforcing* it needs only dropping this job's `allow_failure: true` — once a non-vacuous reference is committed; the fixture-derived 2-row seed is not fit to gate on, so don't drop `allow_failure` until then.)
 
 **Recommended fixes** (finding → fix):
 1. 🛑 **CRITICAL — F1/F2 (no activation path): `model-baseline-commit` #37 commits the WRONG baseline.** #37 is the pipeline's *only* auto-commit job, but it hardcodes `eval-baseline.seed.json → evals/eval-baseline.json` ([.gitlab-ci.yml:2301-2302](.gitlab-ci.yml#L2301-L2302)) — the **eval-metric** baseline for the dead-by-construction #36 — and **never touches `evals/dataset-reference.jsonl`**, the reference *this* data-drift control needs. So #38's reference can never auto-materialize and #38 is **structurally stuck in seed-mode forever** (no amount of re-running activates it). **Fix (Fix #24b):** add/clone a data-drift bootstrap that commits the data-drift seed (`reports/dataset-reference.seed.jsonl → evals/dataset-reference.jsonl`), reusing #37's mechanism — **but** with a **sanitize/validate** step, NOT a raw `cp seed → dest`, because this run's seed is corrupted (F4 `<PERSON>` over-redaction + F5 invalid `NaN` JSON + F8 2-row).
@@ -2177,6 +2207,14 @@ Seed contents (pasted `dataset-reference.seed.jsonl`):
 ---
 
 ## ai-bom-assemble  (stage: ai-bom, **no `allow_failure`**)  ✅ (real work — assembles a genuine, populated CycloneDX 1.6 AI-BOM: 99 components with embedded real cosign signatures + faithful scan verdicts, not theater) ⚠️ but the "97 software components" FUSES TWO DISJOINT DEPENDENCY UNIVERSES (3 shallow `requirements.txt` pins + the ~94-pkg MarkLLM eval stack) into one flat list that misrepresents the run's real closure, and it emits NO CycloneDX `vulnerabilities[]` despite recording 11 known vulns (2 RCE-class)
+
+> **➕ ADDED (dataset onboarding, 2026-06-19) — data-component provenance/license.** Independent of the
+> #29–#32 fixes recorded in the top banner, the `data` component previously carried only a bare digest +
+> scan/redaction verdicts while model components folded in full HuggingFace provenance. `build_ai_bom.py`
+> now reads the reviewed `evals/dataset-baseline.json` (via `--dataset-baseline`) and stamps a CycloneDX
+> `licenses` entry (SPDX `MIT`) plus `gaips:dataset.source/.revision/.split/.citation` onto the dataset
+> component, with a `website` provenance external reference. Functionally verified locally (license + props
+> emit; no-baseline path unchanged). The F1–F5 findings below are the PRE-FIX audit record.
 
 **Purpose:** Consolidate every element the pipeline produced — software SBOM, the ML model (digest + signature + scan verdicts), the dataset (digest + scan + redaction + signature), and AI-eval / data-quality / drift evidence — into ONE CycloneDX 1.6 **AI-BOM** (`aibom.cyclonedx.json`). This is the pipeline's single attestable inventory; `ai-bom-sign` #43 then enveloped-signs it and `publish-signed-artifacts` ships it to the deploy gate.
 

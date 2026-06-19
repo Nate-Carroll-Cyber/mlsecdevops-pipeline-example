@@ -376,8 +376,39 @@ def _dataset_contents(evidence_dir: Path, name: str, download: dict) -> dict[str
     return None
 
 
-def _data_components(evidence_dir: Path, reports_dir: Path) -> list[dict]:
-    """`data` components for datasets, with scan verdicts and signature."""
+def _load_dataset_baseline(explicit: Path | None) -> dict | None:
+    """Resolve and load the reviewed dataset-baseline.json (source/license/revision).
+
+    The CI `data` component otherwise carries only a digest + scan/redaction verdicts
+    — no provenance — while model components fold in full HuggingFace metadata. This
+    closes that asymmetry by reading the same reviewed manifest that pins
+    DATASET_EXPECTED_SHA256. Searched: explicit arg, $DATASET_BASELINE_FILE,
+    $GAIPS_MATERIALS_DIR/evals, then the conventional in-repo locations."""
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(explicit)
+    env = os.environ.get("DATASET_BASELINE_FILE")
+    if env:
+        candidates.append(Path(env))
+    materials = os.environ.get("GAIPS_MATERIALS_DIR")
+    if materials:
+        candidates.append(Path(materials) / "evals" / "dataset-baseline.json")
+    candidates += [
+        Path("docs/gaips-materials/evals/dataset-baseline.json"),
+        Path("evals/dataset-baseline.json"),
+    ]
+    for c in candidates:
+        if c.exists():
+            data = _load_json(c)
+            if isinstance(data, dict):
+                return data
+    return None
+
+
+def _data_components(
+    evidence_dir: Path, reports_dir: Path, baseline: dict | None = None
+) -> list[dict]:
+    """`data` components for datasets, with scan verdicts, signature, and provenance."""
     components: list[dict] = []
     download = _load_json(reports_dir / "dataset-download.json") or {}
     scan = _load_json(reports_dir / "dataset-scan.json") or {}
@@ -420,7 +451,37 @@ def _data_components(evidence_dir: Path, reports_dir: Path) -> list[dict]:
     if contents:
         data_entry["contents"] = contents
 
-    components.append({
+    # Provenance + license from the reviewed dataset-baseline.json — symmetric with
+    # the HuggingFace metadata folded into model components. Without this the `data`
+    # component is a bare digest with no source or license (the AI-BOM gap).
+    licenses: list[dict] = []
+    if isinstance(baseline, dict):
+        prov = baseline.get("provenance", {}) if isinstance(baseline.get("provenance"), dict) else {}
+        lic = baseline.get("license", {}) if isinstance(baseline.get("license"), dict) else {}
+        prov_map = {
+            "dataset.platform": prov.get("platform"),
+            "dataset.source": prov.get("source"),
+            "dataset.source.url": prov.get("source_url"),
+            "dataset.revision": prov.get("revision"),
+            "dataset.split": prov.get("split"),
+            "dataset.retrieved": prov.get("retrieved"),
+            "dataset.license": lic.get("id"),
+            "dataset.citation": lic.get("citation"),
+        }
+        for key, value in prov_map.items():
+            if value:
+                props.append(_prop(key, value))
+        if lic.get("id"):
+            # CycloneDX component-level license (SPDX id) — the auditable license field.
+            licenses.append({"license": {"id": lic["id"]}})
+        if prov.get("source_url"):
+            ext_refs = ext_refs + [{
+                "type": "website",
+                "url": prov["source_url"],
+                "comment": "Upstream dataset source (provenance)",
+            }]
+
+    component = {
         "type": "data",
         "bom-ref": f"dataset:{name}",
         "name": name,
@@ -428,7 +489,10 @@ def _data_components(evidence_dir: Path, reports_dir: Path) -> list[dict]:
         "externalReferences": ext_refs,
         "data": [data_entry],
         "properties": props,
-    })
+    }
+    if licenses:
+        component["licenses"] = licenses
+    components.append(component)
     return components
 
 
@@ -673,12 +737,13 @@ def build_bom(
     evidence_dir: Path,
     model_dir: Path,
     timestamp: str,
+    dataset_baseline: Path | None = None,
 ) -> dict:
     syft_sw = _software_components(sbom_dir, reports_dir)
     markllm_sw = _watermark_stack_components(reports_dir, syft_sw)   # Fix #30a: kept distinct
     software = syft_sw + markllm_sw
     models = _model_components(evidence_dir, reports_dir, model_dir)
-    data = _data_components(evidence_dir, reports_dir)
+    data = _data_components(evidence_dir, reports_dir, _load_dataset_baseline(dataset_baseline))
     eval_props, eval_refs = _eval_evidence(reports_dir)
     dq_props, dq_refs = _data_quality_evidence(reports_dir)
 
@@ -739,6 +804,9 @@ def main() -> None:
     parser.add_argument("--evidence", required=True, help="EVIDENCE_DIR")
     parser.add_argument("--models", required=True, help="MODEL_DIR")
     parser.add_argument("--timestamp", required=True, help="ISO-8601 UTC timestamp")
+    parser.add_argument("--dataset-baseline", default=None, type=Path,
+                        help="optional path to dataset-baseline.json for license/provenance "
+                             "(falls back to $DATASET_BASELINE_FILE / conventional locations)")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -750,6 +818,7 @@ def main() -> None:
         evidence_dir=Path(args.evidence),
         model_dir=Path(args.models),
         timestamp=args.timestamp,
+        dataset_baseline=args.dataset_baseline,
     )
     out.write_text(json.dumps(bom, indent=2) + "\n", encoding="utf-8")
 

@@ -90,7 +90,13 @@ variables:
   DATASET_PACKAGE_NAME: ""          # package name in the Generic Package Registry
   DATASET_PACKAGE_VERSION: "latest" # package version tag
   DATASET_FILENAME: ""              # filename to download; blank = use committed fixture
-  DATASET_EXPECTED_SHA256: ""       # download-mode hash pin (REQUIRED in download mode unless DATASET_ALLOW_UNVERIFIED=true)
+  # Committed fixture used when DATASET_FILENAME is blank. Defaults to the approved
+  # Lakera gandalf_ignore_instructions test split (see evals/dataset-baseline.json);
+  # set to "ci-dataset.jsonl" to fall back to the minimal plumbing fixture.
+  DATASET_FIXTURE_FILE: "gandalf-ignore-instructions-test.jsonl"
+  # Integrity pin. Verified against the staged fixture (fixture mode) AND the
+  # downloaded file (download mode). Sourced from evals/dataset-baseline.json.
+  DATASET_EXPECTED_SHA256: "667e2f643fc1881925787056274cab8829e13dc528c781125b1663a9bdb05cd6"
   DATASET_ALLOW_UNVERIFIED: ""      # set "true" to allow a downloaded dataset with no DATASET_EXPECTED_SHA256 (NOT recommended)
   # The dataset chain (download→scan→redact→validate→GX→profile→sign) always has a
   # dataset to act on: a committed fixture is staged when DATASET_FILENAME is unset.
@@ -1809,7 +1815,7 @@ dataset-download:
       fi
     - |
       if [ -z "${DATASET_FILENAME}" ]; then
-        DATASET_FILENAME="ci-dataset.jsonl"
+        DATASET_FILENAME="${DATASET_FIXTURE_FILE:-ci-dataset.jsonl}"
         FIXTURE_DATASET="${GAIPS_MATERIALS_DIR}/evals/${DATASET_FILENAME}"
         DATASET_PATH="${EVIDENCE_DIR}/dataset-input/${DATASET_FILENAME}"
         echo "DATASET_FILENAME not set — using committed CI dataset fixture: ${FIXTURE_DATASET}"
@@ -1817,6 +1823,16 @@ dataset-download:
         DIGEST=$(sha256sum "${DATASET_PATH}" | awk '{print $1}')
         SIZE_BYTES=$(wc -c < "${DATASET_PATH}" | tr -d ' ')
         echo "${DATASET_FILENAME}  sha256:${DIGEST}" | tee "${EVIDENCE_DIR}/dataset-digest.txt"
+        # Tamper gate for the committed fixture: when DATASET_EXPECTED_SHA256 is pinned
+        # (from evals/dataset-baseline.json), the staged fixture must match it — any
+        # edit to the committed dataset trips the pipeline. This is the raw, pre-redaction
+        # digest, so it is unaffected by Presidio's non-deterministic redaction.
+        if [ -n "${DATASET_EXPECTED_SHA256}" ] && [ "${DIGEST}" != "${DATASET_EXPECTED_SHA256}" ]; then
+          echo "ERROR: fixture SHA-256 mismatch — expected ${DATASET_EXPECTED_SHA256}, got ${DIGEST}"
+          echo "       The committed dataset changed without updating its baseline pin."
+          exit 1
+        fi
+        [ -n "${DATASET_EXPECTED_SHA256}" ] && echo "Fixture integrity verified against DATASET_EXPECTED_SHA256"
         printf '{"skipped":false,"fixture":true,"file":"%s","size_bytes":%s,"sha256":"%s"}\n' \
           "${DATASET_FILENAME}" "${SIZE_BYTES}" "${DIGEST}" \
           > "${REPORTS_DIR}/dataset-download.json"
@@ -2447,6 +2463,9 @@ markllm-watermark-eval:
 # heterogeneous records. Default branch only; never overwrites an existing
 # reference; skips cleanly with no push token. Requires GITLAB_PUSH_TOKEN
 # (Project Access Token, scope write_repository) as a masked CI/CD variable.
+# Activation spans TWO default-branch runs: this job seeds+commits the reference
+# with [skip ci] (no pipeline triggered), so evidently-drift first *compares* on
+# the NEXT default-branch pipeline — not the run that does the commit.
 data-drift-baseline-commit:
   stage: guardrail
   needs: ["evidently-drift"]
@@ -2506,7 +2525,12 @@ data-drift-baseline-commit:
       git push -o ci.skip \
         "https://oauth2:${GITLAB_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
         "HEAD:${CI_DEFAULT_BRANCH}"
-      echo "Committed dataset-reference.jsonl → ${CI_DEFAULT_BRANCH} (data-drift detection now active)"
+      # This push uses -o ci.skip + the [skip ci] commit message, so it does NOT
+      # trigger a pipeline. Activation therefore takes TWO default-branch runs:
+      # THIS run seeds + commits the reference; the NEXT default-branch pipeline is
+      # the first where evidently-drift finds the reference and actually compares.
+      echo "Committed dataset-reference.jsonl → ${CI_DEFAULT_BRANCH}."
+      echo "data-drift detection activates on the NEXT default-branch pipeline (this commit is [skip ci])."
 
 # Data/feature drift on the INPUT side — complements model-drift-detection (which
 # watches eval METRICS). Evidently's DataDriftPreset (PSI) compares a committed
@@ -2522,7 +2546,12 @@ evidently-drift:
   needs: ["dataset-redact", "eval-dataset-validate"]
   allow_failure: true   # soft gate — flip to false once a reference is committed + tuned
   script:
-    - pip install evidently pandas
+    # Pinned for reproducibility (was unpinned, floated to bleeding-edge majors).
+    # These are the versions the env last resolved; the script's API (Dataset/
+    # DataDefinition/Report, DataDriftPreset(method="psi")/TextEvals) matches this
+    # evidently line. NOTE: the compare path only runs once a reference is committed,
+    # so evidently↔pandas compat is first exercised on the first comparing run.
+    - pip install "evidently==0.7.21" "pandas==3.0.3"
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/evidently"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
@@ -2922,6 +2951,7 @@ ai-bom-assemble:
         --evidence "${EVIDENCE_DIR}" \
         --models   "${MODEL_DIR}" \
         --timestamp "${TS}" \
+        --dataset-baseline "${GAIPS_MATERIALS_DIR}/evals/dataset-baseline.json" \
         --out      "${SBOM_DIR}/aibom.cyclonedx.json"
   artifacts:
     paths:

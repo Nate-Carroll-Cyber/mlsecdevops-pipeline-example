@@ -15,7 +15,10 @@ committed. No external state store.
 
 Outputs an HTML report (evidence artifact) and a JSON summary. The CI job is
 `allow_failure: true` (soft gate) — the script exits non-zero when drift is
-detected so the job can be hardened later by removing allow_failure.
+detected so the job can be hardened later by removing allow_failure. It also
+exits non-zero (fails CLOSED) if the drift verdict cannot be located in the
+Evidently snapshot, so a serialization-shape change can never surface as a
+silent "no drift" green.
 """
 
 from __future__ import annotations
@@ -161,6 +164,7 @@ def main() -> None:
                 continue
 
     drift = find_drift(result_dict)
+    verdict_extracted = drift["drift_detected"] is not None
     summary = {
         "skipped": False,
         "seeded": False,
@@ -168,9 +172,22 @@ def main() -> None:
         "current_records": len(current_df),
         "text_columns": present_text,
         "categorical_columns": present_cat,
+        "verdict_extracted": verdict_extracted,
         **drift,
     }
     write(summary)
+
+    if not verdict_extracted:
+        # FAIL CLOSED. find_drift() walks Evidently's serialized snapshot for the
+        # drift verdict, and that shape moves between Evidently versions. If we
+        # can't locate it, we must NOT print "no drift" and exit 0 — that would be
+        # a silent green over an unread result. Exit non-zero so the (soft) job
+        # surfaces it instead of masking a parse failure as a clean run.
+        raise SystemExit(
+            "Could not locate a drift verdict in the Evidently report — failing "
+            "closed. The serialized shape likely changed; pin/inspect the evidently "
+            f"version and update find_drift(). See {html_path.name}."
+        )
 
     if drift["drift_detected"]:
         print(f"DATA DRIFT DETECTED — drifted_columns={drift['drifted_columns']} "

@@ -40,6 +40,16 @@ spec:
           # debian-slim has curl + a shell; cosign and cyclonedx-cli are pinned
           # and checksum-installed at runtime, matching the CI trust model.
           image: debian:12-slim
+          securityContext:
+            # Block privilege escalation via setuid binaries (no_new_privs) and pin
+            # the default seccomp profile. NOTE: this container apt-get installs its
+            # verification tooling (cosign/curl/python) at runtime, which needs root,
+            # so runAsNonRoot is intentionally NOT set — the production-hardening path
+            # is a purpose-built image with the tools baked in, run as non-root with
+            # all capabilities dropped.
+            allowPrivilegeEscalation: false
+            seccompProfile:
+              type: RuntimeDefault
           env:
             - name: COSIGN_VERSION
               value: "v2.4.1"

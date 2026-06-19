@@ -565,15 +565,19 @@ lockfile-audit:
     - when: on_success
   needs: ["setup"]
   allow_failure: true
-  # cache:{} — pip-compile --generate-hashes downloads each group's wheels into the
-  # pip cache dir to hash them; keeping this out of the shared cache stops that bloat
-  # reaching other jobs' runner disk. This job doesn't benefit from a warm cache.
-  #
-  # Stays on the SMALL runner: the markllm group pins torch==2.12.0+cpu (CPU wheel,
-  # ~200 MB, no nvidia-* deps) rather than the default ~2 GB CUDA build, so hashing
-  # it no longer exhausts disk ([Errno 28]). That was the ROOT cause the small group
-  # locks (core/markllm) silently failed to generate — not the runner size.
+  # cache:{} — this job's GitLab-level cache is disabled so its compiles can't bloat
+  # the shared pip cache that reaches other jobs' runner disk.
   cache: {}
+  variables:
+    # Stay on the SMALL runner by not letting pip RETAIN downloaded wheels across the
+    # three sequential group compiles below. `pip-compile --generate-hashes` downloads
+    # every resolved wheel to hash it; by default pip caches them in ~/.cache/pip, so
+    # the 236-package dataquality group fills the cache first and the markllm/core
+    # compiles then exhaust the runner disk ([Errno 28]) — even though each group ALONE
+    # is small. PIP_NO_CACHE_DIR makes each pip-compile free its downloads on exit, so
+    # the groups don't accumulate. (The markllm group also pins torch==2.12.0+cpu, so
+    # it hashes the ~200 MB CPU wheel, not the ~2 GB CUDA build.)
+    PIP_NO_CACHE_DIR: "1"
   script:
     - pip install --quiet pip-tools pip-audit
     - mkdir -p "${REPORTS_DIR}"
@@ -588,7 +592,11 @@ lockfile-audit:
       CI_DIR="${GAIPS_MATERIALS_DIR}/ci"
       : > "${REPORTS_DIR}/lockfile-unresolved-groups.txt"
       found=0
-      for IN_FILE in "${CI_DIR}"/requirements-ci*.in; do
+      # Compile the light, security-critical CORE group (requirements-ci.in: signing /
+      # scanning / redaction tools) FIRST so its hash-lock is produced even on a bad
+      # day; the heavy hyphenated groups (dataquality, markllm) come after. With
+      # PIP_NO_CACHE_DIR set, downloads don't accumulate between these compiles.
+      for IN_FILE in "${CI_DIR}/requirements-ci.in" "${CI_DIR}"/requirements-ci-*.in; do
         [ -e "${IN_FILE}" ] || continue
         found=1
         STEM=$(basename "${IN_FILE}" .in)

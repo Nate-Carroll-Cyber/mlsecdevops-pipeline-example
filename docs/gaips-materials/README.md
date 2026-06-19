@@ -34,7 +34,7 @@ mkdir -p gaips-labs
 cp -R docs/gaips-materials/evals gaips-labs/evals
 cp -R docs/gaips-materials/fixtures gaips-labs/fixtures
 cp -R docs/gaips-materials/guardrails gaips-labs/guardrails
-cp docs/gaips-materials/ci/.gitlab-ci.yml gaips-labs/.gitlab-ci.yml
+cp .gitlab-ci.yml gaips-labs/.gitlab-ci.yml
 ```
 
 Students should still explain each result. Fixture mode replaces unavailable execution, not analysis.
@@ -58,7 +58,7 @@ Before conversion, verify the CSV contains only approved synthetic or sanitized 
 
 ## CI Execution Policy
 
-`ci/.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, prompt/eval config, and guardrail baselines. A companion [`ci/live-scans.gitlab-ci.yml`](ci/live-scans.gitlab-ci.yml) holds the endpoint-dependent live evals as a separate pipeline for a project with a model endpoint — see [`ci/live-scans.md`](ci/live-scans.md).
+The repo-root `.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, prompt/eval config, and guardrail baselines. A companion [`ci/live-scans.gitlab-ci.yml`](ci/live-scans.gitlab-ci.yml) holds the endpoint-dependent live evals as a separate pipeline for a project with a model endpoint — see [`ci/live-scans.md`](ci/live-scans.md).
 
 > **Full setup runbook:** [`SETUP.md`](SETUP.md) walks the entire path end to end — provisioning HCP Vault (or self-managed Vault) with Terraform, GitLab CI/CD variables, the first pipeline run, optional integrations (Dependency-Track, HF/dataset scanning, DVC), and deploy-time Kyverno + Argo CD verification.
 > **CI/CD variable catalog:** [`ci/CI-VARIABLES.md`](ci/CI-VARIABLES.md) lists every variable the pipeline reads, its source (you / Vault / GitLab), masking, default, and what it gates. Terraform inputs: [`deployment/vault/terraform/terraform.tfvars.example`](deployment/vault/terraform/terraform.tfvars.example).
@@ -252,7 +252,7 @@ The `guardrail-regression` job moved to the separate [live-scan pipeline](ci/liv
 
 | Job | What it does |
 | --- | --- |
-| `evidence-summary` | Collects all reports from every prior job and renders a human-readable Markdown evidence summary to `evidence/evidence-summary.md`. **Reads each artifact's VERDICT, not just its presence** (Fix #33 — 3-state pass/fail/inert per artifact: semgrep error-severity, markllm status, modelaudit critical, GX success, evidently drift (polarity-aware), DT violations), surfacing them in the table's Verdict/Detail columns. A *missing* required artifact still hard-fails the gate; a *present-but-failing* required verdict warns by default and blocks under `--enforce-verdicts` (teeth-last, per Fix #0/#23). Also bundles the approved `model-baseline.json` (and a freshly-seeded `eval-baseline.seed.json`, when present) into the final-report artifacts, so the run records the exact model identity and variable manifest it was pinned to. Retained for 90 days. |
+| `evidence-summary` | Collects all reports from every prior job and renders a human-readable Markdown evidence summary to `evidence/evidence-summary.md`. **Reads each artifact's VERDICT, not just its presence** (Fix #33 — 3-state pass/fail/inert per artifact: semgrep error-severity, markllm status, modelaudit critical, GX success, evidently drift (polarity-aware), DT violations), surfacing them in the table's Verdict/Detail columns. A *missing* required artifact still hard-fails the gate; a *present-but-failing* required verdict warns by default and blocks under `--enforce-verdicts` (teeth-last, per Fix #0/#23). Also bundles the approved `model-baseline.json` (and a freshly-seeded `dataset-reference.seed.jsonl`, when present) into the final-report artifacts, so the run records the exact model identity and variable manifest it was pinned to. Retained for 90 days. |
 
 ### Stage 9 — AI BOM
 
@@ -383,7 +383,7 @@ The authoritative map of **what each job emits** — every GitLab `artifacts:` p
 
 | Job | Artifacts (file — type) | Retention |
 | --- | --- | --- |
-| `evidence-summary` | `evidence/evidence-summary.md` (.md — human-readable roll-up), `evidence/model-baseline.json` (.json — pinned identity), `evidence/eval-baseline.seed.json` (.json — when seeded) | 90 days |
+| `evidence-summary` | `evidence/evidence-summary.md` (.md — human-readable roll-up), `evidence/model-baseline.json` (.json — pinned identity), `evidence/dataset-reference.seed.jsonl` (.jsonl — when seeded) | 90 days |
 
 ### Stage 9 — AI BOM
 
@@ -1072,7 +1072,7 @@ This is the input-side data/feature drift check, complementing the eval-metric d
 #### `evidence-summary` — stage: `evidence` · hard gate · output: `evidence/evidence-summary.md`
 
 **What this job is for**
-This is the pipeline's consolidating gate: it gathers reports from across the run (its `needs` lists ~25 upstream jobs) and renders a single evidence summary that records not just whether each artifact is present but what its verdict is. It is a hard gate so a missing required artifact stops the run. Its sibling `sign-evidence` mirrors the same collection set to hash-and-sign the whole bundle afterward.
+This is the pipeline's consolidating gate: it gathers reports from across the run (its `needs` lists ~25 upstream jobs) and renders a single evidence summary that records not just whether each artifact is present but what its verdict is. It is a hard gate so a missing required artifact stops the run. Its sibling `sign-evidence` depends on a superset of this collection set (every artifact-producing job) to hash-and-sign the whole bundle afterward.
 
 **Step by step, in plain English**
 1. Skips on `[sigstore-discovery]` commits; otherwise installs `jinja2` and creates the evidence directory.
@@ -1081,17 +1081,17 @@ This is the pipeline's consolidating gate: it gathers reports from across the ru
 4. For advisory artifacts (e.g. `evidently-drift.json`, `modelaudit-summary.json`, `great-expectations.json`, `dependency-track.json`) it records the same 3-state verdict but never gates on them.
 5. Builds the `evidence-summary.md` tables (Artifact / Present / Verdict / Detail) plus a Gate section, and emits warnings to the log for failing verdicts.
 6. Hard-fails (exit 1) only when a REQUIRED artifact is MISSING; a present-but-failing required verdict merely warns and would only block under `--enforce-verdicts`.
-7. Bundles `eval-baseline.seed.json` into the evidence dir if a drift baseline was seeded this run.
+7. Bundles `dataset-reference.seed.jsonl` into the evidence dir if a drift reference was seeded this run (commit it to `evals/dataset-reference.jsonl` to activate drift detection).
 8. Copies the committed `evals/model-baseline.json` into the evidence dir so the report records the exact model identity the run was pinned to.
 
-**Output file(s):** `evidence/evidence-summary.md` — the rendered report (per-artifact presence + verdict tables and the gate decision); `evidence/eval-baseline.seed.json` — present only when a drift baseline was seeded; `evidence/model-baseline.json` — a copy of the approved model identity/variable manifest.
+**Output file(s):** `evidence/evidence-summary.md` — the rendered report (per-artifact presence + verdict tables and the gate decision); `evidence/dataset-reference.seed.jsonl` — present only when a drift reference was seeded; `evidence/model-baseline.json` — a copy of the approved model identity/variable manifest.
 
 ### Stage 9 — AI BOM
 
 #### `ai-bom-assemble` — stage: `ai-bom` · hard gate · output: `sbom/aibom.cyclonedx.json`
 
 **What this job is for**
-This is the keystone assembly step: it merges every prior pipeline element — the software SBOM, ML model components (digests, signatures, ModelScan/ModelAudit/ClamAV verdicts, HuggingFace card metadata), datasets, AI evaluation evidence, and parsed vulnerabilities — into one CycloneDX 1.6 AI BOM. It consumes artifacts from a large `needs` list because GitLab only downloads artifacts from jobs named in `needs`. Its JSON output is then schema-checked by `ai-bom-validate`, substance-checked by `ai-bom-content-gate`, and signed by `ai-bom-sign`.
+This is the keystone assembly step: it merges every prior pipeline element — the software SBOM, ML model components (digests, signatures, ModelScan/ModelAudit/ClamAV verdicts, HuggingFace provenance metadata — repo, author, revision SHA, gated/private status), datasets, AI evaluation evidence, and parsed vulnerabilities — into one CycloneDX 1.6 AI BOM. It consumes artifacts from a large `needs` list because GitLab only downloads artifacts from jobs named in `needs`. Its JSON output is then schema-checked by `ai-bom-validate`, substance-checked by `ai-bom-content-gate`, and signed by `ai-bom-sign`.
 
 **Step by step, in plain English**
 1. Creates the `sbom/` output directory.
@@ -1234,10 +1234,10 @@ This turns the normalised JSON from `metrics-normalize` into a self-contained st
 
 ### Stage 11 — Attest
 
-#### `sign-evidence` — stage: `attest` · hard gate · output: `evidence/sign-evidence.json`, `.sig`, `.pem`
+#### `sign-evidence` — stage: `attest` · hard gate when `EVIDENCE_SIGNING_REQUIRED=true` (teeth-last) · output: `evidence/sign-evidence.json`, `.sig`, `.pem`
 
 **What this job is for**
-This is the terminal job of the whole pipeline: it seals the entire run by building a hash-manifest of every report, SBOM, and evidence artifact produced, then signs that manifest with cosign keyless (Fulcio + Rekor) and self-verifies it. Placed in the last `attest` stage with a `needs` list mirroring `evidence-summary` plus all ai-bom and deploy-prep jobs, it captures everything — including the signed AI-BOM — into one signed bundle an auditor can trust end-to-end.
+This is the terminal job of the whole pipeline: it seals the run by building a hash-manifest of every report, SBOM, and evidence artifact produced, then signs that manifest with cosign keyless (Fulcio + Rekor) and self-verifies it. Placed in the last `attest` stage, its `needs` list is a superset of `evidence-summary`'s collection set (it additionally pulls the artifact-producing jobs `evidence-summary` omits — `setup`, `lockfile-audit`, `model-fixture-download`, `dataset-sign`, `markllm-deps-audit`) plus all ai-bom and deploy-prep jobs, so the hash-manifest genuinely covers every artifact in the run — including the signed AI-BOM. Signing requires a `SIGSTORE_ID_TOKEN` (minted by `id_tokens`, GitLab 15.7+). **Enforcement is teeth-last (Fix #0/#23):** by default (`EVIDENCE_SIGNING_REQUIRED: "false"`) a missing token logs that the bundle is unsigned and exits green so development pipelines aren't blocked; set `EVIDENCE_SIGNING_REQUIRED=true` in production and a missing token becomes a **hard failure** — the run refuses to ship an unsigned seal. Independently, *when signing does run*, a failed self-verify always fails the job.
 
 **Step by step, in plain English**
 1. Installs `curl` + CA certs and creates the evidence directory.
@@ -1246,7 +1246,7 @@ This is the terminal job of the whole pipeline: it seals the entire run by build
 4. Reads `signature-verification.jsonl` to mark whether the model was actually VERIFIED (true/false/unknown with a reason), so the bundle is self-declaring.
 5. Captures full pipeline provenance (id, URL, commit, ref, runner, signing job) and writes `evidence/sign-evidence.json`.
 6. Downloads and checksum-verifies cosign at `COSIGN_VERSION`.
-7. Using `id_tokens` `SIGSTORE_ID_TOKEN`, runs `cosign sign-blob --yes` over the manifest, emitting the detached `.sig` and Fulcio `.pem` (logged to Rekor).
-8. Self-verifies with `cosign verify-blob` against the just-produced cert/signature; if self-verify fails, the job fails rather than shipping an unverified seal.
+7. **If `SIGSTORE_ID_TOKEN` is set**, runs `cosign sign-blob --yes` over the manifest, emitting the detached `.sig` and Fulcio `.pem` (logged to Rekor). If the token is absent: when `EVIDENCE_SIGNING_REQUIRED=true` the job fails (exit 1) rather than ship an unsigned seal; otherwise it logs the bundle is unsigned and exits 0, and the `.sig`/`.pem` are not produced.
+8. When signing ran, self-verifies with `cosign verify-blob` against the just-produced cert/signature; if self-verify fails, the job fails rather than shipping an unverified seal.
 
-**Output file(s):** `evidence/sign-evidence.json` (the whole-run hash-manifest + provenance + model verdict), `evidence/sign-evidence.sig` (detached keyless signature), `evidence/sign-evidence.pem` (Fulcio cert) — the terminal, self-verified seal over the entire run.
+**Output file(s):** `evidence/sign-evidence.json` (the whole-run hash-manifest + provenance + model verdict, always produced), `evidence/sign-evidence.sig` (detached keyless signature) and `evidence/sign-evidence.pem` (Fulcio cert) — the latter two present only when a `SIGSTORE_ID_TOKEN` was available to sign. When signed and self-verified, this is the terminal seal over the entire run.

@@ -1,7 +1,7 @@
 # GAIPS CI Pipeline — End-to-End Setup Runbook
 
-This is the full path from an empty GitLab project to a green run of
-`ci/.gitlab-ci.yml` with **HCP Vault Dedicated** as the secrets backend, and on to
+This is the full path from an empty GitLab project to a green run of the
+repo-root `.gitlab-ci.yml` with **HCP Vault Dedicated** as the secrets backend, and on to
 deploy-time signature verification. Each part is independent — the pipeline runs
 green with **nothing** configured (every integration skips cleanly), so wire them
 in as you need them.
@@ -127,9 +127,8 @@ vault kv put secret/gaips/ci/dt-api-key value="<dt-api-key>"
 ### B1. Get the pipeline + materials into the repo
 The CI file references scripts under `${CI_PROJECT_DIR}/docs/gaips-materials/`, so
 the simplest layout is to keep the whole `docs/gaips-materials/` tree in your repo
-and place the pipeline at the root:
+and keep the pipeline at the repo root as `.gitlab-ci.yml` (where it already lives):
 ```bash
-cp docs/gaips-materials/ci/.gitlab-ci.yml .gitlab-ci.yml
 git add .gitlab-ci.yml docs/gaips-materials
 ```
 (If you instead flatten the materials, update `GAIPS_MATERIALS_DIR` at the top of

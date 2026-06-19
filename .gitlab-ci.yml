@@ -30,6 +30,13 @@ variables:
   # to a masked Project Access Token (scope: write_repository) to let the first run
   # commit evals/dataset-reference.jsonl back to the default branch. If unset, the
   # seeded reference is published as an artifact to sanitize + commit manually.
+  # sign-evidence enforcement (teeth-last, per Fix #0/#23): the terminal evidence
+  # seal is signed keyless via SIGSTORE_ID_TOKEN. When that token is unavailable
+  # (GitLab < 15.7 / id_tokens off), the default ("false") emits the unsigned
+  # manifest and exits 0 so development pipelines are not blocked. Set to "true"
+  # in production to make a missing token a HARD FAILURE — the run then refuses to
+  # ship an unsigned evidence seal.
+  EVIDENCE_SIGNING_REQUIRED: "false"
   HF_MODEL_IDS: ""    # comma-separated HF repo IDs to gate, e.g. "org/model-a,org/model-b"
   HF_TOKEN: ""        # HuggingFace token for gated/private repos (mask in CI settings)
   HF_AUTHOR_ALLOWLIST: ""   # comma-separated allowed repo authors/orgs; blank = any author allowed
@@ -2586,12 +2593,14 @@ evidence-summary:
         --out "${EVIDENCE_DIR}/evidence-summary.md"
     - cat "${EVIDENCE_DIR}/evidence-summary.md"
     - |
-      # If this run seeded a drift baseline (none committed yet), bundle it with
+      # If this run seeded a drift reference (none committed yet), bundle it with
       # the end-of-pipeline evidence so the maintainer can grab it from one place
-      # and commit it to evals/eval-baseline.json to activate drift detection.
-      if [ -f "${REPORTS_DIR}/eval-baseline.seed.json" ]; then
-        cp -f "${REPORTS_DIR}/eval-baseline.seed.json" "${EVIDENCE_DIR}/eval-baseline.seed.json"
-        echo "Seeded drift baseline bundled at ${EVIDENCE_DIR}/eval-baseline.seed.json — commit it to evals/eval-baseline.json to activate drift detection."
+      # and commit it to evals/dataset-reference.jsonl to activate drift detection.
+      # (evidently-drift writes dataset-reference.seed.jsonl; the old
+      # eval-baseline.seed.json seed is no longer produced by this pipeline.)
+      if [ -f "${REPORTS_DIR}/dataset-reference.seed.jsonl" ]; then
+        cp -f "${REPORTS_DIR}/dataset-reference.seed.jsonl" "${EVIDENCE_DIR}/dataset-reference.seed.jsonl"
+        echo "Seeded drift reference bundled at ${EVIDENCE_DIR}/dataset-reference.seed.jsonl — commit it to evals/dataset-reference.jsonl to activate drift detection."
       fi
     - |
       # Capture the approved model baseline (committed + reviewed) with the
@@ -2601,7 +2610,7 @@ evidence-summary:
   artifacts:
     paths:
       - "${EVIDENCE_DIR}/evidence-summary.md"
-      - "${EVIDENCE_DIR}/eval-baseline.seed.json"
+      - "${EVIDENCE_DIR}/dataset-reference.seed.jsonl"
       - "${EVIDENCE_DIR}/model-baseline.json"
     expire_in: 90 days
 
@@ -2620,19 +2629,27 @@ sign-evidence:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  # Mirror evidence-summary's collection set so this job receives every report/SBOM/
+  # Depend on EVERY artifact-producing job so this job receives every report/SBOM/
   # evidence artifact in the run and can hash them all into one signed manifest.
+  # This is a SUPERSET of evidence-summary's collection set: it additionally pulls
+  # the artifact-producing jobs evidence-summary omits — setup, lockfile-audit,
+  # model-fixture-download, dataset-sign, markllm-deps-audit — so the whole-run
+  # attestation actually covers their reports/ and evidence/ files rather than
+  # silently dropping them (GitLab only downloads artifacts from jobs in needs:).
   needs:
+    - setup
     - semgrep-sast
     - secret-detection
     - gitleaks-scan
     - pip-audit
+    - lockfile-audit
     - pkg-integrity
     - conda-pkg-verify
     - syft-cyclonedx
     - syft-spdx
     - grype-scan
     - trivy-scan
+    - model-fixture-download
     - modelscan
     - modelaudit-scan
     - modelfile-audit
@@ -2642,12 +2659,14 @@ sign-evidence:
     - dataset-download
     - dataset-scan
     - dataset-redact
+    - dataset-sign
     - eval-dataset-validate
     - great-expectations-validate
     - ydata-profile
     - dvc-verify
     - evidently-drift
     - tamper-verification
+    - markllm-deps-audit
     - markllm-watermark-eval
     - artifact-signing-gate
     - signature-verification   # Fix #32a: pull the #19 verdict so the bundle records verified, not just notarized
@@ -2832,7 +2851,12 @@ sign-evidence:
           && echo "Self-verify OK: signature matches the manifest" \
           || { echo "ERROR: self-verify of the signed evidence failed"; exit 1; }
       else
-        echo "SIGSTORE_ID_TOKEN not available — evidence bundle unsigned (id_tokens requires GitLab 15.7+)"
+        echo "SIGSTORE_ID_TOKEN not available — cannot sign the evidence bundle (id_tokens requires GitLab 15.7+)"
+        if [ "${EVIDENCE_SIGNING_REQUIRED}" = "true" ]; then
+          echo "ERROR: EVIDENCE_SIGNING_REQUIRED=true but no SIGSTORE_ID_TOKEN is available — refusing to ship an unsigned evidence seal"
+          exit 1
+        fi
+        echo "EVIDENCE_SIGNING_REQUIRED is not 'true' — emitting the unsigned manifest and exiting 0 (teeth-last; set EVIDENCE_SIGNING_REQUIRED=true in production to make this a hard gate)"
       fi
   artifacts:
     paths:

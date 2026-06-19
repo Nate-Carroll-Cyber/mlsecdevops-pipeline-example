@@ -1,6 +1,6 @@
 # GAIPS CI Pipeline — Software Bill of Materials
 
-**Pipeline:** `ci/.gitlab-ci.yml`  
+**Pipeline:** `.gitlab-ci.yml` (repo root)  
 **Date:** 2026-06-08  
 **Last updated:** 2026-06-13  
 **Scope:** All tools, images, and packages installed or invoked by the pipeline at runtime. This is the pipeline's own dependency surface — not the project code it scans.

@@ -238,9 +238,12 @@ def _model_components(
     modelaudit = _load_json(reports_dir / "modelaudit-summary.json") or {}
     clamav = _load_json(reports_dir / "clamav-model.json") or {}
     hf = _load_json(reports_dir / "hf-scan" / "summary.json") or {}
+    # hf-artifact-scan writes its per-repo records under "gated" (both the skip and
+    # the real-scan paths), not "scanned" — keying off the wrong field left HF
+    # provenance silently absent from every model component.
     hf_by_id = {
         rec.get("model_id"): rec
-        for rec in (hf.get("scanned") or [])
+        for rec in (hf.get("gated") or [])
         if isinstance(rec, dict)
     }
     verdict = _verification_verdict(evidence_dir)        # Fix #32b
@@ -294,15 +297,23 @@ def _model_components(
         # below is case-insensitive against both the path and the component name.
         path_l, name_l = path.lower(), name.lower()
 
-        # Fold HuggingFace card metadata in when this artifact maps to an HF repo
+        # Fold HuggingFace provenance metadata in when this artifact maps to an HF
+        # repo. hf-artifact-scan records flat provenance fields per repo (author,
+        # revision sha, gated/private/disabled status) — not nested model-card
+        # metadata — so read those fields directly off the record.
         for hf_id, rec in hf_by_id.items():
             hf_base = hf_id.split("/")[-1].lower() if hf_id else ""
             if hf_base and (hf_base in path_l or hf_base in name_l):
-                meta = rec.get("card_meta") or {}
-                if meta.get("pipeline_tag"):
-                    model_card["modelParameters"]["task"] = meta["pipeline_tag"]
                 props.append(_prop("huggingface.repo", hf_id))
-                props.append(_prop("huggingface.gated", meta.get("gated", "unknown")))
+                props.append(_prop("huggingface.gated", rec.get("gated", "unknown")))
+                if rec.get("author"):
+                    props.append(_prop("huggingface.author", rec["author"]))
+                if rec.get("sha"):
+                    props.append(_prop("huggingface.revision", rec["sha"]))
+                if "private" in rec:
+                    props.append(_prop("huggingface.private", rec["private"]))
+                if "disabled" in rec:
+                    props.append(_prop("huggingface.disabled", rec["disabled"]))
 
         # Fold the MarkLLM watermark eval into the modelCard (Fix #30b) — previously
         # modelParameters/quantitativeAnalysis were always empty even though the eval ran.

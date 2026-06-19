@@ -1,6 +1,6 @@
 # GAIPS CI Pipeline — CI/CD Variable Reference
 
-Every variable `ci/.gitlab-ci.yml` reads, where it's set, and what it gates. Set
+Every variable the repo-root `.gitlab-ci.yml` reads, where it's set, and what it gates. Set
 these in **GitLab → Settings → CI/CD → Variables** (or fetch from Vault via the
 `vault-secrets` job — see the *Source* column).
 
@@ -78,6 +78,7 @@ verification identifiers, not secrets; leave variable expansion off.
 | `DATASET_EXPECTED_SHA256` | you | No | `""` | Optional integrity pin — `dataset-download` fails on mismatch. |
 | `REDACT_MAX_SECRETS` | default | No | `0` | `dataset-redact` hard-fails if secret findings exceed this (0 = zero tolerance). |
 | `REDACT_MAX_PII` | default | No | `-1` | PII-count gate; `-1` disables the gate (data is still redacted). |
+| `EVIDENCE_SIGNING_REQUIRED` | default | No | `false` | `sign-evidence` enforcement (teeth-last). `false` → a missing `SIGSTORE_ID_TOKEN` emits the unsigned manifest and exits 0 (dev not blocked). `true` → a missing token is a hard failure; the run refuses to ship an unsigned evidence seal. |
 
 ---
 

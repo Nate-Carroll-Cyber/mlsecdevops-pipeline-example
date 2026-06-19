@@ -1,4 +1,4 @@
-# Session Handoff — GAIPS Model Pipeline (updated 2026-06-19, session 5)
+# Session Handoff — GAIPS Model Pipeline (updated 2026-06-19, session 6)
 
 > **NAMING:** This is the **GAIPS model pipeline**. The repo/dir is named `counter-spy` and
 > holds untracked, unrelated project dirs (`services/`, `packages/`, `src/`, `ctf-frontend/`)
@@ -10,6 +10,68 @@
 > `/Users/nate/Documents/Counter-Spy Claude.ai/docs/gaips-materials/`. All repo-relative paths below are under the repo root.
 
 ---
+
+# ▶️ STATUS (2026-06-19, session 6): 🟢 **Doc/code assurance pass complete (working tree, uncommitted).** Reviewed the 6 doc-vs-code discrepancies in the assurance/last-mile layer, fixed code where it doesn't block dev and corrected docs everywhere else, and independently re-validated each. RESUME AT: **the drift-activation end-to-end review** (scoped below) + the still-open protected/default-branch signing/identity validation run (from session 5).
+
+> **What this session did (all in the working tree — NOTHING committed yet).** Six findings on the
+> assurance "last mile" (signing/completeness/enrichment/explainability):
+>
+> 1. **`sign-evidence` could pass unsigned** → added a teeth-last toggle `EVIDENCE_SIGNING_REQUIRED`
+>    (`.gitlab-ci.yml` `variables:`, default `"false"`). When a `SIGSTORE_ID_TOKEN` is missing **and** the var
+>    is `"true"`, the job now `exit 1`s ([.gitlab-ci.yml:2853](.gitlab-ci.yml#L2853)) instead of shipping an
+>    unsigned seal; default stays permissive so dev isn't blocked. Same pattern as `--enforce-verdicts` /
+>    `REDACT_MAX_SECRETS`. Catalogued in `docs/gaips-materials/ci/CI-VARIABLES.md`.
+> 2. **`sign-evidence` "whole run" was incomplete** → added the 5 artifact-producing jobs it omitted (`setup`,
+>    `lockfile-audit`, `model-fixture-download`, `dataset-sign`, `markllm-deps-audit`) to its `needs:`
+>    ([.gitlab-ci.yml:2630](.gitlab-ci.yml#L2630)). Verified programmatically: **all 40** reports/SBOM/evidence
+>    producers are now in `needs`; no `needs` entry is an undefined job.
+> 3. **`evidence-summary` looked for a dead seed** → it now reads/bundles `dataset-reference.seed.jsonl` (what
+>    `evidently-drift` produces here) instead of the relocated-away `eval-baseline.seed.json`
+>    ([.gitlab-ci.yml:2596](.gitlab-ci.yml#L2596)). Confirmed `model-drift-detection` (the only `eval-baseline.seed.json`
+>    producer) lives **only** in live-scans (Fix #24a), so the remaining `eval-baseline.seed.json` references in
+>    `ci/live-scans.gitlab-ci.yml`, `scripts/detect_model_drift.py`, and `SETUP.md:219` are correct, NOT misses.
+> 4. **AI-BOM dropped HF metadata** → `scripts/build_ai_bom.py` now reads `hf.get("gated")` (was `"scanned"`) and
+>    maps the scanner's actual record fields (`gated`/`author`/`sha`/`private`/`disabled`) instead of a
+>    non-existent `card_meta` ([build_ai_bom.py:240,297](docs/gaips-materials/scripts/build_ai_bom.py#L240)).
+> 5. **Wrong CI path for customers** → `docs/gaips-materials/ci/.gitlab-ci.yml` does not exist; the real pipeline
+>    is repo-root `.gitlab-ci.yml`. Fixed all 4 references (README ×2, SETUP.md ×2 incl. a broken `cp`, SBOM.md,
+>    CI-VARIABLES.md); repo-wide grep for `ci/.gitlab-ci.yml` is now clean.
+> 6. **README overclaims** → reworded the sign-evidence ("hard gate when `EVIDENCE_SIGNING_REQUIRED=true`,
+>    teeth-last"), HF ("provenance metadata", not "card metadata"), and seed-filename claims to match the code.
+>
+> Validated: `build_ai_bom.py` compiles; both pipelines parse. See session-5 STATUS below for prior context.
+
+> ## 🔬 NEXT: drift-activation end-to-end review (the "latter review")
+> **Why this is queued.** The session-6 pass aligned the drift seed *filenames* (finding #3) but did **not** prove
+> the data-drift control actually activates and gates. That's a separate investigation. Critically, the existing
+> validation notes about it are **STALE** and must not be trusted at face value:
+> `docs/gaips-materials/PIPELINE_JOB_VALIDATION.md:2090` still flags a CRITICAL "no activation path — #37 commits
+> the WRONG baseline (`eval-baseline.seed.json → evals/eval-baseline.json`), never touches
+> `evals/dataset-reference.jsonl`." **Current code contradicts that:** the eval-baseline auto-commit was replaced
+> by `data-drift-baseline-commit` ([.gitlab-ci.yml:2450](.gitlab-ci.yml#L2450), Fix #24b), which commits
+> `reports/dataset-reference.seed.jsonl → evals/dataset-reference.jsonl` **with a sanitize step** (drops
+> null/non-finite values, re-emits strict JSONL, aborts on zero valid records — [.gitlab-ci.yml:2479](.gitlab-ci.yml#L2479)),
+> default-branch only, never overwrites, skips without `GITLAB_PUSH_TOKEN`.
+>
+> **Open questions to actually verify (not yet done):**
+> 1. **End-to-end activation has never run.** `data-drift-baseline-commit` is gated on
+>    `$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH` and needs a `GITLAB_PUSH_TOKEN` PAT (`write_repository`). The branch
+>    work to date has been on a feature branch, so the seed → commit → "drift now active" loop is **unproven on the
+>    default branch**. Fold this into the session-5 protected-branch validation run.
+> 2. **Is the committed reference statistically meaningful?** Prior notes flagged the seed coming from a tiny/
+>    over-redacted fixture (the `evals/ci-dataset.jsonl` path / 2-row concerns). The sanitizer prevents a *malformed*
+>    reference but cannot make a 2-row reference useful for PSI drift. Verify the reference the fixture produces is
+>    fit for purpose, or document that real data is required to activate meaningfully.
+> 3. **Data-drift is still a soft gate.** Both `evidently-drift` and `data-drift-baseline-commit` are
+>    `allow_failure: true` ("flip to false once a reference is committed + tuned" — [.gitlab-ci.yml:2523](.gitlab-ci.yml#L2523)).
+>    Decide/record when the teeth go on; until then the assurance story should not imply drift *blocks*.
+> 4. **Reconcile the stale validation docs.** `PIPELINE_JOB_VALIDATION.md` (≈2046/2090/2115/2122) and the
+>    drift-related notes in this handoff (≈372/731/1144/1152) describe the pre-#24a/#24b world and now contradict
+>    the code — a customer/auditor reading them would be misled. Update them to current state (same explainability
+>    class as finding #6) once the above is verified.
+>
+> **Scope note:** session 6 deliberately did NOT touch the live-scans pipeline or the eval-metric drift chain —
+> those are correct in their own context. This review is about the **static/root** pipeline's data-drift control.
 
 # ▶️ STATUS (2026-06-19, session 5): 🟢 **PIPELINE GREEN on `56beedc`.** Reviewed `e0311ab` (6 findings → `d7585b7`), then fixed 3 run failures across two pushes (`bd26e57` gitleaks+tamper, `56beedc` lockfile-audit) + added a per-job README reference. The feature-branch pipeline now passes end-to-end. RESUME AT: the protected/default-branch validation run for the signing/identity legs (the only substantive open item).
 

@@ -1,4 +1,4 @@
-# Session Handoff — GAIPS Model Pipeline (updated 2026-06-19, session 8)
+# Session Handoff — GAIPS Model Pipeline (updated 2026-06-19, session 9)
 
 > **NAMING:** This is the **GAIPS model pipeline**. The repo/dir is named `counter-spy` and
 > holds untracked, unrelated project dirs (`services/`, `packages/`, `src/`, `ctf-frontend/`)
@@ -11,7 +11,29 @@
 
 ---
 
-# ▶️ STATUS (2026-06-19, session 8): 🟢 **Q2 resolved + gandalf dataset onboarded — COMMITTED (`e910b2c`, NOT pushed).**
+# ▶️ STATUS (2026-06-19, session 9): 🟡 **Dataset work PUSHED; CI disk-exhaustion fixed pipeline-wide; final green run in flight.**
+
+**Pushed** the session-8 onboarding to the **`gitlab`** remote (the real CI repo — `git@gitlab.com:natecarrollfilms/counter-spy.git`; `origin` is a GitHub mirror. Pushing needs sandbox-off + the SSH key; pushing to `gitlab` triggers a billable pipeline). Branch `gaips-pipeline-required-fixes` is a **feature branch** (default = `origin/main`), so `data-drift-baseline-commit` (default-branch only) and `signature-verification`/`model.verified` (protected-ref) still don't run — unchanged resume item.
+
+**CI debugging — single root cause: `saas-linux-small` runner disk exhaustion (`[Errno 28]`) from a bloated shared pip cache.** Global cache (`key: pip-${CI_COMMIT_REF_SLUG}`, paths `.pip-cache/`, pull-push) accumulated multi-GB torch/tensorflow/CUDA wheels over runs; every job restoring it ran out of disk. **Cascade:** `markllm-watermark-eval` (advisory) disk-fails → `markllm-results.json` missing → `evidence-summary` (BLOCKING, requires it — `write_ci_evidence_summary.py:9`, "required-missing always fails") hard-fails → **ai-bom stage SKIPPED → `build_ai_bom.py` provenance code has NEVER run in CI (still unvalidated).**
+
+**Fixes — committed + pushed:**
+- `d10dc2f` — `modelaudit-scan` → medium runner + `cache:{}` (`modelaudit[all]` too big for small). **CONFIRMED PASSING.**
+- `31647b6` — cache key → `pip-v2-` (abandon the bloat); `markllm-watermark-eval` → **medium runner + `cache:{}`** (the blocking-cascade root); `lockfile-audit` → `cache:{}`; `great-expectations-suite.json` → gandalf schema (`prompt` length, `similarity` bounds, `prompt-injection` category). *(Two jobs now on medium runners = ~2× minutes for those two.)*
+
+**Validated in CI on the gandalf data:** `dataset-download → scan → redact → validate` all PASSED (Presidio redaction did not break the schema), `artifact-signing-gate` PASSED.
+
+**STILL UNVALIDATED in CI:** `ai-bom-assemble` (my license/provenance change to `build_ai_bom.py`) — skipped every run via the cascade. The `31647b6` run should finally execute it.
+
+**Housekeeping:** bulk-deleted old job artifacts via API (was 3.75 GB; HTTP 202, async). NOTE: artifact storage ≠ runner ephemeral disk (separate resources) — the disk fix is the cache work, not the artifact sweep.
+
+**⚠️ ACTION FOR USER: revoke the temporary GitLab PAT** (`glpat-…`, `api` scope) used this session for artifact deletion + pipeline polling — it is in the session transcript.
+
+**RESUME AT:** watch the pipeline for `31647b6` → confirm `markllm-watermark-eval` ✅ → `evidence-summary` ✅ → **`ai-bom-assemble` runs and finally validates the dataset provenance** (CycloneDX `licenses` MIT + `gaips:dataset.*` on the data component). If green, onboarding is fully validated end-to-end. Then: (1) **durable** — pin the dep set (`requirements-ci.txt`) so unpinned torch/tf growth can't re-trigger `[Errno 28]`; (2) the long-standing protected/default-branch validation run (signing/identity + drift activation); (3) optional — decouple the advisory `markllm-results.json` from the BLOCKING evidence-summary gate so a markllm hiccup can't hard-block again. (Poll via GitLab API: project `83297857`, pipelines endpoint.)
+
+---
+
+# ▶️ STATUS (2026-06-19, session 8): 🟢 **Q2 resolved + gandalf dataset onboarded — COMMITTED (`e910b2c`, now PUSHED — see session 9).**
 
 **Q2 outcome — reframed, not forced.** The goal "drift detection to catch dataset modification" is **integrity/tamper detection**, which is a **hashing** job — *not* statistical PSI drift (PSI is fuzzy; it misses surgical edits, exactly the attack case). That control **already exists**: `dataset-download`'s `DATASET_EXPECTED_SHA256` pin (checked on **raw, pre-redaction** bytes → deterministic, immune to Presidio non-determinism) + `dataset-sign` (cosign over the redacted bytes) + the AI-BOM `data` component. So `evidently-drift` (PSI) stays a **soft, distribution-monitoring** gate, honestly inert until a realistically-sized *"normal"* reference exists — unchanged. The gandalf set is single-class adversarial, so it is deliberately **not** a PSI "normal" baseline; it serves the integrity path, where content is irrelevant.
 

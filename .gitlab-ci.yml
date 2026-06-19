@@ -1447,6 +1447,12 @@ modelaudit-scan:
       when: never
     - when: on_success
   image: python:3.11-slim
+  # modelaudit[all] pulls heavy ML frameworks (tensorflow/torch/…); on a saas-linux-small
+  # runner its install + the ~750 MB model fixture overflow the ephemeral disk ([Errno 28],
+  # even with --no-cache-dir). A medium runner has the disk headroom. cache:{} drops the
+  # inherited pip cache this job restores but can't use (it installs with --no-cache-dir).
+  tags: ["saas-linux-medium-amd64"]
+  cache: {}
   before_script: []
   needs: ["modelscan", "model-fixture-download"]
   variables:

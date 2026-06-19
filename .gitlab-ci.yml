@@ -598,8 +598,19 @@ lockfile-audit:
       # PIP_NO_CACHE_DIR set, downloads don't accumulate between these compiles.
       for IN_FILE in "${CI_DIR}/requirements-ci.in" "${CI_DIR}"/requirements-ci-*.in; do
         [ -e "${IN_FILE}" ] || continue
-        found=1
         STEM=$(basename "${IN_FILE}" .in)
+        case "${STEM}" in
+          *markllm*)
+            # The markllm watermark stack (torch/transformers/markllm) is heavy AND is
+            # already vuln-audited by the dedicated markllm-deps-audit job at the same
+            # pins. Re-compiling it here is redundant, and `pip-compile --generate-hashes`
+            # over its multi-GB closure exhausts the small runner's disk ([Errno 28]).
+            # Skip it — markllm-deps-audit owns that group; it is not hash-locked here.
+            echo "Skipping ${STEM} — covered by markllm-deps-audit (not hash-locked here)"
+            continue
+            ;;
+        esac
+        found=1
         LOCK="${REPORTS_DIR}/${STEM}.txt"
         if pip-compile --quiet --generate-hashes --allow-unsafe \
               --output-file "${LOCK}" "${IN_FILE}"; then
@@ -615,13 +626,17 @@ lockfile-audit:
         echo "No requirements-ci*.in present — nothing to lock/audit"; exit 0
       fi
     - |
-      # Audit each resolved group lock (no install needed — audit reads the manifest).
+      # Audit each resolved group lock. --no-deps audits the EXACT pinned packages in the
+      # hash-generated lock WITHOUT creating a venv and installing them — required here:
+      # installing the dataquality closure (236 pkgs incl. ydata/dvc[all]/evidently) into
+      # a venv to audit it exhausts the small runner's disk ([Errno 28]). The lock is
+      # already fully pinned by `pip-compile --generate-hashes`, so --no-deps is exact.
       for LOCK in "${REPORTS_DIR}"/requirements-ci*.txt; do
         [ -e "${LOCK}" ] || continue
         STEM=$(basename "${LOCK}" .txt)
-        pip-audit --requirement "${LOCK}" --format json \
+        pip-audit --requirement "${LOCK}" --no-deps --format json \
           --output "${REPORTS_DIR}/${STEM}-audit.json" --progress-spinner off || true
-        pip-audit --requirement "${LOCK}" --format cyclonedx-json \
+        pip-audit --requirement "${LOCK}" --no-deps --format cyclonedx-json \
           --output "${REPORTS_DIR}/${STEM}-audit-cyclonedx.json" --progress-spinner off || true
       done
     - |

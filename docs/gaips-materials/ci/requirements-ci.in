@@ -26,8 +26,12 @@
 #   pip install pip-tools
 #   pip-compile --generate-hashes --output-file requirements-ci.txt requirements-ci.in
 #
-# This CORE group is the candidate for the committed, hash-pinned requirements-ci.txt
-# (Fix #0 "teeth": pin CI installs to it with --require-hashes once it is green).
+# This CORE group's hash-pinned lock IS committed beside this file as requirements-ci.txt
+# (generated on the Linux CI runner by lockfile-audit; runner paths sanitized). It serves
+# as the reproducibility/vuln-audit reference. NOTE: jobs install targeted per-job subsets
+# (e.g. dataset-redact → presidio only), not the whole group, so CI installs are NOT wired
+# to --require-hashes against it — version pinning already bounds the install. The heavy
+# markllm group is intentionally NOT hash-locked here (covered by markllm-deps-audit).
 
 # -- Vault / secrets ----------------------------------------------------------
 hvac

@@ -76,7 +76,10 @@ def main() -> None:
     out.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
 
     g = info["git"]
-    dirty = "DIRTY" if g["dirty"] else "clean"
+    # dirty is None when git is unavailable (e.g. a slim image without git) — report
+    # that as "unknown" rather than silently printing "clean", which would falsely
+    # imply a verified-clean working tree.
+    dirty = "unknown" if g["dirty"] is None else ("DIRTY" if g["dirty"] else "clean")
     print(f"version-info → {out}")
     print(f"  {g['describe']} ({g['branch']} @ {g['short_commit']}, {dirty})")
 

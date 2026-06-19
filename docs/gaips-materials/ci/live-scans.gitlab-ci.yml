@@ -6,8 +6,10 @@
 # SEPARATE GitLab project that has a live model endpoint.
 #
 # Jobs: promptfoo-eval, garak-scan, giskard-scan, inspect-ai-eval, pyrit-scan,
-#       guardrail-regression.
-# (The MarkLLM eval and the model-drift chain stay in the main pipeline.)
+#       guardrail-regression, model-drift-detection.
+# (The MarkLLM eval stays in the main pipeline; model-drift-detection moved HERE
+#  in Fix #24a — it consumes the six live-eval reports produced above, which the
+#  static pipeline never generates.)
 #
 # REQUIRED inputs — set in this project's Settings → CI/CD → Variables:
 #   MODEL_ENDPOINT   OpenAI-compatible base URL of the target model. Each job
@@ -19,8 +21,8 @@
 # This project must also contain (copy/submodule from the main repo's
 # docs/gaips-materials/):
 #   scripts/  pyrit_scan.py, collect_garak_report.py, collect_inspect_report.py,
-#             run_giskard_live.py, run_guardrail_regression.py
-#   evals/    promptfoo.yaml  (+ any tasks/*.py for inspect-ai)
+#             run_giskard_live.py, run_guardrail_regression.py, detect_model_drift.py
+#   evals/    promptfoo.yaml, eval-baseline.json  (+ any tasks/*.py for inspect-ai)
 # GAIPS_MATERIALS_DIR below points at where those live in this project's checkout.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -368,3 +370,47 @@ guardrail-regression:
     paths:
       - "${REPORTS_DIR}/guardrail-regression.json"
     expire_in: 7 days
+
+# ─── MODEL / BEHAVIOUR DRIFT (Fix #24a — relocated from the static pipeline) ──
+# Compares THIS run's eval metrics against the committed baseline
+# (evals/eval-baseline.json). It belongs HERE, not in the main pipeline: its six
+# inputs — inspect-ai, garak, pyrit, giskard, guardrail-regression, promptfoo —
+# are produced by the jobs above. In the static pipeline those reports never
+# exist, so the unit (and the drift-gate that consumed it) was dead-by-
+# construction; here it has real inputs. detect_model_drift.py uses only the
+# stdlib, so no install step is needed beyond the default secure venv.
+model-drift-detection:
+  stage: guardrail
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  needs:
+    - inspect-ai-eval
+    - garak-scan
+    - pyrit-scan
+    - giskard-scan
+    - guardrail-regression
+    - promptfoo-eval
+  allow_failure: true   # report producer; harden + add a gate once a baseline is committed
+  variables:
+    DRIFT_THRESHOLD: "0.10"   # absolute metric movement that flags drift
+  script:
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      BASELINE="${GAIPS_MATERIALS_DIR}/evals/eval-baseline.json"
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/detect_model_drift.py" \
+        --reports "${REPORTS_DIR}" \
+        --baseline "${BASELINE}" \
+        --out "${REPORTS_DIR}/model-drift.json" \
+        --threshold "${DRIFT_THRESHOLD}"
+    - |
+      # If this run seeded a baseline (none existed), surface it for the maintainer to commit.
+      if [ -f "${REPORTS_DIR}/eval-baseline.seed.json" ]; then
+        echo "Baseline seeded — commit ${REPORTS_DIR}/eval-baseline.seed.json to evals/eval-baseline.json to activate drift detection"
+      fi
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/model-drift.json"
+      - "${REPORTS_DIR}/eval-baseline.seed.json"
+    expire_in: 30 days

@@ -126,6 +126,53 @@ def get_violations(base: str, key: str, uuid: str) -> list:
     return resp.json() if isinstance(resp.json(), list) else []
 
 
+def evaluate_project(base: str, key: str, name: str, version: str,
+                     fail_states: set[str]) -> dict | None:
+    """Resolve a project, pull its findings + violations, and collect the blocking ones.
+
+    Returns a per-project result dict, or None when the project cannot be resolved
+    after upload — the caller treats that as a gate error, never a silent pass.
+    """
+    project = lookup_project(base, key, name, version)
+    if not project:
+        return None
+    uuid = project.get("uuid", "")
+
+    findings = get_findings(base, key, uuid)
+    by_sev: dict[str, int] = {}
+    for f in findings:
+        sev = (f.get("vulnerability", {}) or {}).get("severity", "UNKNOWN")
+        by_sev[sev] = by_sev.get(sev, 0) + 1
+
+    violations = get_violations(base, key, uuid)
+    failing = [
+        v for v in violations
+        if not v.get("suppressed", False)
+        and ((v.get("policyCondition", {}) or {}).get("policy", {}) or {})
+            .get("violationState", "").upper() in fail_states
+    ]
+
+    return {
+        "name": name,
+        "version": version,
+        "uuid": uuid,
+        "dashboard_url": f"{base}/projects/{uuid}",
+        "findings_total": len(findings),
+        "findings_by_severity": by_sev,
+        "violations_total": len(violations),
+        "failing_violations": [
+            {
+                "project": name,
+                "component": (v.get("component", {}) or {}).get("name"),
+                "type": v.get("type"),
+                "policy": (((v.get("policyCondition", {}) or {}).get("policy", {})) or {}).get("name"),
+                "state": (((v.get("policyCondition", {}) or {}).get("policy", {})) or {}).get("violationState"),
+            }
+            for v in failing
+        ],
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--bom", required=True, help="primary CycloneDX BOM (the app SBOM)")
@@ -187,57 +234,54 @@ def main() -> None:
     if aibom_token:
         wait_for_processing(base, key, aibom_token, args.poll_timeout)
 
-    # 4) Pull findings + violations for the parent project and evaluate the gate.
-    project = lookup_project(base, key, args.project_name, args.project_version)
-    if not project:
-        print("  WARN: project not found after upload — DT may still be indexing")
-        write({"skipped": False, "uploaded": True, "project_resolved": False})
-        return
-    uuid = project.get("uuid", "")
+    # 4) Evaluate the gate for EVERY project we uploaded — the parent app SBOM and,
+    #    when present, the nested AI-BOM child. The AI-BOM's model/data components get
+    #    no CVE match but ARE policy targets, so it must be evaluated, not just uploaded.
+    targets = [(args.project_name, args.project_version)]
+    if aibom_token:
+        targets.append((aibom_name, args.project_version))
 
-    findings = get_findings(base, key, uuid)
-    by_sev: dict[str, int] = {}
-    for f in findings:
-        sev = (f.get("vulnerability", {}) or {}).get("severity", "UNKNOWN")
-        by_sev[sev] = by_sev.get(sev, 0) + 1
+    results: list[dict] = []
+    unresolved: list[str] = []
+    for name, version in targets:
+        result = evaluate_project(base, key, name, version, fail_states)
+        if result is None:
+            unresolved.append(f"{name} {version}")
+            continue
+        results.append(result)
 
-    violations = get_violations(base, key, uuid)
-    failing = [
-        v for v in violations
-        if not v.get("suppressed", False)
-        and ((v.get("policyCondition", {}) or {}).get("policy", {}) or {})
-            .get("violationState", "").upper() in fail_states
-    ]
+    failing = [v for r in results for v in r["failing_violations"]]
 
     report = {
         "skipped": False,
-        "project": {"name": args.project_name, "version": args.project_version, "uuid": uuid},
-        "ai_bom_project": aibom_name,
-        "dashboard_url": f"{base}/projects/{uuid}",
-        "findings_total": len(findings),
-        "findings_by_severity": by_sev,
-        "violations_total": len(violations),
-        "failing_violations": [
-            {
-                "component": (v.get("component", {}) or {}).get("name"),
-                "type": v.get("type"),
-                "policy": (((v.get("policyCondition", {}) or {}).get("policy", {})) or {}).get("name"),
-                "state": (((v.get("policyCondition", {}) or {}).get("policy", {})) or {}).get("violationState"),
-            }
-            for v in failing
-        ],
+        "uploaded": True,
+        "project": next((r for r in results if r["name"] == args.project_name), None),
+        "ai_bom_project": next((r for r in results if r["name"] == aibom_name), None) if aibom_name else None,
+        "projects": results,
+        "unresolved_projects": unresolved,
+        "failing_violations": failing,
         "gate_fail_states": sorted(fail_states),
     }
     write(report)
 
-    print(f"  findings: {len(findings)} ({by_sev})")
-    print(f"  policy violations: {len(violations)} total, {len(failing)} at fail-state {sorted(fail_states)}")
-    print(f"  dashboard: {report['dashboard_url']}")
+    for r in results:
+        print(f"  [{r['name']}] findings: {r['findings_total']} ({r['findings_by_severity']}); "
+              f"violations: {r['violations_total']} total, {len(r['failing_violations'])} at fail-state")
+        print(f"    dashboard: {r['dashboard_url']}")
+
+    # An uploaded project we could not resolve means we could not evaluate policy on it.
+    # That must fail the gate — never let a configured gate pass without evaluating.
+    if unresolved:
+        print(f"DEPENDENCY-TRACK GATE FAILED — {len(unresolved)} uploaded project(s) "
+              f"could not be resolved for evaluation (DT may still be indexing): "
+              f"{', '.join(unresolved)}")
+        raise SystemExit(1)
 
     if failing:
         print(f"DEPENDENCY-TRACK GATE FAILED — {len(failing)} blocking policy violation(s):")
-        for v in report["failing_violations"]:
-            print(f"  [{v['state']}] {v['policy']} — {v['component']} ({v['type']})")
+        for v in failing:
+            print(f"  [{v['state']}] {v['policy']} — {v['component']} ({v['type']}) "
+                  f"in {v['project']}")
         raise SystemExit(1)
 
     print("Dependency-Track gate PASSED — no blocking policy violations")

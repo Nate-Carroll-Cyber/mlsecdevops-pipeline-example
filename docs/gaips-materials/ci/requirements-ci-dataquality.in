@@ -1,0 +1,10 @@
+# GAIPS CI -- data quality / drift group.
+# Each of these installs in its own per-job venv (great-expectations-validate,
+# evidently-drift, ydata-profile, dvc-verify); ydata-profiling in particular pins
+# narrow numpy/pandas/matplotlib ranges. If this group cannot resolve as one lock,
+# the lockfile-audit job reports a WARNING and these stay covered by the per-job
+# .audit-env. See requirements-ci.in for the grouping rationale.
+great-expectations
+evidently
+ydata-profiling
+dvc[all]

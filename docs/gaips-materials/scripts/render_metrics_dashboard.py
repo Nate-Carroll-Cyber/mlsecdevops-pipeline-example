@@ -28,6 +28,8 @@ def esc(v: Any) -> str:
 
 
 def fmt(v: Any) -> str:
+    if v is None:           # Fix #28b — n/a instead of an empty cell
+        return "n/a"
     if isinstance(v, float):
         return f"{v:.4g}"
     return esc(v)
@@ -57,8 +59,18 @@ def sev_chips(by_sev: dict) -> str:
     return '<div class="chips">' + "".join(chips) + "</div>" if chips else "—"
 
 
+# Boolean flags whose TRUE state is the bad one (true = problem). Every other
+# flag is positive-polarity (true = good). Fix #28a.
+_NEGATIVE_BOOL_TOKENS = (
+    "drift_detected", "infected", "failed", "tamper", "leaked", "breach",
+    "vulnerable", "error", "compromis",
+)
+
+
 def render_value(key: str, value: Any) -> str:
     """Render a single metric value, special-casing rates and severity maps."""
+    if value is None:                       # Fix #28b — show n/a, not a blank cell
+        return '<span class="muted">n/a</span>'
     if isinstance(value, dict):
         if {"by_severity"} & value.keys():
             inner = sev_chips(value["by_severity"])
@@ -69,7 +81,12 @@ def render_value(key: str, value: Any) -> str:
     if isinstance(value, (int, float)) and not isinstance(value, bool) and "pass_rate" in key:
         return bar(float(value))
     if isinstance(value, bool):
-        cls = "ok" if value else "bad"
+        # Polarity-aware coloring: for negative-polarity signals (drift_detected,
+        # infected, …) false is GOOD (green) and true is BAD (red). The old
+        # `ok if value else bad` painted drift_detected:false red. Fix #28a.
+        negative = any(tok in key.lower() for tok in _NEGATIVE_BOOL_TOKENS)
+        good = (not value) if negative else value
+        cls = "ok" if good else "bad"
         return f'<span class="pill {cls}">{esc(value)}</span>'
     if isinstance(value, list):
         return esc(", ".join(map(str, value))) if value else "—"
@@ -107,16 +124,27 @@ def render_sections(sections: dict) -> str:
     return "".join(cards)
 
 
+def _enforcing_label(enforcing: Any) -> str:
+    # Fix #27b — show whether a gate actually blocks (enforcing) or is advisory.
+    if enforcing is True:
+        return '<span class="pill bad">enforcing</span>'
+    if enforcing is False:
+        return '<span class="pill skip">advisory</span>'
+    return '<span class="pill skip">unknown</span>'
+
+
 def render_gate_ledger(detail: dict) -> str:
     rows = []
     for state, cls in (("failed", "bad"), ("passed", "ok"), ("skipped", "skip")):
         for item in detail.get(state, []):
             rows.append(
                 f'<tr class="{cls}"><td><span class="dot {cls}"></span>{state}</td>'
-                f'<td>{esc(item.get("signal"))}</td><td>{esc(item.get("detail"))}</td></tr>'
+                f'<td>{esc(item.get("signal"))}</td>'
+                f'<td>{_enforcing_label(item.get("enforcing"))}</td>'
+                f'<td>{esc(item.get("detail"))}</td></tr>'
             )
     return ("<table class='ledger'><thead><tr><th>State</th><th>Signal</th>"
-            "<th>Detail</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
+            "<th>Gate</th><th>Detail</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>")
 
 
 def render_ops(op: dict) -> str:
@@ -217,7 +245,7 @@ def build_html(doc: dict) -> str:
   <h1>GAIPS CI Operational Metrics</h1>
   <div class="meta">{title_link} · ref <code>{esc(p.get('ref'))}</code>
     · commit <code>{esc(p.get('short_sha'))}</code> · {esc(p.get('project'))}
-    · generated {esc(doc.get('generated_at'))}
+    · pipeline created {esc(doc.get('pipeline_created_at', doc.get('generated_at')))}
     · <a href="operational-metrics.json">raw JSON</a></div>
 </header>
 

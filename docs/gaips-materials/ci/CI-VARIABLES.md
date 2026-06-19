@@ -1,6 +1,6 @@
 # GAIPS CI Pipeline — CI/CD Variable Reference
 
-Every variable `ci/.gitlab-ci.yml` reads, where it's set, and what it gates. Set
+Every variable the repo-root `.gitlab-ci.yml` reads, where it's set, and what it gates. Set
 these in **GitLab → Settings → CI/CD → Variables** (or fetch from Vault via the
 `vault-secrets` job — see the *Source* column).
 
@@ -25,7 +25,7 @@ these in **GitLab → Settings → CI/CD → Variables** (or fetch from Vault vi
 
 > With just these (or nothing at all), the pipeline runs: every model/dataset/
 > integration job skips cleanly, and the only hard gates — `secret-detection`,
-> `gitleaks-scan`, `clamav-scan`, `artifact-signing-gate`, `drift-gate` — pass on
+> `gitleaks-scan`, `clamav-scan`, `artifact-signing-gate` — pass on
 > a clean repo.
 
 `secret-detection` uses a shallow HEAD checkout (`GIT_DEPTH: 1`) plus
@@ -74,10 +74,12 @@ verification identifiers, not secrets; leave variable expansion off.
 | `MODEL_FIXTURE_SHA256` | default/you | No | `5ede348e91ce1e7a330926ec5b202c27b864d065149dc463257fde1f98865b3a` | Expected SHA-256 for `MODEL_FIXTURE_URL`; the download job fails if it does not match. |
 | `DATASET_PACKAGE_NAME` | you | No | `""` | Generic Package Registry package holding the dataset. |
 | `DATASET_PACKAGE_VERSION` | you | No | `latest` | Dataset package version tag. |
-| `DATASET_FILENAME` | you | No | `""` | Dataset filename to download from the Generic Package Registry. Blank → use committed `evals/ci-dataset.jsonl` fixture so the dataset scan/sign/publish path still runs. |
-| `DATASET_EXPECTED_SHA256` | you | No | `""` | Optional integrity pin — `dataset-download` fails on mismatch. |
+| `DATASET_FILENAME` | you | No | `""` | Dataset filename to download from the Generic Package Registry. Blank → fixture mode (stages the committed `DATASET_FIXTURE_FILE`) so the dataset scan/redact/sign/publish path still runs. |
+| `DATASET_FIXTURE_FILE` | repo | No | `gandalf-ignore-instructions-test.jsonl` | Committed fixture under `evals/` staged in fixture mode (when `DATASET_FILENAME` is blank). Defaults to the approved Lakera `gandalf_ignore_instructions` test split; set to `ci-dataset.jsonl` for the minimal plumbing fixture. |
+| `DATASET_EXPECTED_SHA256` | repo | No | (pinned in `evals/dataset-baseline.json`) | Integrity/tamper pin checked against the staged bytes in **both** download mode and fixture mode — `dataset-download` fails on mismatch, so any modification to the dataset trips the pipeline. Verified on raw, pre-redaction bytes (deterministic). |
 | `REDACT_MAX_SECRETS` | default | No | `0` | `dataset-redact` hard-fails if secret findings exceed this (0 = zero tolerance). |
 | `REDACT_MAX_PII` | default | No | `-1` | PII-count gate; `-1` disables the gate (data is still redacted). |
+| `EVIDENCE_SIGNING_REQUIRED` | default | No | `false` | `sign-evidence` enforcement (teeth-last). `false` → a missing `SIGSTORE_ID_TOKEN` emits the unsigned manifest and exits 0 (dev not blocked). `true` → a missing token is a hard failure; the run refuses to ship an unsigned evidence seal. |
 
 ---
 
@@ -85,7 +87,7 @@ verification identifiers, not secrets; leave variable expansion off.
 
 | Variable | Source | Masked | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `DT_API_URL` | vault/you | No | `""` | Dependency-Track URL (no trailing `/api`). Blank → `dependency-track-upload` skips. |
+| `DT_API_URL` | vault/you | No | `""` | Dependency-Track URL (no trailing `/api`). Blank → `dependency-track-upload` skips. Wiring runbook + turnkey instance: [`deployment/dependency-track/`](../deployment/dependency-track/) (Fix #34). |
 | `DT_API_KEY` | vault/you | Yes | `""` | Dependency-Track API key. |
 | `DT_FAIL_ON` | default | No | `FAIL` | `violationState`(s) that fail the DT policy gate (comma list). |
 | `DVC_REMOTE_URL` | you | No | `""` | `s3://`/`gs://`/`azure://`/`ssh://` remote for `dvc-verify` to pull pinned data/models. Blank → reports status only. |
@@ -110,9 +112,9 @@ verification identifiers, not secrets; leave variable expansion off.
 
 | Variable | Source | Masked | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `CYCLONEDX_SIGNING_KEY` | you | Yes | _(unset)_ | RSA private key (PEM) for a **stable** AI-BOM signer identity. Unset → `ai-bom-sign` uses an ephemeral per-run keypair. |
-| `CYCLONEDX_SIGNING_PUB` | you | No | _(unset)_ | Matching RSA public key (PEM); published as `aibom-signing.pub` for offline verify. |
-| `GITLAB_PUSH_TOKEN` | you | Yes | _(unset)_ | Project Access Token (scope `write_repository`) so `model-baseline-commit` can auto-commit the seeded `evals/eval-baseline.json`. Unset → manual commit. |
+| `GITLAB_PUSH_TOKEN` | you | Yes | _(unset)_ | Project Access Token (scope `write_repository`) so `data-drift-baseline-commit` can auto-commit the seeded `evals/dataset-reference.jsonl`. Unset → manual commit. |
+
+> **AI-BOM signing is keyless (Fix #25).** `ai-bom-sign` now signs with cosign keyless (Fulcio + Rekor) via the GitLab `SIGSTORE_ID_TOKEN`, exactly like `model-sign`/`dataset-sign` — there is **no signing-key variable** to set. The former `CYCLONEDX_SIGNING_KEY` / `CYCLONEDX_SIGNING_PUB` are removed; the PreSync hook verifies the BOM against the CI signer identity (`MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER`), no public-key Secret required.
 
 ---
 
@@ -120,7 +122,7 @@ verification identifiers, not secrets; leave variable expansion off.
 
 | Variable | Source | Default | Purpose |
 | --- | --- | --- | --- |
-| `DRIFT_THRESHOLD` | default | `0.10` | Absolute eval-metric movement that flags drift (`model-drift-detection` → `drift-gate`). |
+| `DRIFT_THRESHOLD` | default | `0.10` | Absolute eval-metric movement that flags drift (`model-drift-detection`; the enforcing gate lives in the live-scans pipeline — the static pipeline's `drift-gate` was removed). |
 
 The following tuning variables belong to the separate **live-scan pipeline**
 ([`ci/live-scans.md`](live-scans.md)), not this one:
@@ -148,11 +150,11 @@ match an internal mirror or bump a tool.
 | `TRANSFORMERS_VERSION` | `4.57.6` | Pinned `transformers` for the MarkLLM stack — held on the **4.x** line because markllm 0.1.5 predates the transformers 5.x major release. |
 | `MARKLLM_MODEL_ID` | `""` (derived) | Hugging Face **transformers** repo id for `markllm-watermark-eval`. Leave empty and the job derives it from `MODEL_FIXTURE_URL` at runtime — the HF GGUF repo (e.g. `Qwen/Qwen2.5-1.5B-Instruct-GGUF`) is mapped to its transformers repo (`Qwen/Qwen2.5-1.5B-Instruct`), since `AutoModelForCausalLM` can't load GGUF. Set explicitly to override. The job fails only if no id can be resolved (empty and no `MODEL_FIXTURE_URL`). |
 | `MARKLLM_MODEL_REVISION` | `""` | Optional pinned branch, tag, or commit for the model loaded by MarkLLM. Recommended for reproducible evidence. |
-| `IMAGE_SEMGREP` | `semgrep/semgrep:v1.165.0` | SAST image. |
+| `IMAGE_SEMGREP` | `semgrep/semgrep:1.165.0` | `semgrep-sast` image — the job runs in it (no `pip install semgrep`). |
 | `IMAGE_MINICONDA` | `continuumio/miniconda3:26.3.2` | conda verify image. |
-| `IMAGE_SYFT` | `anchore/syft:v1.45.1` | SBOM image. |
-| `IMAGE_GRYPE` | `anchore/grype:v0.114.0` | Vuln-scan image. |
-| `IMAGE_TRIVY` | `aquasec/trivy:v0.71.0` | FS/container scan image. |
+| `IMAGE_SYFT` | `anchore/syft:v1.45.1-debug` | SBOM image (`-debug` variant ships a shell for the wrapper scripts). |
+| `IMAGE_GRYPE` | `anchore/grype:v0.114.0-debug` | Vuln-scan image (`-debug` variant ships a shell). |
+| `IMAGE_TRIVY` | `aquasec/trivy:0.71.1` | FS/container scan image (no `v` prefix; keep in sync with the trivy-db schema). |
 | `IMAGE_CYCLONEDX` | `cyclonedx/cyclonedx-cli:0.32.0` | AI-BOM validate/sign image. |
 | `IMAGE_GITLEAKS` | `gitleaks/gitleaks:v8.30.1` | `gitleaks-scan` SAST image (matches the `GITLEAKS_VERSION` binary). |
 | `IMAGE_CLAMAV` | `clamav/clamav:1.4` | `clamav-scan` image (patch-floating line; append a digest to hard-pin). |

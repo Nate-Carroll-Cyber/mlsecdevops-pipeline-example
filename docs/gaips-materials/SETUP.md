@@ -1,7 +1,7 @@
 # GAIPS CI Pipeline — End-to-End Setup Runbook
 
-This is the full path from an empty GitLab project to a green run of
-`ci/.gitlab-ci.yml` with **HCP Vault Dedicated** as the secrets backend, and on to
+This is the full path from an empty GitLab project to a green run of the
+repo-root `.gitlab-ci.yml` with **HCP Vault Dedicated** as the secrets backend, and on to
 deploy-time signature verification. Each part is independent — the pipeline runs
 green with **nothing** configured (every integration skips cleanly), so wire them
 in as you need them.
@@ -112,7 +112,9 @@ vault kv put secret/gaips/ci/registry-token        value="<registry_token_or_bla
 ### A6. (Optional) add the secrets Terraform does NOT seed
 `dt-api-url` and `dt-api-key` are read by `vault-secrets` but not created by
 Terraform (the job just logs a WARN and continues). Add them only if you use the
-Dependency-Track integration (Part D3):
+Dependency-Track integration (Part D3) — to stand up the instance these point at,
+see the runbook in [`deployment/dependency-track/`](deployment/dependency-track/)
+(docker-compose + the exact API-key permissions + a gating policy):
 ```bash
 vault kv put secret/gaips/ci/dt-api-url value="https://dtrack.<your-host>"
 vault kv put secret/gaips/ci/dt-api-key value="<dt-api-key>"
@@ -125,9 +127,8 @@ vault kv put secret/gaips/ci/dt-api-key value="<dt-api-key>"
 ### B1. Get the pipeline + materials into the repo
 The CI file references scripts under `${CI_PROJECT_DIR}/docs/gaips-materials/`, so
 the simplest layout is to keep the whole `docs/gaips-materials/` tree in your repo
-and place the pipeline at the root:
+and keep the pipeline at the repo root as `.gitlab-ci.yml` (where it already lives):
 ```bash
-cp docs/gaips-materials/ci/.gitlab-ci.yml .gitlab-ci.yml
 git add .gitlab-ci.yml docs/gaips-materials
 ```
 (If you instead flatten the materials, update `GAIPS_MATERIALS_DIR` at the top of
@@ -143,7 +144,7 @@ All optional — absent files make their jobs skip — but for a full run, provi
 | `evals/promptfoo.yaml` | `promptfoo-eval` (live-scan pipeline) | Already shipped in materials. See [`ci/live-scans.md`](ci/live-scans.md). |
 | `evals/eval-dataset.schema.json` | `eval-dataset-validate` | Already shipped. |
 | `guardrails/baseline.json` | `guardrail-regression` (live-scan pipeline) | Regression baseline. See [`ci/live-scans.md`](ci/live-scans.md). |
-| `evals/eval-baseline.json` | `model-drift-detection`, `drift-gate` | **Seeded on first run** — see Part C2. |
+| `evals/eval-baseline.json` | `model-drift-detection` (eval-metric drift unit; its gate lives in the live-scans pipeline, not here) | **Seeded on first run** — see Part C2. |
 
 The collector/runner scripts (`build_ai_bom.py`, `run_guardrail_regression.py`,
 `write_ci_evidence_summary.py`, `detect_model_drift.py`, etc.) already ship under
@@ -200,7 +201,7 @@ git commit -m "ci: add GAIPS AI/ML security pipeline" && git push
 ```
 On a clean repo with no models/datasets, expect:
 - **Always-run hard gates pass:** `secret-detection`, `gitleaks-scan`,
-  `clamav-scan`, `artifact-signing-gate`, `drift-gate`.
+  `clamav-scan`, `artifact-signing-gate`.
 - **Everything model/dataset/integration-specific skips cleanly** (logs say so).
 - `artifact-signing-gate` passes because `tamper-verification` seeds its baseline
   and writes `integrity.env`.
@@ -216,18 +217,24 @@ malformed dataset) — fix the input, not the gate.
 
 ### C2. Activate drift detection (seed the baseline)
 The first run with eval metrics seeds `eval-baseline.seed.json`. To make
-`drift-gate` meaningful on later runs, that seed must become
-`evals/eval-baseline.json`. Two options:
+eval-metric drift detection meaningful on later runs, that seed must become
+`evals/eval-baseline.json`. **Note:** the enforcing eval-metric drift gate lives in
+the **live-scans** pipeline (where the eval metrics are produced) — the static main
+pipeline no longer has a `drift-gate` (it was removed as vacuous; see `README.md`).
+Two options:
 
-- **Automatic:** create a Project Access Token (scope `write_repository`), set it
-  as masked CI/CD variable **`GITLAB_PUSH_TOKEN`**, and run on the default branch
-  — `model-baseline-commit` commits it for you (with `[skip ci]`).
-- **Manual:** download the `eval-baseline.seed.json` artifact from
-  `model-drift-detection` and commit it to `evals/eval-baseline.json`.
+> Note: the eval-metric baseline (`evals/eval-baseline.json`) is seeded by
+> `model-drift-detection`, which now lives in the **live-scans** pipeline (Fix
+> #24a) — seed/commit it there, alongside the eval jobs that feed it.
 
-### C3. (Optional) seed the input-drift reference
-Same pattern for `evidently-drift`: commit its `dataset-reference.seed.jsonl`
-artifact to `evals/dataset-reference.jsonl` once you have a representative dataset.
+### C3. Seed the input-drift reference (auto on the default branch)
+- **Automatic:** set masked CI/CD variable **`GITLAB_PUSH_TOKEN`** (Project Access
+  Token, scope `write_repository`) and run on the default branch — once
+  `evidently-drift` seeds a reference, `data-drift-baseline-commit` **sanitizes
+  and commits** it to `evals/dataset-reference.jsonl` for you (with `[skip ci]`),
+  activating data-drift detection (Fix #24b).
+- **Manual:** download the `dataset-reference.seed.jsonl` artifact from
+  `evidently-drift`, sanitize it, and commit it to `evals/dataset-reference.jsonl`.
 
 ---
 
@@ -239,8 +246,8 @@ Each is independent; set the variable(s) and the corresponding job activates.
 | --- | --- | --- | --- |
 | D1 | **Dataset scan/redact/sign** | Optional: `DATASET_PACKAGE_NAME`, `DATASET_FILENAME` (+ `DATASET_EXPECTED_SHA256`) | Downloads from the Generic Package Registry when configured; otherwise uses the committed CI dataset fixture. Then AV+structural scan → secret/PII redaction → schema validate → cosign sign. |
 | D2 | **HF model scan** | `HF_MODEL_IDS="org/model-a,org/model-b"` (+ `HF_TOKEN` for gated) | ClamAV + ModelScan each HF repo. |
-| D3 | **Dependency-Track** | `DT_API_URL`, masked `DT_API_KEY` (+ `DT_FAIL_ON`, default `FAIL`) | Uploads SBOM + AI-BOM for continuous CVE/policy analysis; **hard policy gate**. |
-| D4 | **Stable AI-BOM signer** | masked `CYCLONEDX_SIGNING_KEY` + `CYCLONEDX_SIGNING_PUB` (RSA PEM) | Signs the AI-BOM with a persistent identity instead of an ephemeral per-run key. |
+| D3 | **Dependency-Track** | `DT_API_URL`, masked `DT_API_KEY` (+ `DT_FAIL_ON`, default `FAIL`) | Uploads SBOM + AI-BOM for continuous CVE/policy analysis; **hard policy gate**. Turnkey instance + step-by-step wiring runbook: [`deployment/dependency-track/`](deployment/dependency-track/) (Fix #34). Ingests the structured `vulnerabilities[]` the AI-BOM now emits (Fix #29). |
+| D4 | **AI-BOM signing** | _none_ — keyless via GitLab `SIGSTORE_ID_TOKEN` (Fix #25) | `ai-bom-sign` signs the AI-BOM with cosign keyless (Fulcio + Rekor), like the model/dataset. No signing-key variable to set. |
 | D5 | **DVC lineage** | `DVC_REMOTE_URL` (+ `.dvc/` in repo) | Verifies workspace vs pinned dataset/model versions. |
 
 ---
@@ -260,8 +267,9 @@ signed artifacts; the cluster verifies them.
    CI job).
 
 ### E2. Publish the signed evidence
-`publish-signed-artifacts` uploads the signed AI-BOM (+ public key), the signed
-dataset, and (when present) the model bundle to the Generic Package Registry at:
+`publish-signed-artifacts` uploads the signed AI-BOM (+ its `.sig` + Fulcio
+`.pem`), the signed dataset, and (when present) the model bundle to the Generic
+Package Registry at:
 ```
 ${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}
 ```
@@ -279,9 +287,10 @@ Apply `deployment/kubernetes/policies/kyverno-verify-image-signatures.yaml`.
 ### E4. Argo CD — verify blob signatures before sync
 Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
 - Set its `ARTIFACT_BASE_URL` (ConfigMap) to the package URL from E2.
-- Provide the AI-BOM public key (`aibom-signing.pub`) to the hook via the
-  `/keys` mount (a Secret/ConfigMap) so `cyclonedx verify all` can run.
-- The hook verifies the AI-BOM (`cyclonedx verify all`), dataset
+- Set `MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER` (ConfigMap) to your CI
+  signer identity — all three artifacts now verify keyless against it, so **no
+  public-key Secret is required** (Fix #25).
+- The hook verifies the AI-BOM (`cosign verify-blob`), dataset
   (`cosign verify-blob`), and model bundle (`model_signing verify` — **not**
   cosign), and aborts the sync on any failure.
 
@@ -294,8 +303,8 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
 - [ ] `vault kv get -mount=secret gaips/ci/model-endpoint` returns your real value
       (with `VAULT_NAMESPACE` exported).
 - [ ] Pipeline is green; `vault-secrets` log shows `N/8 secret(s) written`.
-- [ ] `artifact-signing-gate` passed and `drift-gate` passed.
-- [ ] `evals/eval-baseline.json` committed (drift detection now active).
+- [ ] `artifact-signing-gate` passed.
+- [ ] `evals/eval-baseline.json` committed (eval-metric drift detection now active in the live-scans pipeline).
 - [ ] (If signing) `signature-verification` passed against your real
       `MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER`.
 - [ ] (If deploying) `image-sign` + `publish-signed-artifacts` produced artifacts;

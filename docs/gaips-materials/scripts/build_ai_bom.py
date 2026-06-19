@@ -114,7 +114,12 @@ def _parse_digest_file(path: Path) -> list[tuple[str, str]]:
 # ── component builders ───────────────────────────────────────────────────────
 
 def _software_components(sbom_dir: Path, reports_dir: Path) -> list[dict]:
-    """Lift `components` straight out of the syft software SBOM (and pip-audit)."""
+    """Lift `components` straight out of the syft software SBOM (and pip-audit).
+
+    Each component is tagged `gaips:source=syft-sbom` (Fix #30a — so the
+    main-pipeline closure is distinguishable from the MarkLLM eval stack rather than
+    fused into one flat count) and given a stable `bom-ref` (Fix #29 — so
+    `vulnerabilities[].affects[].ref` can target it)."""
     for candidate in (
         sbom_dir / "sbom.cyclonedx.json",
         reports_dir / "pip-audit-cyclonedx.json",
@@ -124,6 +129,11 @@ def _software_components(sbom_dir: Path, reports_dir: Path) -> list[dict]:
             comps = doc["components"]
             for c in comps:
                 c.setdefault("type", "library")
+                if not c.get("bom-ref"):
+                    c["bom-ref"] = c.get("purl") or f"lib:{c.get('name', 'unknown')}"
+                props = c.setdefault("properties", [])
+                if not any(p.get("name") == f"{PROP_NS}:source" for p in props):
+                    props.append(_prop("source", "syft-sbom"))
             return comps
     return []
 
@@ -159,11 +169,60 @@ def _watermark_stack_components(reports_dir: Path, existing: list[dict]) -> list
         vulns = dep.get("vulns") or []
         if vulns:
             props.append(_prop("vulns.count", len(vulns)))
-        comp = {"type": "library", "name": name, "purl": purl, "properties": props}
+        # Stable bom-ref (Fix #29) so vulnerabilities[].affects[].ref can target it.
+        comp = {"type": "library", "bom-ref": purl, "name": name, "purl": purl, "properties": props}
         if version:
             comp["version"] = version
         extra.append(comp)
     return extra
+
+
+def _verification_verdict(evidence_dir: Path) -> dict[str, str]:
+    """Read the signature-verification (#19) verdict so the BOM can distinguish
+    'a signature exists' (signed) from 'we checked it' (verified) — Fix #32b.
+
+    #19 writes evidence/signature-verification.jsonl as either a deferred marker
+    (`{"skipped":true,"reason":...}` on an unprotected ref, where the pinned identity
+    isn't injected) or one explain_signature record per model
+    (`{"subjects":[{"match":bool}], ...}`). Returns {"state": true|false|unknown,
+    "reason": <when not true>}. A global verdict is used (the pipeline signs/verifies
+    the whole model dir uniformly) rather than fragile per-sha matching, since
+    model-signing's manifest digest is not guaranteed to be a raw per-file sha256."""
+    path = evidence_dir / "signature-verification.jsonl"
+    if not path.exists():
+        return {"state": "unknown", "reason": "signature-verification did not run"}
+    records = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            records.append(json.loads(line))
+        except Exception:
+            continue
+    if not records:
+        return {"state": "unknown", "reason": "no verification records produced"}
+    for rec in records:
+        if rec.get("skipped"):
+            return {"state": "false",
+                    "reason": rec.get("reason", "signature-verification deferred")}
+    verified = any(
+        rec.get("subjects") and all(s.get("match") for s in rec["subjects"])
+        for rec in records
+    )
+    if verified:
+        return {"state": "true"}
+    return {"state": "false", "reason": "no signed subject matched the on-disk model"}
+
+
+def _markllm_card(reports_dir: Path) -> dict[str, dict]:
+    """Index markllm-results.json by model_id so the watermark eval populates the
+    otherwise-empty modelCard (Fix #30b). Producer (run_markllm_watermark_eval.py)
+    writes: status, model_id, device, metrics:{prompt_count, detections_completed}."""
+    res = _load_json(reports_dir / "markllm-results.json")
+    if not isinstance(res, dict) or not res.get("model_id"):
+        return {}
+    return {res["model_id"]: res}
 
 
 def _model_components(
@@ -179,17 +238,26 @@ def _model_components(
     modelaudit = _load_json(reports_dir / "modelaudit-summary.json") or {}
     clamav = _load_json(reports_dir / "clamav-model.json") or {}
     hf = _load_json(reports_dir / "hf-scan" / "summary.json") or {}
+    # hf-artifact-scan writes its per-repo records under "gated" (both the skip and
+    # the real-scan paths), not "scanned" — keying off the wrong field left HF
+    # provenance silently absent from every model component.
     hf_by_id = {
         rec.get("model_id"): rec
-        for rec in (hf.get("scanned") or [])
+        for rec in (hf.get("gated") or [])
         if isinstance(rec, dict)
     }
+    verdict = _verification_verdict(evidence_dir)        # Fix #32b
+    markllm_by_id = _markllm_card(reports_dir)           # Fix #30b
 
     components: list[dict] = []
     digests = _parse_digest_file(evidence_dir / "model-digests.txt")
     digests += _parse_digest_file(evidence_dir / "modelfile-digests.txt")
 
     for path, sha in digests:
+        # Defensive (belt-and-suspenders to the #17 root fix): never emit an absolute
+        # /builds/… path into artifact.path / bom-ref (Fix #41-F5).
+        if os.path.isabs(path):
+            path = os.path.relpath(path, os.environ.get("CI_PROJECT_DIR", "/"))
         name = Path(path).name
         # model-sign writes <model_dir>/model.sig next to each model artifact.
         sig = Path(path).parent / "model.sig"
@@ -205,7 +273,13 @@ def _model_components(
             _prop("modelaudit.findings", modelaudit.get("findings", 0)),
             _prop("clamav.infected", clamav.get("infected", "unknown")),
             _prop("signed", "true" if signed else "false"),
+            # Fix #32b — distinguish "a signature exists" (signed) from "we checked it"
+            # (verified). Sourced from signature-verification #19; false/unknown until
+            # #19 runs on a protected branch (the honest deferred state).
+            _prop("model.verified", verdict["state"]),
         ]
+        if verdict.get("reason"):
+            props.append(_prop("model.verified.reason", verdict["reason"]))
 
         model_card: dict[str, Any] = {
             "modelParameters": {},
@@ -218,14 +292,52 @@ def _model_components(
             },
         }
 
-        # Fold HuggingFace card metadata in when this artifact maps to an HF repo
+        # HF repo ids carry mixed case (e.g. "Qwen/Qwen2.5-1.5B-Instruct") while the
+        # signed model path/name are lowercase GGUF, so all id-to-artifact matching
+        # below is case-insensitive against both the path and the component name.
+        path_l, name_l = path.lower(), name.lower()
+
+        # Fold HuggingFace provenance metadata in when this artifact maps to an HF
+        # repo. hf-artifact-scan records flat provenance fields per repo (author,
+        # revision sha, gated/private/disabled status) — not nested model-card
+        # metadata — so read those fields directly off the record.
         for hf_id, rec in hf_by_id.items():
-            if hf_id and (hf_id.split("/")[-1] in path):
-                meta = rec.get("card_meta") or {}
-                if meta.get("pipeline_tag"):
-                    model_card["modelParameters"]["task"] = meta["pipeline_tag"]
+            hf_base = hf_id.split("/")[-1].lower() if hf_id else ""
+            if hf_base and (hf_base in path_l or hf_base in name_l):
                 props.append(_prop("huggingface.repo", hf_id))
-                props.append(_prop("huggingface.gated", meta.get("gated", "unknown")))
+                props.append(_prop("huggingface.gated", rec.get("gated", "unknown")))
+                if rec.get("author"):
+                    props.append(_prop("huggingface.author", rec["author"]))
+                if rec.get("sha"):
+                    props.append(_prop("huggingface.revision", rec["sha"]))
+                if "private" in rec:
+                    props.append(_prop("huggingface.private", rec["private"]))
+                if "disabled" in rec:
+                    props.append(_prop("huggingface.disabled", rec["disabled"]))
+
+        # Fold the MarkLLM watermark eval into the modelCard (Fix #30b) — previously
+        # modelParameters/quantitativeAnalysis were always empty even though the eval ran.
+        # Match the model id basename against the (lowercased) path or component name;
+        # the old `name in res["prompts"]` fallback was dead (prompts is a list of dicts).
+        for mid, res in markllm_by_id.items():
+            mid_base = mid.split("/")[-1].lower() if mid else ""
+            if mid_base and (mid_base in path_l or mid_base in name_l):
+                metrics = res.get("metrics") or {}
+                if res.get("device"):
+                    model_card["modelParameters"]["device"] = res["device"]
+                model_card["modelParameters"].setdefault("task", "watermarking")
+                perf = [
+                    {"slice": "markllm-watermark", "type": k, "value": v}
+                    for k, v in metrics.items()
+                    if isinstance(v, (int, float))
+                ]
+                if perf:
+                    model_card["quantitativeAnalysis"]["performanceMetrics"] = perf
+                props.append(_prop("markllm.status", res.get("status", "unknown")))
+                if metrics.get("prompt_count") is not None:
+                    props.append(_prop("markllm.prompt_count", metrics["prompt_count"]))
+                if metrics.get("detections_completed") is not None:
+                    props.append(_prop("markllm.detections_completed", metrics["detections_completed"]))
 
         components.append({
             "type": "machine-learning-model",
@@ -264,8 +376,39 @@ def _dataset_contents(evidence_dir: Path, name: str, download: dict) -> dict[str
     return None
 
 
-def _data_components(evidence_dir: Path, reports_dir: Path) -> list[dict]:
-    """`data` components for datasets, with scan verdicts and signature."""
+def _load_dataset_baseline(explicit: Path | None) -> dict | None:
+    """Resolve and load the reviewed dataset-baseline.json (source/license/revision).
+
+    The CI `data` component otherwise carries only a digest + scan/redaction verdicts
+    — no provenance — while model components fold in full HuggingFace metadata. This
+    closes that asymmetry by reading the same reviewed manifest that pins
+    DATASET_EXPECTED_SHA256. Searched: explicit arg, $DATASET_BASELINE_FILE,
+    $GAIPS_MATERIALS_DIR/evals, then the conventional in-repo locations."""
+    candidates: list[Path] = []
+    if explicit:
+        candidates.append(explicit)
+    env = os.environ.get("DATASET_BASELINE_FILE")
+    if env:
+        candidates.append(Path(env))
+    materials = os.environ.get("GAIPS_MATERIALS_DIR")
+    if materials:
+        candidates.append(Path(materials) / "evals" / "dataset-baseline.json")
+    candidates += [
+        Path("docs/gaips-materials/evals/dataset-baseline.json"),
+        Path("evals/dataset-baseline.json"),
+    ]
+    for c in candidates:
+        if c.exists():
+            data = _load_json(c)
+            if isinstance(data, dict):
+                return data
+    return None
+
+
+def _data_components(
+    evidence_dir: Path, reports_dir: Path, baseline: dict | None = None
+) -> list[dict]:
+    """`data` components for datasets, with scan verdicts, signature, and provenance."""
     components: list[dict] = []
     download = _load_json(reports_dir / "dataset-download.json") or {}
     scan = _load_json(reports_dir / "dataset-scan.json") or {}
@@ -308,7 +451,37 @@ def _data_components(evidence_dir: Path, reports_dir: Path) -> list[dict]:
     if contents:
         data_entry["contents"] = contents
 
-    components.append({
+    # Provenance + license from the reviewed dataset-baseline.json — symmetric with
+    # the HuggingFace metadata folded into model components. Without this the `data`
+    # component is a bare digest with no source or license (the AI-BOM gap).
+    licenses: list[dict] = []
+    if isinstance(baseline, dict):
+        prov = baseline.get("provenance", {}) if isinstance(baseline.get("provenance"), dict) else {}
+        lic = baseline.get("license", {}) if isinstance(baseline.get("license"), dict) else {}
+        prov_map = {
+            "dataset.platform": prov.get("platform"),
+            "dataset.source": prov.get("source"),
+            "dataset.source.url": prov.get("source_url"),
+            "dataset.revision": prov.get("revision"),
+            "dataset.split": prov.get("split"),
+            "dataset.retrieved": prov.get("retrieved"),
+            "dataset.license": lic.get("id"),
+            "dataset.citation": lic.get("citation"),
+        }
+        for key, value in prov_map.items():
+            if value:
+                props.append(_prop(key, value))
+        if lic.get("id"):
+            # CycloneDX component-level license (SPDX id) — the auditable license field.
+            licenses.append({"license": {"id": lic["id"]}})
+        if prov.get("source_url"):
+            ext_refs = ext_refs + [{
+                "type": "website",
+                "url": prov["source_url"],
+                "comment": "Upstream dataset source (provenance)",
+            }]
+
+    component = {
         "type": "data",
         "bom-ref": f"dataset:{name}",
         "name": name,
@@ -316,7 +489,10 @@ def _data_components(evidence_dir: Path, reports_dir: Path) -> list[dict]:
         "externalReferences": ext_refs,
         "data": [data_entry],
         "properties": props,
-    })
+    }
+    if licenses:
+        component["licenses"] = licenses
+    components.append(component)
     return components
 
 
@@ -440,6 +616,119 @@ def _version_properties(evidence_dir: Path) -> list[dict]:
     return props
 
 
+# ── vulnerabilities (Fix #29) ────────────────────────────────────────────────
+
+_VALID_SEV = {"critical", "high", "medium", "low", "info", "none", "unknown"}
+
+
+def _norm_severity(s: Any) -> str | None:
+    """Map a scanner severity onto the CycloneDX `ratings[].severity` enum."""
+    if not s:
+        return None
+    s = str(s).lower()
+    if s == "negligible":
+        return "low"
+    if s == "moderate":
+        return "medium"
+    return s if s in _VALID_SEV else "unknown"
+
+
+def _vulnerabilities(reports_dir: Path, components: list[dict]) -> list[dict]:
+    """Emit a CycloneDX 1.6 `vulnerabilities[]` from the pipeline's audit reports.
+
+    Previously the BOM recorded known vulns only as scalar property *counts*, so
+    Dependency-Track (and any auditor) ingested nothing structured. Sources:
+    pip-audit JSON (`markllm-deps-audit.json` + the Fix #0 per-job `pip-audit-*.json`),
+    grype (`grype.json`), trivy (`trivy-fs.json` / `trivy-image.json`). Each entry's
+    `affects[].ref` points at the offending component's bom-ref. Deduped by (id, ref)."""
+    ref_by_key: dict[str, str] = {}
+    for c in components:
+        ref = c.get("bom-ref")
+        if not ref:
+            continue
+        if c.get("name"):
+            ref_by_key.setdefault(str(c["name"]).lower(), ref)
+        if c.get("purl"):
+            ref_by_key.setdefault(str(c["purl"]).lower(), ref)
+
+    def resolve_ref(name: str | None = None, purl: str | None = None) -> str:
+        for key in (purl, name):
+            if key and key.lower() in ref_by_key:
+                return ref_by_key[key.lower()]
+        return purl or (f"lib:{name}" if name else "unknown")
+
+    vulns: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(vid: Any, ref: str, source: str | None = None, severity: Any = None,
+            url: str | None = None, desc: str | None = None, fix: str | None = None) -> None:
+        if not vid:
+            return
+        key = (str(vid).lower(), ref)
+        if key in seen:
+            return
+        seen.add(key)
+        entry: dict[str, Any] = {"bom-ref": f"vuln:{vid}:{ref}", "id": str(vid),
+                                 "affects": [{"ref": ref}]}
+        if source:
+            entry["source"] = {"name": source}
+            if url:
+                entry["source"]["url"] = url
+        sev = _norm_severity(severity)
+        if sev:
+            entry["ratings"] = [{"severity": sev}]
+        if desc:
+            entry["description"] = str(desc)[:1000]
+        if fix:
+            entry["recommendation"] = f"Upgrade to: {fix}"
+        vulns.append(entry)
+
+    # pip-audit native JSON: {"dependencies":[{"name","version","vulns":[{id,fix_versions,description}]}]}
+    # Covers the manifest scan (pip-audit.json), the hash-pinned lockfile scan
+    # (lockfile-audit.json — does NOT match the pip-audit* glob), and the MarkLLM
+    # dependency audit. All three share the pip-audit native shape; dedup is by `seen`.
+    audit_files = (sorted(reports_dir.glob("pip-audit*.json"))
+                   + [reports_dir / "lockfile-audit.json",
+                      reports_dir / "markllm-deps-audit.json"])
+    for audit_path in audit_files:
+        doc = _load_json(audit_path)
+        if not isinstance(doc, dict) or not isinstance(doc.get("dependencies"), list):
+            continue  # skips the CycloneDX-shaped pip-audit-cyclonedx.json safely
+        for dep in doc["dependencies"]:
+            name, version = dep.get("name"), dep.get("version")
+            purl = f"pkg:pypi/{name}@{version}" if name and version else (f"pkg:pypi/{name}" if name else None)
+            ref = resolve_ref(name, purl)
+            for v in dep.get("vulns") or []:
+                fix = ", ".join(v.get("fix_versions") or []) or None
+                add(v.get("id"), ref, source="osv", desc=v.get("description"), fix=fix)
+
+    # grype: {"matches":[{"vulnerability":{id,severity,dataSource,fix:{versions}},"artifact":{name,purl}}]}
+    grype = _load_json(reports_dir / "grype.json")
+    if isinstance(grype, dict):
+        for m in grype.get("matches") or []:
+            v = m.get("vulnerability", {}) or {}
+            art = m.get("artifact", {}) or {}
+            fix = ", ".join((v.get("fix", {}) or {}).get("versions") or []) or None
+            ref = resolve_ref(art.get("name"), art.get("purl"))
+            add(v.get("id"), ref, source="grype", severity=v.get("severity"),
+                url=v.get("dataSource"), desc=v.get("description"), fix=fix)
+
+    # trivy: {"Results":[{"Vulnerabilities":[{VulnerabilityID,PkgName,InstalledVersion,FixedVersion,Severity}]}]}
+    for trivy_name in ("trivy-fs.json", "trivy-image.json"):
+        trivy = _load_json(reports_dir / trivy_name)
+        if not isinstance(trivy, dict):
+            continue
+        for res in trivy.get("Results") or []:
+            for v in res.get("Vulnerabilities") or []:
+                name, ver = v.get("PkgName"), v.get("InstalledVersion")
+                purl = f"pkg:pypi/{name}@{ver}" if name and ver else None
+                ref = resolve_ref(name, purl)
+                add(v.get("VulnerabilityID"), ref, source="trivy", severity=v.get("Severity"),
+                    url=v.get("PrimaryURL"), desc=v.get("Description"), fix=v.get("FixedVersion"))
+
+    return vulns
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 
 def build_bom(
@@ -448,11 +737,13 @@ def build_bom(
     evidence_dir: Path,
     model_dir: Path,
     timestamp: str,
+    dataset_baseline: Path | None = None,
 ) -> dict:
-    software = _software_components(sbom_dir, reports_dir)
-    software = software + _watermark_stack_components(reports_dir, software)
+    syft_sw = _software_components(sbom_dir, reports_dir)
+    markllm_sw = _watermark_stack_components(reports_dir, syft_sw)   # Fix #30a: kept distinct
+    software = syft_sw + markllm_sw
     models = _model_components(evidence_dir, reports_dir, model_dir)
-    data = _data_components(evidence_dir, reports_dir)
+    data = _data_components(evidence_dir, reports_dir, _load_dataset_baseline(dataset_baseline))
     eval_props, eval_refs = _eval_evidence(reports_dir)
     dq_props, dq_refs = _data_quality_evidence(reports_dir)
 
@@ -467,6 +758,7 @@ def build_bom(
     }
 
     components = models + data + software
+    vulnerabilities = _vulnerabilities(reports_dir, components)   # Fix #29
     bom = {
         "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
         "bomFormat": "CycloneDX",
@@ -491,10 +783,16 @@ def build_bom(
                 _prop("bom.counts.models", len(models)),
                 _prop("bom.counts.datasets", len(data)),
                 _prop("bom.counts.software", len(software)),
+                # Fix #30a: the flat total split into its two disjoint universes.
+                _prop("bom.counts.software.pipeline", len(syft_sw)),
+                _prop("bom.counts.software.markllm", len(markllm_sw)),
+                _prop("bom.counts.vulnerabilities", len(vulnerabilities)),
             ] + _version_properties(evidence_dir),
         },
         "components": components,
     }
+    if vulnerabilities:
+        bom["vulnerabilities"] = vulnerabilities
     return bom
 
 
@@ -506,6 +804,9 @@ def main() -> None:
     parser.add_argument("--evidence", required=True, help="EVIDENCE_DIR")
     parser.add_argument("--models", required=True, help="MODEL_DIR")
     parser.add_argument("--timestamp", required=True, help="ISO-8601 UTC timestamp")
+    parser.add_argument("--dataset-baseline", default=None, type=Path,
+                        help="optional path to dataset-baseline.json for license/provenance "
+                             "(falls back to $DATASET_BASELINE_FILE / conventional locations)")
     args = parser.parse_args()
 
     out = Path(args.out)
@@ -517,6 +818,7 @@ def main() -> None:
         evidence_dir=Path(args.evidence),
         model_dir=Path(args.models),
         timestamp=args.timestamp,
+        dataset_baseline=args.dataset_baseline,
     )
     out.write_text(json.dumps(bom, indent=2) + "\n", encoding="utf-8")
 
@@ -526,6 +828,9 @@ def main() -> None:
         f"  models={meta_props[f'{PROP_NS}:bom.counts.models']} "
         f"datasets={meta_props[f'{PROP_NS}:bom.counts.datasets']} "
         f"software={meta_props[f'{PROP_NS}:bom.counts.software']} "
+        f"(pipeline={meta_props[f'{PROP_NS}:bom.counts.software.pipeline']} "
+        f"markllm={meta_props[f'{PROP_NS}:bom.counts.software.markllm']}) "
+        f"vulnerabilities={meta_props[f'{PROP_NS}:bom.counts.vulnerabilities']} "
         f"(total components={len(bom['components'])})"
     )
 

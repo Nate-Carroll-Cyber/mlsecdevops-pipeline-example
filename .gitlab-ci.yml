@@ -23,16 +23,24 @@ variables:
   VAULT_NAMESPACE: ""               # e.g. "admin" or "admin/gaips" on HCP Vault
   # Override in project CI/CD settings (or fetch from Vault via vault-secrets job):
   # MODEL_ENDPOINT, MODEL_SIGNING_IDENTITY, SIGSTORE_OIDC_ISSUER
-  # AI BOM enveloped signature (ai-bom-sign): set CYCLONEDX_SIGNING_KEY (RSA
-  # private key, PEM) and CYCLONEDX_SIGNING_PUB (matching public key) as masked
-  # CI/CD variables for a STABLE signer identity. If unset, the job generates an
-  # ephemeral keypair — verifiable within the run only, not anchored to a signer.
-  # Drift baseline auto-commit (model-baseline-commit): set GITLAB_PUSH_TOKEN to a
-  # masked Project Access Token (scope: write_repository) to let the first run
-  # commit evals/eval-baseline.json back to the default branch. If unset, the
-  # seeded baseline is published as an artifact to commit manually.
-  HF_MODEL_IDS: ""    # comma-separated HF repo IDs to scan, e.g. "org/model-a,org/model-b"
+  # AI BOM signing (ai-bom-sign) is cosign KEYLESS (Fulcio + Rekor, Fix #25) — it
+  # uses the same GitLab OIDC id_token as model-sign/dataset-sign, so no signing
+  # key variable is needed (the old CYCLONEDX_SIGNING_KEY/PUB are gone).
+  # Data-drift baseline auto-commit (data-drift-baseline-commit): set GITLAB_PUSH_TOKEN
+  # to a masked Project Access Token (scope: write_repository) to let the first run
+  # commit evals/dataset-reference.jsonl back to the default branch. If unset, the
+  # seeded reference is published as an artifact to sanitize + commit manually.
+  # sign-evidence enforcement (teeth-last, per Fix #0/#23): the terminal evidence
+  # seal is signed keyless via SIGSTORE_ID_TOKEN. When that token is unavailable
+  # (GitLab < 15.7 / id_tokens off), the default ("false") emits the unsigned
+  # manifest and exits 0 so development pipelines are not blocked. Set to "true"
+  # in production to make a missing token a HARD FAILURE — the run then refuses to
+  # ship an unsigned evidence seal.
+  EVIDENCE_SIGNING_REQUIRED: "false"
+  HF_MODEL_IDS: ""    # comma-separated HF repo IDs to gate, e.g. "org/model-a,org/model-b"
   HF_TOKEN: ""        # HuggingFace token for gated/private repos (mask in CI settings)
+  HF_AUTHOR_ALLOWLIST: ""   # comma-separated allowed repo authors/orgs; blank = any author allowed
+  HF_PINNED_SHAS: ""        # optional "org/model=<sha>,…" — fail if the live repo sha differs from the pin
   # Public model fixture downloaded into MODEL_DIR by default so the primary
   # digest/sign/scan jobs exercise real model bytes without committing weights.
   # Override to an empty value to skip the download.
@@ -49,15 +57,20 @@ variables:
   # ── Pinned tool versions — update here to roll the whole pipeline ─────────────
   # Find current releases at each tool's GitHub releases page before bumping.
   COSIGN_VERSION: "v2.4.1"
+  # Python signing/scanning toolchain — PINNED exact versions (no floors) so the
+  # model-integrity jobs are reproducible. Update here to roll the whole pipeline.
+  MODEL_SIGNING_VERSION: "1.1.1"      # `pip install model-signing==${MODEL_SIGNING_VERSION}`
+  SIGSTORE_PY_VERSION: "4.3.0"        # `pip install sigstore==${SIGSTORE_PY_VERSION}`
+  MODELAUDIT_VERSION: "0.2.47"        # `pip install modelaudit[all]==${MODELAUDIT_VERSION}` (was a >= floor)
   GITLEAKS_VERSION: "8.30.1"          # dataset-redact secret scan (no 'v' in tarball name)
-  IMAGE_SEMGREP: "semgrep/semgrep:latest"
+  IMAGE_SEMGREP: "semgrep/semgrep:1.165.0"       # semgrep-sast runs IN this image (no unpinned pip install)
   IMAGE_MINICONDA: "continuumio/miniconda3:26.3.2"
   IMAGE_SYFT: "anchore/syft:v1.45.1-debug"
   IMAGE_GRYPE: "anchore/grype:v0.114.0-debug"
-  IMAGE_TRIVY: "aquasec/trivy:latest"
+  IMAGE_TRIVY: "aquasec/trivy:0.71.1"   # pinned to an exact tag — keep in sync with the trivy-db schema
   IMAGE_CYCLONEDX: "cyclonedx/cyclonedx-cli:0.32.0"   # AI BOM schema validation / format conversion
-  IMAGE_GITLEAKS: "zricethezav/gitleaks:latest"       # gitleaks-scan SAST job image
-  IMAGE_CLAMAV: "clamav/clamav:1.4"                   # clamav-scan job — pinned off :latest (patch-floating line)
+  IMAGE_GITLEAKS: "ghcr.io/gitleaks/gitleaks:v8.30.1" # gitleaks-scan SAST job image (pinned; GHCR — gitleaks has no Docker Hub repo; keep in sync with GITLEAKS_VERSION)
+  IMAGE_CLAMAV: "clamav/clamav:1.4"                   # clamav-scan job — pinned to an exact tag (patch-floating line)
   PROMPTFOO_VERSION: "0.121.15"
   # MarkLLM watermark stack — pinned to current, markllm-compatible versions and
   # shared by markllm-deps-audit and markllm-watermark-eval. transformers stays on
@@ -76,8 +89,21 @@ variables:
   # Leave DATASET_FILENAME blank to skip the download/scan jobs entirely.
   DATASET_PACKAGE_NAME: ""          # package name in the Generic Package Registry
   DATASET_PACKAGE_VERSION: "latest" # package version tag
-  DATASET_FILENAME: ""              # filename to download; blank = skip
-  DATASET_EXPECTED_SHA256: ""       # optional — pipeline fails on hash mismatch
+  DATASET_FILENAME: ""              # filename to download; blank = use committed fixture
+  # Committed fixture used when DATASET_FILENAME is blank. Defaults to the approved
+  # Lakera gandalf_ignore_instructions test split (see evals/dataset-baseline.json);
+  # set to "ci-dataset.jsonl" to fall back to the minimal plumbing fixture.
+  DATASET_FIXTURE_FILE: "gandalf-ignore-instructions-test.jsonl"
+  # Integrity pin. Verified against the staged fixture (fixture mode) AND the
+  # downloaded file (download mode). Sourced from evals/dataset-baseline.json.
+  DATASET_EXPECTED_SHA256: "667e2f643fc1881925787056274cab8829e13dc528c781125b1663a9bdb05cd6"
+  DATASET_ALLOW_UNVERIFIED: ""      # set "true" to allow a downloaded dataset with no DATASET_EXPECTED_SHA256 (NOT recommended)
+  # The dataset chain (download→scan→redact→validate→GX→profile→sign) always has a
+  # dataset to act on: a committed fixture is staged when DATASET_FILENAME is unset.
+  # So "no dataset present" downstream means a BROKEN CHAIN, not an intended skip —
+  # the gate jobs treat it as expected-but-missing and FAIL. Set this flag to "true"
+  # ONLY to deliberately run the pipeline with the dataset chain disabled (skip green).
+  DATASETS_DISABLED: ""             # "true" = intentionally disable the dataset chain (skip, exit 0)
   # ── Dependency-Track — continuous BOM analysis backend ────────────────────────
   # The pipeline already emits CycloneDX SBOMs + a CycloneDX 1.6 AI BOM; DT ingests
   # them and re-analyses against new CVEs + policy conditions over time. Set both
@@ -107,9 +133,9 @@ variables:
   IMAGE_REGISTRY_USER: ""           # blank → ${CI_REGISTRY_USER}
   IMAGE_REGISTRY_PASSWORD: ""       # masked; blank → ${CI_REGISTRY_PASSWORD}
   # ── Signed-artifact publish — feeds the Argo CD PreSync verifier (BLOB side) ──
-  # publish-signed-artifacts uploads the signed AI-BOM, its public key, and the
-  # signed dataset (+ model bundle, when present) to the GitLab Generic Package
-  # Registry. The PreSync hook's ARTIFACT_BASE_URL must point at this same
+  # publish-signed-artifacts uploads the cosign-signed AI-BOM trio (.xml/.sig/.pem)
+  # and the signed dataset (+ model bundle, when present) to the GitLab Generic
+  # Package Registry. The PreSync hook's ARTIFACT_BASE_URL must point at this same
   # package/version. Publishing uses CI_JOB_TOKEN — no extra secret needed.
   EVIDENCE_PACKAGE_NAME: "gaips-evidence"
   EVIDENCE_PACKAGE_VERSION: "${CI_COMMIT_REF_SLUG}"   # PreSync ARTIFACT_BASE_URL points here
@@ -162,13 +188,48 @@ variables:
         REQ_FILE=""
       fi
 
+# ── Tier-0 environment audit (referenced from default.after_script) ───────────
+# Fix #0-A. pip-audit against the ACTUAL installed environment of EVERY job — not
+# just a requirements manifest. Jobs across the pipeline pip-install their own
+# stacks inline (model-signing, sigstore, cryptography, presidio, modelaudit,
+# modelscan, evidently, ydata-profiling, great-expectations, huggingface_hub…),
+# none of which the manifest-only pip-audit job ever sees. Wiring this into
+# default.after_script audits each job's venv where those packages actually live.
+# Advisory by design (coverage, not a gate): after_script failures don't fail the
+# job, so a finding records a log signal + report without blocking. Teeth come
+# later — the hash-pinned lockfile audit (#0-B) and per-stage gating.
+.audit-env:
+  script:
+    - |
+      command -v pip >/dev/null 2>&1 || { echo "[audit-env] no pip on this image (${CI_JOB_NAME}) — skipping env audit"; exit 0; }
+      # after_script runs in a fresh shell — re-enter the job's venv if present so
+      # we audit the packages the job installed, not bare system python.
+      if [ -d "${VENV_DIR}" ]; then . "${VENV_DIR}/bin/activate" 2>/dev/null || true; fi
+      pip install --quiet pip-audit 2>/dev/null || { echo "[audit-env] could not install pip-audit (${CI_JOB_NAME}) — skipping"; exit 0; }
+      mkdir -p "${REPORTS_DIR}"
+      echo "[audit-env] auditing installed environment for job: ${CI_JOB_NAME}"
+      pip-audit \
+        --format json \
+        --output "${REPORTS_DIR}/pip-audit-env-${CI_JOB_NAME}.json" \
+        --progress-spinner off \
+      || echo "[audit-env] pip-audit reported findings for ${CI_JOB_NAME} (advisory) — see ${REPORTS_DIR}/pip-audit-env-${CI_JOB_NAME}.json"
+
 default:
   image: python:3.11-slim
   interruptible: true
   before_script:
     - !reference [.python-secure, before_script]
+  # Fix #0-A: every job audits its own installed environment after running.
+  # Inherited by all jobs that don't declare their own after_script; guards make
+  # it a clean no-op on non-Python images (e.g. the cyclonedx-cli signing job).
+  after_script:
+    - !reference [.audit-env, script]
   cache:
-    key: pip-${CI_COMMIT_REF_SLUG}
+    # Bumped pip- -> pip-v2- to abandon the bloated shared cache: heavy jobs had pushed
+    # multi-GB torch/tensorflow/CUDA wheels into it over successive runs, so every job that
+    # restored it ran the small runner out of disk ([Errno 28]). v2 starts empty; the
+    # bloaters below opt out with cache:{} so it stays small.
+    key: pip-v2-${CI_COMMIT_REF_SLUG}
     paths:
       - .pip-cache/
 
@@ -183,6 +244,9 @@ stages:
   - evidence
   - ai-bom
   - deploy-prep
+  # Terminal stage: runs dead-last so sign-evidence can hash + sign the ENTIRE
+  # run's evidence set, including the ai-bom and deploy-prep outputs.
+  - attest
 
 # ─── SETUP ───────────────────────────────────────────────────────────────────
 
@@ -194,6 +258,9 @@ setup:
     - when: on_success
   allow_failure: true
   script:
+    # python:3.11-slim ships no git, so write_version_info.py could not compute the
+    # working-tree `dirty` flag or `git describe` — install git so provenance is real.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends git ca-certificates
     - !reference [.resolve-reqs, script]
     - '[ -n "${REQ_FILE}" ] && pip install -r "${REQ_FILE}" || echo "No requirements file — skipping install"'
     - mkdir -p "${SBOM_DIR}" "${EVIDENCE_DIR}" "${REPORTS_DIR}"
@@ -314,13 +381,14 @@ vault-secrets:
 
 semgrep-sast:
   stage: sast
+  image: ${IMAGE_SEMGREP}     # pinned semgrep image ships semgrep — no unpinned `pip install`
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   needs: ["setup"]
+  before_script: []           # semgrep image is self-contained; skip the python venv bootstrap
   script:
-    - pip install semgrep
     - mkdir -p "${REPORTS_DIR}"
     # `semgrep scan` runs a tokenless rules-based scan; `semgrep ci` expects a
     # SEMGREP_APP_TOKEN and the managed-scan workflow.
@@ -361,8 +429,14 @@ secret-detection:
       fi
       # The GitLab secrets analyzer image is intentionally minimal and does not
       # include Python or jq, so keep this summary POSIX-shell compatible.
-      FINDINGS=$(grep -c '"severity"' gl-secret-detection-report.json 2>/dev/null || echo 0)
-      CRITICAL=$(grep -c '"severity"[[:space:]]*:[[:space:]]*"Critical"' gl-secret-detection-report.json 2>/dev/null || echo 0)
+      # grep -c always prints a single count (0 on no match) but EXITS 1 when zero.
+      # The old `|| echo 0` appended a SECOND "0", yielding "0\n0" → "sh: bad number"
+      # in the arithmetic test below. Swallow the exit with `|| true` (keep the count)
+      # and default an empty result to 0.
+      FINDINGS=$(grep -c '"severity"' gl-secret-detection-report.json 2>/dev/null || true)
+      CRITICAL=$(grep -c '"severity"[[:space:]]*:[[:space:]]*"Critical"' gl-secret-detection-report.json 2>/dev/null || true)
+      FINDINGS=${FINDINGS:-0}
+      CRITICAL=${CRITICAL:-0}
       echo "Secret detection: ${FINDINGS} finding(s); critical=${CRITICAL}"
       if [ "${CRITICAL}" -gt 0 ]; then
         echo "Critical secrets found — failing pipeline"
@@ -470,6 +544,144 @@ pip-audit:
     expire_in: 7 days
   allow_failure: true
 
+# Fix #0-B — hash-pinned lockfile audit. The manifest pip-audit above resolves to
+# the root requirements.txt (pandas/requests/jinja2) and never reaches the full
+# pipeline stack declared in the ci/requirements-ci*.in GROUP files. This job
+# compiles EACH group into a fully pinned, hash-generated lockfile and audits THEM
+# — covering this (static) pipeline's stack: model-signing, sigstore, modelscan,
+# huggingface_hub, presidio, evidently, ydata-profiling, great-expectations, the
+# markllm watermark stack… against OSV/PyPI/GitHub advisory DBs. (The AI red-team
+# tools — garak/giskard/pyrit/inspect-ai/inspect-evals — live in the separate
+# live-scans pipeline, NOT here.) The per-group locks are published as artifacts;
+# the CORE group's lock can be committed as ci/requirements-ci.txt to enable
+# --require-hashes installs (the "teeth" half of #0). Advisory for now; flip
+# allow_failure:false once that lockfile is committed and the core group resolves
+# cleanly in CI.
+lockfile-audit:
+  stage: sast
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  needs: ["setup"]
+  allow_failure: true
+  # cache:{} — this job's GitLab-level cache is disabled so its compiles can't bloat
+  # the shared pip cache that reaches other jobs' runner disk.
+  cache: {}
+  variables:
+    # Stay on the SMALL runner by not letting pip RETAIN downloaded wheels across the
+    # three sequential group compiles below. `pip-compile --generate-hashes` downloads
+    # every resolved wheel to hash it; by default pip caches them in ~/.cache/pip, so
+    # the 236-package dataquality group fills the cache first and the markllm/core
+    # compiles then exhaust the runner disk ([Errno 28]) — even though each group ALONE
+    # is small. PIP_NO_CACHE_DIR makes each pip-compile free its downloads on exit, so
+    # the groups don't accumulate. (The markllm group also pins torch==2.12.0+cpu, so
+    # it hashes the ~200 MB CPU wheel, not the ~2 GB CUDA build.)
+    PIP_NO_CACHE_DIR: "1"
+  script:
+    - pip install --quiet pip-tools pip-audit
+    - mkdir -p "${REPORTS_DIR}"
+    - |
+      # The pipeline's deps don't reliably co-resolve as one lockfile: the markllm
+      # watermark stack pins old huggingface_hub<1.0 / Pillow==9.4.0, and the data
+      # quality group (evidently + ydata-profiling) pins narrow numpy/pandas ranges.
+      # These run in isolated per-job venvs anyway, so each requirements-ci*.in is an
+      # independently-resolvable GROUP: compile + hash-pin each on its own. A group
+      # that still can't resolve is a loud WARNING (not a failure) — its packages
+      # stay covered at runtime by the per-job .audit-env after_script.
+      CI_DIR="${GAIPS_MATERIALS_DIR}/ci"
+      : > "${REPORTS_DIR}/lockfile-unresolved-groups.txt"
+      found=0
+      # Compile the light, security-critical CORE group (requirements-ci.in: signing /
+      # scanning / redaction tools) FIRST so its hash-lock is produced even on a bad
+      # day; the heavy hyphenated groups (dataquality, markllm) come after. With
+      # PIP_NO_CACHE_DIR set, downloads don't accumulate between these compiles.
+      for IN_FILE in "${CI_DIR}/requirements-ci.in" "${CI_DIR}"/requirements-ci-*.in; do
+        [ -e "${IN_FILE}" ] || continue
+        STEM=$(basename "${IN_FILE}" .in)
+        case "${STEM}" in
+          *markllm*)
+            # The markllm watermark stack (torch/transformers/markllm) is heavy AND is
+            # already vuln-audited by the dedicated markllm-deps-audit job at the same
+            # pins. Re-compiling it here is redundant, and `pip-compile --generate-hashes`
+            # over its multi-GB closure exhausts the small runner's disk ([Errno 28]).
+            # Skip it — markllm-deps-audit owns that group; it is not hash-locked here.
+            echo "Skipping ${STEM} — covered by markllm-deps-audit (not hash-locked here)"
+            continue
+            ;;
+        esac
+        found=1
+        LOCK="${REPORTS_DIR}/${STEM}.txt"
+        if pip-compile --quiet --generate-hashes --allow-unsafe \
+              --output-file "${LOCK}" "${IN_FILE}"; then
+          echo "Compiled hash-pinned lockfile → ${LOCK}"
+        else
+          echo "WARNING: group '${STEM}' could not be resolved into a single lockfile —"
+          echo "         its packages are audited at runtime by the per-job .audit-env."
+          rm -f "${LOCK}"
+          echo "${STEM}" >> "${REPORTS_DIR}/lockfile-unresolved-groups.txt"
+        fi
+      done
+      if [ "${found}" -eq 0 ]; then
+        echo "No requirements-ci*.in present — nothing to lock/audit"; exit 0
+      fi
+    - |
+      # Audit each resolved group lock. --no-deps audits the EXACT pinned packages in the
+      # hash-generated lock WITHOUT creating a venv and installing them — required here:
+      # installing the dataquality closure (236 pkgs incl. ydata/dvc[all]/evidently) into
+      # a venv to audit it exhausts the small runner's disk ([Errno 28]). The lock is
+      # already fully pinned by `pip-compile --generate-hashes`, so --no-deps is exact.
+      for LOCK in "${REPORTS_DIR}"/requirements-ci*.txt; do
+        [ -e "${LOCK}" ] || continue
+        STEM=$(basename "${LOCK}" .txt)
+        pip-audit --requirement "${LOCK}" --no-deps --format json \
+          --output "${REPORTS_DIR}/${STEM}-audit.json" --progress-spinner off || true
+        pip-audit --requirement "${LOCK}" --no-deps --format cyclonedx-json \
+          --output "${REPORTS_DIR}/${STEM}-audit-cyclonedx.json" --progress-spinner off || true
+      done
+    - |
+      # Merge the per-group pip-audit JSONs into one lockfile-audit.json in the
+      # pip-audit-native {"dependencies":[...]} shape that build_ai_bom.py reads
+      # (P2-1); dedup by (name, version).
+      python3 - <<'PYEOF'
+      import json, glob, os
+      reports = os.environ["REPORTS_DIR"]
+      merged, seen = [], set()
+      for path in sorted(glob.glob(reports + "/requirements-ci*-audit.json")):
+          try:
+              doc = json.load(open(path))
+          except Exception as exc:
+              print(f"WARN: could not read {os.path.basename(path)} ({exc})")
+              continue
+          if not isinstance(doc, dict):
+              continue
+          for dep in doc.get("dependencies", []):
+              key = (dep.get("name"), dep.get("version"))
+              if key in seen:
+                  continue
+              seen.add(key)
+              merged.append(dep)
+      with open(reports + "/lockfile-audit.json", "w") as f:
+          json.dump({"dependencies": merged}, f, indent=2)
+      total = sum(len(d.get("vulns", [])) for d in merged)
+      pkgs  = sum(1 for d in merged if d.get("vulns"))
+      print(f"lockfile-audit: {total} vulnerability/ies across {pkgs} package(s) "
+            f"over {len(merged)} locked packages (merged from per-group locks)")
+      unresolved_path = reports + "/lockfile-unresolved-groups.txt"
+      if os.path.exists(unresolved_path):
+          groups = [g for g in open(unresolved_path).read().split() if g]
+          if groups:
+              print("NOTE: groups not lockable as a single set "
+                    "(covered by per-job .audit-env): " + ", ".join(groups))
+      PYEOF
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/requirements-ci*.txt"
+      - "${REPORTS_DIR}/lockfile-audit.json"
+      - "${REPORTS_DIR}/requirements-ci*-audit*.json"
+      - "${REPORTS_DIR}/lockfile-unresolved-groups.txt"
+    expire_in: 7 days
+
 pkg-integrity:
   stage: sast
   rules:
@@ -509,17 +721,21 @@ pkg-integrity:
       # Install into a throw-away venv to confirm no hidden dependency conflicts.
       python3 -m venv /tmp/verify-venv
       . /tmp/verify-venv/bin/activate
-      pip install --quiet --index-url "${PIP_INDEX_URL}" -r "${REQ_FILE}"
+      # Honour hashes when the requirements carry them (enforced mode).
+      if grep -q " --hash=" "${REQ_FILE}" 2>/dev/null; then
+        pip install --quiet --require-hashes --index-url "${PIP_INDEX_URL}" -r "${REQ_FILE}"
+      else
+        pip install --quiet --index-url "${PIP_INDEX_URL}" -r "${REQ_FILE}"
+      fi
       pip check    # fails if any installed package has broken/missing deps
+      # Snapshot the manifest of the VERIFIED venv NOW, while it is still active —
+      # capturing it after `deactivate` recorded the bare base-python env instead.
+      pip list --format json > "${REPORTS_DIR}/pkg-list.json"
       deactivate
     - |
       python3 - <<'PYEOF'
-      import subprocess, json, pathlib, os
-      result = subprocess.run(
-          ["pip", "list", "--format", "json"],
-          capture_output=True, text=True, check=True,
-      )
-      packages = json.loads(result.stdout)
+      import json, pathlib, os
+      packages = json.loads(open(os.environ["REPORTS_DIR"] + "/pkg-list.json").read())
       report = {"env": packages, "hash_mode": open(os.environ["REPORTS_DIR"] + "/pkg-integrity.env").read().strip()}
       pathlib.Path(os.environ["REPORTS_DIR"] + "/pkg-integrity-manifest.json").write_text(
           json.dumps(report, indent=2)
@@ -549,16 +765,22 @@ conda-pkg-verify:
       # ── Secure conda configuration ────────────────────────────────────────
       conda config --set ssl_verify true
       conda config --set channel_priority strict
-      # Remove defaults channel — conda-forge has a rigorous vetting process
-      conda config --remove channels defaults 2>/dev/null || true
       conda config --add channels "${CONDA_CHANNEL}"
-      conda config --show channels
+      # NOTE: the base image keeps 'defaults' in the merged channel list, and
+      # `conda config --remove channels defaults` cannot reliably drop it (it lives
+      # in the system condarc). Rather than trust the config list, we enforce
+      # isolation at RESOLUTION time with --override-channels below, then VERIFY it
+      # from the resolved package set (the real proof) instead of grepping config.
+      conda config --show channels || true
     - |
-      # ── Isolated conda environment ────────────────────────────────────────
-      conda create -n ci-verify python=3.11 --yes --quiet
+      # ── Isolated conda environment (conda-forge ONLY) ─────────────────────
+      # --override-channels ignores every configured channel (incl. defaults) and
+      # uses only the --channel(s) given, so packages provably come from conda-forge.
+      conda create -n ci-verify python=3.11 --yes --quiet \
+        --override-channels --channel "${CONDA_CHANNEL}"
       # Attempt to install packages via conda-forge; fall back gracefully for pip-only pkgs
       conda run -n ci-verify conda install --yes --quiet \
-        --channel "${CONDA_CHANNEL}" \
+        --override-channels --channel "${CONDA_CHANNEL}" \
         --file requirements.txt 2>/dev/null \
         || echo "NOTE: some packages are pip-only; conda coverage is partial"
       conda run -n ci-verify pip check || true
@@ -567,9 +789,23 @@ conda-pkg-verify:
       conda env export -n ci-verify --json > "${REPORTS_DIR}/conda/env-manifest.json"
       conda run -n ci-verify conda list --json > "${REPORTS_DIR}/conda/installed-packages.json"
       python3 - <<'PYEOF'
-      import json, os
+      import json, os, re, sys
       pkgs = json.load(open(os.environ["REPORTS_DIR"] + "/conda/installed-packages.json"))
-      print(f"conda-forge environment: {len(pkgs)} package(s) resolved")
+      # Real isolation check: flag any package that resolved from an Anaconda default
+      # channel. Denial-based (not an allowlist) so channel-string variants like
+      # "conda-forge/linux-64" or a full conda-forge URL don't false-fail this gate.
+      BAD = re.compile(r"(^|/|\.)(defaults|pkgs/main|pkgs/r|main|free|anaconda)(/|$)|repo\.anaconda\.com", re.I)
+      leaked = sorted(
+          f"{p.get('name')}@{p.get('channel')}"
+          for p in pkgs
+          if p.get("channel") and BAD.search(str(p.get("channel")))
+      )
+      print(f"conda environment: {len(pkgs)} package(s) resolved")
+      if leaked:
+          print(f"ERROR: {len(leaked)} package(s) resolved from an Anaconda default "
+                f"channel (isolation leak): {leaked[:10]}")
+          sys.exit(1)
+      print("Channel isolation verified — no package resolved from a defaults/anaconda channel")
       PYEOF
   artifacts:
     paths:
@@ -591,6 +827,7 @@ syft-cyclonedx:
   before_script: []          # syft image has no Python
   needs: ["setup"]
   allow_failure: true
+  cache: {}                  # no Python → the inherited pip cache is a no-op restore/upload
   script:
     - mkdir -p "${SBOM_DIR}"
     - /syft dir:. -o cyclonedx-json="${SBOM_DIR}/sbom.cyclonedx.json"
@@ -613,6 +850,7 @@ syft-spdx:
   before_script: []          # syft image has no Python
   needs: ["setup"]
   allow_failure: true
+  cache: {}                  # no Python → the inherited pip cache is a no-op restore/upload
   script:
     - mkdir -p "${SBOM_DIR}"
     - /syft dir:. -o spdx-json="${SBOM_DIR}/sbom.spdx.json"
@@ -636,6 +874,7 @@ dvc-verify:
     - when: on_success
   needs: ["setup"]
   allow_failure: true   # advisory until DVC is initialized + a remote is configured
+  cache: {}             # normal runs skip before any pip use; the inherited cache is a no-op
   script:
     - mkdir -p "${REPORTS_DIR}"
     - |
@@ -678,6 +917,7 @@ grype-scan:
     entrypoint: [""]
   before_script: []          # grype image has no Python
   needs: ["syft-cyclonedx"]
+  cache: {}                  # no Python → the inherited pip cache is a no-op restore/upload
   script:
     - mkdir -p "${REPORTS_DIR}"
     - |
@@ -706,10 +946,14 @@ trivy-scan:
   before_script: []          # trivy image has no Python
   needs: ["setup", "vault-secrets"]
   allow_failure: true
+  cache: {}                  # no Python → the inherited pip cache is a no-op restore/upload
   script:
     - mkdir -p "${REPORTS_DIR}"
-    - trivy fs . --format json --output "${REPORTS_DIR}/trivy-fs.json" --exit-code 0
-    - trivy fs . --format table
+    # --skip-dirs .pip-cache: the restored pip HTTP cache is third-party download
+    # cruft, not our source. Scanning it produced a false-positive "JWT token"
+    # secret finding from the PyJWT docstring example. Skip it.
+    - trivy fs . --skip-dirs .pip-cache --format json --output "${REPORTS_DIR}/trivy-fs.json" --exit-code 0
+    - trivy fs . --skip-dirs .pip-cache --format table
     - |
       trivy image \
         --format json \
@@ -734,9 +978,13 @@ model-signing-install:
       when: never
     - when: on_success
   needs: ["setup"]
-  allow_failure: true
+  # Gating (was allow_failure:true → cosmetic). This job verifies the signing
+  # toolchain installs/imports AND that the pinned cosign binary matches its
+  # published checksum; if either breaks, fail FAST here before the expensive
+  # model-integrity jobs (which each reinstall the same stack) run.
+  allow_failure: false
   script:
-    - pip install model-signing sigstore
+    - pip install "model-signing==${MODEL_SIGNING_VERSION}" "sigstore==${SIGSTORE_PY_VERSION}"
     - python -c "import model_signing; print('model-signing', model_signing.__version__)"
     - apt-get update -qq && apt-get install -y -qq curl ca-certificates
     # cosign is a Go binary — not available on PyPI
@@ -761,6 +1009,7 @@ model-fixture-download:
     - when: on_success
   needs: ["setup", "model-manifest"]
   before_script: []          # curl-only job; skip Python venv bootstrap
+  cache: {}                  # curl-only → the inherited pip cache is a no-op restore/upload
   script:
     - apt-get update -qq && apt-get install -y -qq curl ca-certificates
     - mkdir -p "${MODEL_DIR}" "${EVIDENCE_DIR}"
@@ -799,8 +1048,10 @@ model-digest:
     - when: on_success
   needs: ["model-signing-install", "model-fixture-download"]
   allow_failure: true
+  # The digest loop is pure sha256sum/find — no Python deps, no pip cache needed.
+  # (Was reinstalling model-signing here and never using it; removed.)
+  cache: {}
   script:
-    - pip install model-signing
     - mkdir -p "${EVIDENCE_DIR}"
     - |
       touch "${EVIDENCE_DIR}/model-digests.txt"
@@ -809,7 +1060,12 @@ model-digest:
         while IFS= read -r -d '' f; do
           MODEL_FOUND=1
           sha256=$(sha256sum "$f" | awk '{print $1}')
-          echo "${f}  sha256:${sha256}" | tee -a "${EVIDENCE_DIR}/model-digests.txt"
+          # Fix #32 (root): record REPO-RELATIVE paths, not the absolute /builds/… find
+          # path. The recorded string flows verbatim into sign-evidence recorded_digests
+          # (#40-F4) and the AI-BOM artifact.path / bom-ref (#41-F5); a relative path
+          # clears both at the source. Strip the project dir if $f is under it.
+          rel="${f#${CI_PROJECT_DIR}/}"
+          echo "${rel}  sha256:${sha256}" | tee -a "${EVIDENCE_DIR}/model-digests.txt"
         done < <(find "${MODEL_DIR}" -type f -name "*.${ext}" -print0 2>/dev/null)
       done
       if [ "${MODEL_FOUND}" -eq 0 ]; then
@@ -833,7 +1089,7 @@ model-sign:
     SIGSTORE_ID_TOKEN:
       aud: "sigstore"
   script:
-    - pip install model-signing sigstore
+    - pip install "model-signing==${MODEL_SIGNING_VERSION}" "sigstore==${SIGSTORE_PY_VERSION}"
     - |
       if [ -n "${MODEL_SIGNING_IDENTITY:-}" ]; then
         echo "MODEL_SIGNING_IDENTITY is configured"
@@ -854,13 +1110,21 @@ model-sign:
           --signature "${model_dir}/model.sig"
       done < <(find "${MODEL_DIR}" -mindepth 1 -maxdepth 1 -type d -print0 2>/dev/null)
       if [ "${SIG_COUNT}" -eq 0 ]; then
-        echo "No model directories found under ${MODEL_DIR} — signing skipped"
+        # Distinguish "no models to sign" (ok) from "models present but unsigned" (fail).
+        MODEL_FILES=$(find "${MODEL_DIR}" -type f ! -name "model.sig" -print -quit 2>/dev/null)
+        if [ -n "${MODEL_FILES}" ]; then
+          echo "ERROR: model files present under ${MODEL_DIR} but no model directory was signed"
+          exit 1
+        fi
+        echo "No model directories found under ${MODEL_DIR} — nothing to sign"
       fi
   artifacts:
     paths:
       - "${MODEL_DIR}/**/model.sig"
     expire_in: 30 days
-  allow_failure: true  # skips gracefully when MODEL_DIR is empty; remove once models are present
+  # Gating (was allow_failure:true). A signing failure must NOT pass green and then
+  # leave signature-verification with zero sigs to verify (it would pass vacuously).
+  allow_failure: false
 
 sigstore-identity-discover:
   stage: model-integrity
@@ -876,7 +1140,7 @@ sigstore-identity-discover:
     SIGSTORE_ID_TOKEN:
       aud: "sigstore"
   script:
-    - pip install --quiet model-signing sigstore cryptography
+    - pip install --quiet "model-signing==${MODEL_SIGNING_VERSION}" "sigstore==${SIGSTORE_PY_VERSION}" cryptography
     - mkdir -p .sigstore-identity-discover/probe
     - echo "sigstore identity probe" > .sigstore-identity-discover/probe/probe.txt
     - |
@@ -932,17 +1196,41 @@ signature-verification:
     - when: on_success
   needs: ["model-sign", "model-fixture-download", "vault-secrets"]
   script:
-    - pip install model-signing sigstore
+    - pip install "model-signing==${MODEL_SIGNING_VERSION}" "sigstore==${SIGSTORE_PY_VERSION}"
+    - mkdir -p "${EVIDENCE_DIR}"
     - |
-      if [ -n "${MODEL_SIGNING_IDENTITY:-}" ]; then
-        echo "MODEL_SIGNING_IDENTITY is configured"
-      else
-        echo "MODEL_SIGNING_IDENTITY is not configured"
-      fi
-      if [ -n "${SIGSTORE_OIDC_ISSUER:-}" ]; then
-        echo "SIGSTORE_OIDC_ISSUER is configured"
-      else
-        echo "SIGSTORE_OIDC_ISSUER is not configured"
+      # Explainability (was: only "is configured"). Log the ACTUAL identity/issuer
+      # we verify against — these are public OIDC URIs, not secrets — so a
+      # too-permissive MODEL_SIGNING_IDENTITY is visible in the evidence.
+      # Always create the evidence files first so `artifacts: when: always` never
+      # warns "no matching files", regardless of which branch below we take.
+      : > "${EVIDENCE_DIR}/signature-verification.txt"
+      : > "${EVIDENCE_DIR}/signature-verification.jsonl"
+      echo "Verifying against:"
+      echo "  MODEL_SIGNING_IDENTITY = ${MODEL_SIGNING_IDENTITY:-<unset>}"
+      echo "  SIGSTORE_OIDC_ISSUER   = ${SIGSTORE_OIDC_ISSUER:-<unset>}"
+      echo "  CI_COMMIT_REF_PROTECTED = ${CI_COMMIT_REF_PROTECTED:-unknown} (branch ${CI_COMMIT_REF_NAME:-?})"
+      if [ -z "${MODEL_SIGNING_IDENTITY:-}" ] || [ -z "${SIGSTORE_OIDC_ISSUER:-}" ]; then
+        # The pinned identity/issuer are PROTECTED CI/CD variables — GitLab injects
+        # them only on protected branches/tags. Distinguish the two cases:
+        if [ "${CI_COMMIT_REF_PROTECTED}" = "true" ]; then
+          # Protected (enforcing) context with no identity = real misconfiguration.
+          echo "GATE FAILED: protected ref but MODEL_SIGNING_IDENTITY / SIGSTORE_OIDC_ISSUER are unset"
+          echo "  — these must be set to verify signatures against a pinned identity here."
+          exit 1
+        fi
+        # Unprotected branch: protected vars are not injected by design, so the
+        # pinned identity is genuinely unavailable. Signing still happened
+        # (model-sign uses the per-job id_token); real verification is enforced on
+        # the protected branch. This is NOT the vacuous-pass hole — it is explicitly
+        # gated on ref protection, and model.sig presence is recorded below.
+        SIG_PRESENT=$(find "${MODEL_DIR}" -name "model.sig" -print -quit 2>/dev/null)
+        printf '{"skipped":true,"reason":"unprotected-ref: pinned identity (protected vars) not injected","ref":"%s","model_sig_present":%s}\n' \
+          "${CI_COMMIT_REF_NAME:-}" "$( [ -n "${SIG_PRESENT}" ] && echo true || echo false )" \
+          | tee "${EVIDENCE_DIR}/signature-verification.jsonl"
+        echo "Signature verification DEFERRED to a protected-branch run (model.sig present: $( [ -n "${SIG_PRESENT}" ] && echo yes || echo no ))." \
+          | tee -a "${EVIDENCE_DIR}/signature-verification.txt"
+        exit 0
       fi
       SIG_COUNT=0
       while IFS= read -r -d '' sig_file; do
@@ -953,10 +1241,30 @@ signature-verification:
           --signature "${sig_file}" \
           --identity "${MODEL_SIGNING_IDENTITY}" \
           --identity_provider "${SIGSTORE_OIDC_ISSUER}"
+        # Persist WHAT was verified: cert SAN, issuer, Rekor logIndex, signed+recomputed digest
+        python3 "${GAIPS_MATERIALS_DIR}/scripts/explain_signature.py" \
+          --bundle "${sig_file}" --model-dir "${model_dir}" \
+          --json-out "${EVIDENCE_DIR}/signature-verification.jsonl" \
+          | tee -a "${EVIDENCE_DIR}/signature-verification.txt"
       done < <(find "${MODEL_DIR}" -name "model.sig" -print0 2>/dev/null)
       if [ "${SIG_COUNT}" -eq 0 ]; then
-        echo "No model.sig files found — signature verification skipped"
+        # Vacuous-pass hole: passing green on zero signatures while models exist means
+        # a silent signing failure verifies nothing. Fail unless there is truly no model.
+        MODEL_FILES=$(find "${MODEL_DIR}" -type f ! -name "model.sig" -print -quit 2>/dev/null)
+        if [ -n "${MODEL_FILES}" ]; then
+          echo "GATE FAILED: model files present under ${MODEL_DIR} but NO model.sig to verify"
+          echo "  (invariant: models exist ⇒ a verified signature must exist)"
+          exit 1
+        fi
+        echo "No model.sig files and no model files — nothing to verify"
       fi
+      echo "signature-verification: ${SIG_COUNT} signature(s) verified against the pinned identity"
+  artifacts:
+    when: always
+    paths:
+      - "${EVIDENCE_DIR}/signature-verification.txt"
+      - "${EVIDENCE_DIR}/signature-verification.jsonl"
+    expire_in: 90 days
 
 tamper-verification:
   stage: model-integrity
@@ -965,7 +1273,13 @@ tamper-verification:
       when: never
     - when: on_success
   needs: ["model-digest"]
-  allow_failure: true
+  # Gating (was allow_failure:true, which neutered the sys.exit(1) on detected
+  # tamper — the unique cross-pipeline DRIFT check would detect a mismatch and
+  # still pass green). First run seeds the baseline and passes; only a genuine
+  # baseline≠current mismatch fails. NOTE: set VAULT_ADDR (CI/CD variables) so the
+  # baseline is durable — without it the file baseline lives only in a best-effort
+  # cache that silently re-seeds to current on eviction (no cross-pipeline guarantee).
+  allow_failure: false
   # Persist the file-mode baseline across pipelines (best-effort; Vault is the
   # durable path). Fixed key (not ref-slug) so every run shares one baseline.
   cache:
@@ -1057,21 +1371,49 @@ tamper-verification:
           print("Cached tamper baseline only recorded an empty model directory — reseeding with current model digests")
           baseline = current
 
-      # Always write the file copy (fallback + local diff evidence)
-      baseline_file.write_text(baseline or "")
+      # ── Comparison (content-based, path-insensitive) ─────────────────────────
+      # Compare the SET of sha256 digests, NOT the full "<path>  sha256:<hash>"
+      # lines. The recorded path is environment-dependent (Fix #32 moved it from
+      # the absolute /builds/… runner path to a repo-relative one), so a path-format
+      # or runner-layout change must NOT read as tampering — only a content-hash
+      # change (or a model file added/removed) is real tamper. Comparing lines
+      # verbatim made the #32 path change false-positive against a pre-#32 baseline.
+      def digest_set(text):
+          out = set()
+          marker = "sha256:"
+          for line in (text or "").splitlines():
+              idx = line.find(marker)
+              if idx != -1:
+                  out.add(line[idx + len(marker):].strip())
+          return out
 
-      # ── Comparison ──────────────────────────────────────────────────────────
-      if baseline and current and baseline.strip() != current.strip():
-          import difflib
-          diff = "".join(difflib.unified_diff(
-              baseline.splitlines(keepends=True),
-              current.splitlines(keepends=True),
-              fromfile="baseline", tofile="current",
-          ))
-          print("TAMPER DETECTED — digest mismatch:\n" + diff)
+      base_digests = digest_set(baseline)
+      cur_digests  = digest_set(current)
+
+      if base_digests and cur_digests and base_digests != cur_digests:
+          for h in sorted(base_digests - cur_digests):
+              print(f"TAMPER DETECTED — digest in baseline missing from current: sha256:{h}")
+          for h in sorted(cur_digests - base_digests):
+              print(f"TAMPER DETECTED — digest in current not in baseline:     sha256:{h}")
           sys.exit(1)
 
       print("Tamper check PASSED — digests match baseline")
+
+      # Migrate the stored baseline to the current (relative-path) form once the
+      # CONTENT matches, so the cache/Vault stop carrying the stale absolute-path
+      # format. (Previously wrote `baseline` back verbatim → it never self-healed,
+      # so the #32 path change would re-trigger the diff on every run.)
+      baseline_file.write_text(current or baseline or "")
+      if vault_addr and (baseline or "").strip() != (current or "").strip():
+          try:
+              client.secrets.kv.v2.create_or_update_secret(
+                  mount_point="secret", path=f"gaips/tamper-baseline/{project_slug}",
+                  secret={"digests": current},
+              )
+              print("Migrated tamper baseline format in Vault (content unchanged)")
+          except Exception as exc:
+              print(f"WARN: Vault baseline migrate failed ({exc})")
+
       (evidence_dir / "integrity.env").write_text("tamper_check_passed=true\n")
       PYEOF
   artifacts:
@@ -1141,6 +1483,12 @@ modelaudit-scan:
       when: never
     - when: on_success
   image: python:3.11-slim
+  # modelaudit[all] pulls heavy ML frameworks (tensorflow/torch/…); on a saas-linux-small
+  # runner its install + the ~750 MB model fixture overflow the ephemeral disk ([Errno 28],
+  # even with --no-cache-dir). A medium runner has the disk headroom. cache:{} drops the
+  # inherited pip cache this job restores but can't use (it installs with --no-cache-dir).
+  tags: ["saas-linux-medium-amd64"]
+  cache: {}
   before_script: []
   needs: ["modelscan", "model-fixture-download"]
   variables:
@@ -1148,8 +1496,11 @@ modelaudit-scan:
     PROMPTFOO_DISABLE_TELEMETRY: "1"
   script:
     - python3 -c "import sys; assert sys.version_info >= (3, 10), 'modelaudit requires Python >=3.10'"
-    - pip install --quiet --upgrade pip setuptools wheel
-    - pip install --quiet "modelaudit[all]>=0.2.47"
+    # --no-cache-dir: don't keep a second copy of the wheels in pip's cache. modelaudit[all]
+    # is a heavy install and shares the small runner's ephemeral disk with the ~750 MB model
+    # fixture artifact — caching doubled the wheel footprint and tripped [Errno 28] no-space.
+    - pip install --quiet --no-cache-dir --upgrade pip setuptools wheel
+    - pip install --quiet --no-cache-dir "modelaudit[all]==${MODELAUDIT_VERSION}"
     - python3 -c "import importlib.metadata as m; print('modelaudit', m.version('modelaudit'))"
     - mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"
     - |
@@ -1215,9 +1566,18 @@ modelaudit-scan:
       with open(summary_path, "w") as f:
           json.dump(summary, f, indent=2)
       print(f"ModelAudit: CRITICAL={critical} WARNING={warning} INFO={info} exit={audit_exit}")
+      # Gate logic — modelaudit exit contract: 0=clean, 1=warning/CRITICAL found,
+      # 2=operational error / no files. The previous version re-raised ONLY exit 2
+      # and IGNORED exit 1, so a CRITICAL passed green. Enforce on findings too.
       if audit_exit == 2:
-          print("ModelAudit operational failure — failing job")
+          print("ModelAudit operational failure (could not scan) — failing job")
           sys.exit(2)
+      if critical > 0:
+          print(f"ModelAudit reported {critical} CRITICAL finding(s) — failing job")
+          sys.exit(1)
+      if audit_exit == 1:
+          print(f"ModelAudit reported findings (exit 1: {warning} warning(s)) — failing job")
+          sys.exit(1)
       PYEOF
   artifacts:
     when: always
@@ -1226,7 +1586,9 @@ modelaudit-scan:
       - "${REPORTS_DIR}/modelaudit-summary.json"
       - "${REPORTS_DIR}/modelaudit.log"
     expire_in: 7 days
-  allow_failure: true
+  # Enforcing: the gate above (op-error / CRITICAL / findings) must be able to fail
+  # the pipeline. Was allow_failure:true, which let a CRITICAL pass green.
+  allow_failure: false
 
 modelfile-audit:
   stage: model-integrity
@@ -1236,6 +1598,7 @@ modelfile-audit:
     - when: on_success
   needs: ["setup"]
   allow_failure: true
+  cache: {}             # stdlib-only Python → the inherited pip cache is a no-op restore/upload
   script:
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}"
     - |
@@ -1301,6 +1664,7 @@ clamav-scan:
   image: "${IMAGE_CLAMAV}"
   before_script: []          # clamav image has no Python — skip .python-secure
   needs: ["model-signing-install", "model-fixture-download"]
+  cache: {}                  # no Python → the inherited pip cache is a no-op restore/upload
   script:
     - mkdir -p "${REPORTS_DIR}" "${MODEL_DIR}"
     - |
@@ -1311,10 +1675,13 @@ clamav-scan:
       echo "=== ClamAV model scan ==="
       id
       ls -la "${MODEL_DIR}"
+      # NOTE: --no-summary was removed. This is the only malware control that HARD
+      # GATES, so its evidence must prove the scan actually happened: the summary
+      # records "Known viruses" (DB loaded) and "Scanned files" (the bytes were read).
+      # Without it, a clean 718MiB scan and a zero-file scan emit identical evidence.
       clamscan \
         --recursive \
         --infected \
-        --no-summary \
         --max-filesize=2047M \
         --max-scansize=2047M \
         --log="${REPORTS_DIR}/clamav-model.log" \
@@ -1330,10 +1697,14 @@ clamav-scan:
       else
         INFECTED=0
       fi
-      printf '{"scanned_dir":"%s","infected":%s,"exit_code":%s}\n' \
-        "${MODEL_DIR}" "${INFECTED}" "${CLAM_EXIT}" \
+      # Parse the summary so green can't mean "scanned nothing". Lenient extraction
+      # (tolerates spacing); empty = couldn't parse, which we handle separately from 0.
+      SCANNED=$(grep -oE 'Scanned files: *[0-9]+' "${REPORTS_DIR}/clamav-model.txt" "${REPORTS_DIR}/clamav-model.log" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+      SIGS=$(grep -oE 'Known viruses: *[0-9]+' "${REPORTS_DIR}/clamav-model.txt" "${REPORTS_DIR}/clamav-model.log" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+      printf '{"scanned_dir":"%s","infected":%s,"scanned_files":%s,"known_viruses":%s,"exit_code":%s}\n' \
+        "${MODEL_DIR}" "${INFECTED}" "${SCANNED:-null}" "${SIGS:-null}" "${CLAM_EXIT}" \
         > "${REPORTS_DIR}/clamav-model.json"
-      echo "ClamAV: ${INFECTED} infected file(s) | exit ${CLAM_EXIT}"
+      echo "ClamAV: ${INFECTED} infected | ${SCANNED:-?} file(s) scanned | ${SIGS:-?} signature(s) loaded | exit ${CLAM_EXIT}"
       if [ "${CLAM_EXIT}" -eq 1 ]; then
         echo "INFECTED — see report"
         exit 1
@@ -1341,7 +1712,23 @@ clamav-scan:
         echo "clamscan ERROR (exit ${CLAM_EXIT})"
         exit "${CLAM_EXIT}"
       fi
-      echo "clean"
+      # Empty-scan guard. Only fail on a POSITIVELY-empty scan; if the summary
+      # couldn't be parsed, fall back to a file-count so a format quirk can't
+      # false-fail this hard gate over a genuinely clean run.
+      if [ -n "${SCANNED}" ]; then
+        if [ "${SCANNED}" -lt 1 ]; then
+          echo "GATE FAILED: ClamAV reported 0 files scanned — a hard gate must not pass over an empty scan"
+          exit 1
+        fi
+      else
+        FILE_COUNT=$(find "${MODEL_DIR}" -type f 2>/dev/null | wc -l | tr -d ' ')
+        echo "WARNING: could not parse ClamAV 'Scanned files' summary; MODEL_DIR file count=${FILE_COUNT}"
+        if [ "${FILE_COUNT}" -lt 1 ]; then
+          echo "GATE FAILED: nothing under ${MODEL_DIR} to scan"
+          exit 1
+        fi
+      fi
+      echo "clean (${SCANNED} file(s) scanned)"
   artifacts:
     paths:
       - "${REPORTS_DIR}/clamav-model.log"
@@ -1350,109 +1737,106 @@ clamav-scan:
     expire_in: 7 days
   allow_failure: false
 
+# HuggingFace PROVENANCE / POLICY gate (rewritten). The old job installed a
+# ~73-pkg apt ClamAV stack + modelscan and re-downloaded each repo BEFORE checking
+# HF_MODEL_IDS — then usually skipped, paying the whole cost for nothing, and never
+# gated. Local model bytes are already covered by clamav-scan #24, model-digest #16,
+# and model-sign/verify #18/#19, so re-scanning HF downloads here is redundant. What
+# the HF API uniquely offers is PROVENANCE the local scans can't see: this gate uses
+# huggingface_hub.model_info to enforce policy on EXTERNAL repos — disabled kill-switch,
+# author allowlist, and a pinned commit sha — without re-downloading the weights.
+# (modelscan #21 is intentionally left as the local pickle/.pth scanner — not touched.)
 hf-artifact-scan:
   stage: model-integrity
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  needs: ["model-signing-install", "vault-secrets"]
+  needs: ["setup", "vault-secrets"]
   script:
-    - apt-get update -qq && apt-get install -y -qq clamav clamav-freshclam
-    - |
-      freshclam --quiet || echo "WARNING: ClamAV DB update failed — using cached DB"
-    - pip install huggingface_hub modelscan
-    - mkdir -p "${REPORTS_DIR}/hf-scan" "${CI_PROJECT_DIR}/.hf-cache"
+    # Guard FIRST — HF policy gating is genuinely opt-in (no external repos to gate
+    # unless HF_MODEL_IDS is set). Skip BEFORE any install so an unset var is free.
+    - mkdir -p "${REPORTS_DIR}/hf-scan"
     - |
       if [ -z "${HF_MODEL_IDS}" ]; then
-        echo "HF_MODEL_IDS not set — skipping HuggingFace artifact scan"
-        echo '{"skipped":true,"scanned":[]}' > "${REPORTS_DIR}/hf-scan/summary.json"
+        echo "HF_MODEL_IDS not set — no external HF repos to gate (skipping, by design)"
+        echo '{"skipped":true,"reason":"HF_MODEL_IDS not set","gated":[]}' > "${REPORTS_DIR}/hf-scan/summary.json"
         exit 0
       fi
+    - pip install "huggingface_hub"
     - |
       python - <<'PYEOF'
-      import json, os, subprocess, sys
-      from huggingface_hub import snapshot_download, model_info
+      import json, os, sys
+      from huggingface_hub import model_info
       from pathlib import Path
 
       model_ids = [m.strip() for m in os.environ["HF_MODEL_IDS"].split(",") if m.strip()]
-      cache_dir  = Path(os.environ["CI_PROJECT_DIR"]) / ".hf-cache"
       report_dir = Path(os.environ["REPORTS_DIR"]) / "hf-scan"
       token      = os.environ.get("HF_TOKEN") or None
+
+      allow_authors = {a.strip() for a in os.environ.get("HF_AUTHOR_ALLOWLIST", "").split(",") if a.strip()}
+      pinned = {}
+      for item in os.environ.get("HF_PINNED_SHAS", "").split(","):
+          if "=" in item:
+              k, v = item.split("=", 1)
+              pinned[k.strip()] = v.strip()
 
       results = []
       exit_code = 0
 
       for model_id in model_ids:
-          print(f"\n=== HF scan: {model_id} ===")
-          slug   = model_id.replace("/", "--")
-          record = {"model_id": model_id, "card_meta": None, "modelscan": None, "error": None}
-
+          print(f"\n=== HF provenance gate: {model_id} ===")
+          record = {"model_id": model_id, "violations": []}
           try:
-              info = model_info(model_id, token=token)
-              record["card_meta"] = {
-                  "pipeline_tag": getattr(info, "pipeline_tag", None),
-                  "tags":         list(getattr(info, "tags", []) or []),
-                  "gated":        getattr(info, "gated", False),
-                  "downloads":    getattr(info, "downloads", None),
-              }
+              info = model_info(model_id, token=token, files_metadata=False)
+              author = (model_id.split("/")[0] if "/" in model_id else getattr(info, "author", None))
+              sha = getattr(info, "sha", None)
+              disabled = bool(getattr(info, "disabled", False))
+              gated = getattr(info, "gated", False)
+              siblings = [s.rfilename for s in (getattr(info, "siblings", []) or [])]
+              record.update({
+                  "author": author, "sha": sha, "disabled": disabled,
+                  "gated": gated, "private": bool(getattr(info, "private", False)),
+                  "files": len(siblings),
+              })
+              print(f"  author={author} sha={sha} disabled={disabled} gated={gated} files={len(siblings)}")
 
-              local_dir = cache_dir / slug
-              snapshot_download(
-                  repo_id=model_id,
-                  local_dir=str(local_dir),
-                  ignore_patterns=["*.md", "*.txt", "*.yaml", "tokenizer*", "vocab*"],
-                  token=token,
-              )
-
-              # ClamAV: malware signature scan of downloaded files
-              clam = subprocess.run(
-                  ["clamscan", "--recursive", "--infected", "--no-summary",
-                   "--max-filesize=2047M", "--max-scansize=2047M", str(local_dir)],
-                  capture_output=True, text=True,
-              )
-              clam_infected = clam.stdout.count(" FOUND")
-              record["clamav"] = {"exit_code": clam.returncode, "infected": clam_infected}
-              if clam.returncode == 1:
-                  print(f"ClamAV THREATS DETECTED in {model_id}: {clam_infected} infected file(s)")
-                  exit_code = 1
-
-              scan_out = report_dir / f"{slug}-modelscan.json"
-              proc = subprocess.run(
-                  ["modelscan", "scan", "--path", str(local_dir),
-                   "--reporting-format", "json", "--output-file", str(scan_out)],
-                  capture_output=True, text=True,
-              )
-              if scan_out.exists():
-                  record["modelscan"] = json.load(open(scan_out))
-                  critical = int(
-                      record["modelscan"]
-                      .get("summary", {})
-                      .get("total_issues_by_severity", {})
-                      .get("CRITICAL", 0)
-                  )
-                  if critical:
-                      print(f"CRITICAL issues found in {model_id}")
-                      exit_code = 1
+              # Policy: disabled repos are a hard fail (moderation kill-switch).
+              if disabled:
+                  record["violations"].append("repo is disabled on the Hub (moderation kill-switch)")
+              # Policy: author must be on the allowlist when one is configured.
+              if allow_authors and author not in allow_authors:
+                  record["violations"].append(f"author '{author}' not in HF_AUTHOR_ALLOWLIST")
+              # Policy: live sha must match the pin when one is configured.
+              want = pinned.get(model_id)
+              if want and sha and want != sha:
+                  record["violations"].append(f"sha mismatch — pinned {want}, live {sha}")
 
           except Exception as exc:
-              record["error"] = str(exc)
-              print(f"ERROR: {exc}")
+              record["violations"].append(f"model_info failed: {exc}")
+              print(f"  ERROR: {exc}")
 
+          if record["violations"]:
+              exit_code = 1
+              for v in record["violations"]:
+                  print(f"  POLICY VIOLATION: {v}")
+          else:
+              print("  OK — provenance policy satisfied")
           results.append(record)
 
-      summary = {"skipped": False, "scanned": results}
+      summary = {"skipped": False, "gated": results}
       with open(report_dir / "summary.json", "w") as f:
           json.dump(summary, f, indent=2, default=str)
-
-      print(f"\nHF artifact scan complete — {len(results)} model(s) checked")
+      print(f"\nHF provenance gate complete — {len(results)} repo(s) checked, exit {exit_code}")
       sys.exit(exit_code)
       PYEOF
   artifacts:
+    when: always
     paths:
       - "${REPORTS_DIR}/hf-scan/"
     expire_in: 7 days
-  allow_failure: true
+  # Gating: a disabled repo / disallowed author / sha drift must fail the pipeline.
+  allow_failure: false
 
 dataset-download:
   stage: model-integrity
@@ -1462,11 +1846,21 @@ dataset-download:
     - when: on_success
   needs: ["setup", "vault-secrets"]
   allow_failure: true   # skips gracefully when DATASET_FILENAME is not set
+  cache: {}             # curl/cp-only → the inherited pip cache is a no-op restore/upload
   script:
     - mkdir -p "${EVIDENCE_DIR}/dataset-input" "${REPORTS_DIR}"
     - |
+      # Honour the chain escape hatch HERE so it actually works end-to-end: if the
+      # dataset chain is disabled, stage NO fixture, so every downstream gate hits
+      # its DATASETS_DISABLED skip branch (exit 0) rather than running on a fixture.
+      if [ "${DATASETS_DISABLED}" = "true" ]; then
+        echo "DATASETS_DISABLED=true — dataset chain disabled; staging no dataset"
+        echo '{"skipped":true,"reason":"datasets-disabled"}' > "${REPORTS_DIR}/dataset-download.json"
+        exit 0
+      fi
+    - |
       if [ -z "${DATASET_FILENAME}" ]; then
-        DATASET_FILENAME="ci-dataset.jsonl"
+        DATASET_FILENAME="${DATASET_FIXTURE_FILE:-ci-dataset.jsonl}"
         FIXTURE_DATASET="${GAIPS_MATERIALS_DIR}/evals/${DATASET_FILENAME}"
         DATASET_PATH="${EVIDENCE_DIR}/dataset-input/${DATASET_FILENAME}"
         echo "DATASET_FILENAME not set — using committed CI dataset fixture: ${FIXTURE_DATASET}"
@@ -1474,12 +1868,35 @@ dataset-download:
         DIGEST=$(sha256sum "${DATASET_PATH}" | awk '{print $1}')
         SIZE_BYTES=$(wc -c < "${DATASET_PATH}" | tr -d ' ')
         echo "${DATASET_FILENAME}  sha256:${DIGEST}" | tee "${EVIDENCE_DIR}/dataset-digest.txt"
+        # Tamper gate for the committed fixture: when DATASET_EXPECTED_SHA256 is pinned
+        # (from evals/dataset-baseline.json), the staged fixture must match it — any
+        # edit to the committed dataset trips the pipeline. This is the raw, pre-redaction
+        # digest, so it is unaffected by Presidio's non-deterministic redaction.
+        if [ -n "${DATASET_EXPECTED_SHA256}" ] && [ "${DIGEST}" != "${DATASET_EXPECTED_SHA256}" ]; then
+          echo "ERROR: fixture SHA-256 mismatch — expected ${DATASET_EXPECTED_SHA256}, got ${DIGEST}"
+          echo "       The committed dataset changed without updating its baseline pin."
+          exit 1
+        fi
+        [ -n "${DATASET_EXPECTED_SHA256}" ] && echo "Fixture integrity verified against DATASET_EXPECTED_SHA256"
         printf '{"skipped":false,"fixture":true,"file":"%s","size_bytes":%s,"sha256":"%s"}\n' \
           "${DATASET_FILENAME}" "${SIZE_BYTES}" "${DIGEST}" \
           > "${REPORTS_DIR}/dataset-download.json"
         echo "Dataset fixture staged: ${DATASET_FILENAME} (${SIZE_BYTES} bytes)"
         exit 0
       fi
+    - |
+      # Download mode requires an integrity pin (mirrors the always-on model
+      # fixture check). Without DATASET_EXPECTED_SHA256 a downloaded dataset would
+      # be accepted unverified — fail unless the operator explicitly opts out.
+      if [ -z "${DATASET_EXPECTED_SHA256}" ] && [ "${DATASET_ALLOW_UNVERIFIED}" != "true" ]; then
+        echo "ERROR: download mode requires DATASET_EXPECTED_SHA256 (the dataset integrity pin)."
+        echo "       Set it to the expected sha256, or set DATASET_ALLOW_UNVERIFIED=true to accept"
+        echo "       an unverified download (NOT recommended)."
+        exit 1
+      fi
+    # python:3.11-slim ships no curl — install it before the registry download.
+    # (Only reached in download mode; the fixture path above uses cp and exits first.)
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
     - |
       DOWNLOAD_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${DATASET_PACKAGE_NAME}/${DATASET_PACKAGE_VERSION}/${DATASET_FILENAME}"
       echo "Downloading: ${DOWNLOAD_URL}"
@@ -1491,9 +1908,14 @@ dataset-download:
       FILEPATH="${EVIDENCE_DIR}/dataset-input/${DATASET_FILENAME}"
       DIGEST=$(sha256sum "${FILEPATH}" | awk '{print $1}')
       echo "${DATASET_FILENAME}  sha256:${DIGEST}" | tee "${EVIDENCE_DIR}/dataset-digest.txt"
-      if [ -n "${DATASET_EXPECTED_SHA256}" ] && [ "${DIGEST}" != "${DATASET_EXPECTED_SHA256}" ]; then
-        echo "ERROR: SHA-256 mismatch — expected ${DATASET_EXPECTED_SHA256}, got ${DIGEST}"
-        exit 1
+      if [ -n "${DATASET_EXPECTED_SHA256}" ]; then
+        if [ "${DIGEST}" != "${DATASET_EXPECTED_SHA256}" ]; then
+          echo "ERROR: SHA-256 mismatch — expected ${DATASET_EXPECTED_SHA256}, got ${DIGEST}"
+          exit 1
+        fi
+        echo "Dataset integrity verified against DATASET_EXPECTED_SHA256"
+      else
+        echo "WARNING: DATASET_ALLOW_UNVERIFIED=true — accepting downloaded dataset WITHOUT a hash pin"
       fi
     - |
       python3 - <<'PYEOF'
@@ -1528,17 +1950,27 @@ dataset-scan:
     - when: on_success
   needs: ["dataset-download"]
   allow_failure: false   # hard gate — dataset must be clean before reaching eval jobs
+  cache: {}              # AV scan via apt clamav, no pip → the inherited pip cache is a no-op
   script:
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/dataset-input"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -type f -print -quit 2>/dev/null)
       if [ -z "${DATASET_FILE}" ]; then
-        echo "No dataset file present — skipping scan"
-        echo '{"skipped":true}' > "${REPORTS_DIR}/dataset-scan.json"
-        exit 0
+        if [ "${DATASETS_DISABLED}" = "true" ]; then
+          echo "Dataset chain disabled (DATASETS_DISABLED=true) — scan skipped"
+          echo '{"skipped":true,"reason":"datasets-disabled"}' > "${REPORTS_DIR}/dataset-scan.json"
+          exit 0
+        fi
+        echo "ERROR: no dataset from dataset-download but the chain is enabled — broken chain, not a skip"
+        echo '{"skipped":false,"error":"expected-but-missing dataset (broken chain)"}' > "${REPORTS_DIR}/dataset-scan.json"
+        exit 1
       fi
       echo "Scanning: ${DATASET_FILE}"
-    - apt-get update -qq && apt-get install -y -qq clamav clamav-freshclam
+    # --no-install-recommends drops the ~73-pkg recommended stack (exim4 MTA et al.)
+    # that plain `apt-get install clamav` pulled in to scan a few bytes. The job
+    # stays on python:3.11-slim because the structural JSONL gate below needs
+    # python3 (the clamav/clamav image, used by clamav-scan #24, ships no Python).
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends clamav clamav-freshclam ca-certificates
     - |
       freshclam --quiet 2>&1 | tail -3 || echo "WARNING: freshclam update failed — using cached DB"
     - |
@@ -1549,9 +1981,10 @@ dataset-scan:
       echo "dataset-input listing:"
       ls -la "${EVIDENCE_DIR}/dataset-input"
       set +e
+      # --no-summary removed: this is a hard gate, so the evidence must show the DB
+      # loaded ("Known viruses") and the file was read ("Scanned files").
       clamscan \
         --infected \
-        --no-summary \
         --log="${REPORTS_DIR}/dataset-clamav.log" \
         "${DATASET_FILE}" \
         2>&1 | tee "${REPORTS_DIR}/clamav-dataset.txt"
@@ -1563,10 +1996,12 @@ dataset-scan:
       else
         INFECTED=0
       fi
-      printf '{"scanned_file":"%s","infected":%s,"exit_code":%s}\n' \
-        "${DATASET_FILE}" "${INFECTED}" "${CLAM_EXIT}" \
+      SCANNED=$(grep -oE 'Scanned files: *[0-9]+' "${REPORTS_DIR}/clamav-dataset.txt" "${REPORTS_DIR}/dataset-clamav.log" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+      SIGS=$(grep -oE 'Known viruses: *[0-9]+' "${REPORTS_DIR}/clamav-dataset.txt" "${REPORTS_DIR}/dataset-clamav.log" 2>/dev/null | grep -oE '[0-9]+' | tail -1)
+      printf '{"scanned_file":"%s","infected":%s,"scanned_files":%s,"known_viruses":%s,"exit_code":%s}\n' \
+        "${DATASET_FILE}" "${INFECTED}" "${SCANNED:-null}" "${SIGS:-null}" "${CLAM_EXIT}" \
         > "${REPORTS_DIR}/dataset-clamav.json"
-      echo "ClamAV: ${INFECTED} infected file(s) | exit ${CLAM_EXIT}"
+      echo "ClamAV: ${INFECTED} infected | ${SCANNED:-?} file(s) scanned | ${SIGS:-?} signature(s) loaded | exit ${CLAM_EXIT}"
       if [ "${CLAM_EXIT}" -eq 1 ]; then
         echo "INFECTED — see report above"
         exit 1
@@ -1574,7 +2009,18 @@ dataset-scan:
         echo "clamscan ERROR (exit ${CLAM_EXIT})"
         exit "${CLAM_EXIT}"
       fi
-      echo "clean"
+      # Empty-scan guard, with a fall back so a summary-parse miss can't false-fail
+      # this hard gate (the dataset file is known to exist from the guard above).
+      if [ -n "${SCANNED}" ]; then
+        if [ "${SCANNED}" -lt 1 ]; then
+          echo "GATE FAILED: ClamAV reported 0 files scanned — a hard gate must not pass over an empty scan"
+          exit 1
+        fi
+      else
+        echo "WARNING: could not parse ClamAV 'Scanned files' summary; verifying the target file is non-empty"
+        [ -s "${DATASET_FILE}" ] || { echo "GATE FAILED: dataset file ${DATASET_FILE} is empty/missing"; exit 1; }
+      fi
+      echo "clean (${SCANNED:-?} file(s) scanned)"
     - |
       python3 - <<'PYEOF'
       import json, os, pathlib, sys
@@ -1644,9 +2090,13 @@ dataset-redact:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  needs: ["dataset-scan"]
-  # Fail-closed: a redaction tooling failure must NOT let unredacted data through.
-  # The job still exits 0 cleanly when no dataset is configured (skip path below).
+  # needs BOTH: dataset-scan gives the clean-gate ordering edge; dataset-download
+  # carries the actual evidence/dataset-input/ artifact (dataset-scan republishes
+  # only its reports). Without dataset-download here, redact got an empty input and
+  # skipped green — starving validate/GX/profile/sign down the chain.
+  needs: ["dataset-scan", "dataset-download"]
+  # Fail-closed: a redaction tooling failure must NOT let unredacted data through,
+  # AND a missing-but-expected dataset (broken chain) must FAIL — not skip green.
   allow_failure: false
   variables:
     # Data is always redacted; the job then HARD-FAILS if findings exceed these.
@@ -1659,10 +2109,20 @@ dataset-redact:
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
         ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
-        echo "No dataset file present — redaction skipped"
-        echo '{"skipped":true}' > "${REPORTS_DIR}/dataset-redact.json"
-        exit 0
+        if [ "${DATASETS_DISABLED}" = "true" ]; then
+          echo "Dataset chain disabled (DATASETS_DISABLED=true) — redaction skipped"
+          echo '{"skipped":true,"reason":"datasets-disabled"}' > "${REPORTS_DIR}/dataset-redact.json"
+          exit 0
+        fi
+        echo "ERROR: no dataset under dataset-input/ but the chain is enabled — expected the dataset"
+        echo "       staged by dataset-download. This is a BROKEN CHAIN (check needs:/artifacts), not"
+        echo "       an intended skip. Set DATASETS_DISABLED=true only to deliberately run without data."
+        echo '{"skipped":false,"error":"expected-but-missing dataset (broken chain)"}' > "${REPORTS_DIR}/dataset-redact.json"
+        exit 1
       fi
+    # python:3.11-slim ships no curl — install it (+ CA certs) before fetching the
+    # gitleaks release. Runs only after the skip guard so a disabled chain pays nothing.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
     - |
       # Install gitleaks (Go binary) — checksum-verified against the official
       # release checksums file, same trust model as the cosign install.
@@ -1673,7 +2133,10 @@ dataset-redact:
       tar -xzf "/tmp/${TGZ}" -C /tmp gitleaks
       install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
       gitleaks version
-    - pip install "presidio-analyzer" "presidio-anonymizer"
+    # `click` is installed explicitly: spaCy's CLI imports it directly, but the
+    # presidio dependency tree pulls typer 0.26.x, which no longer hard-depends on
+    # click — so `python -m spacy download` would die with ModuleNotFoundError.
+    - pip install "presidio-analyzer" "presidio-anonymizer" "click"
     - python -m spacy download en_core_web_sm
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
@@ -1704,16 +2167,26 @@ eval-dataset-validate:
   needs: ["dataset-redact"]
   allow_failure: false   # a malformed eval dataset must stop the run (skips cleanly when no dataset)
   script:
-    - pip install jsonschema
+    # Guard BEFORE the install — an intentionally-disabled chain shouldn't pay for pip.
     - mkdir -p "${REPORTS_DIR}"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
         ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
-        echo "No eval dataset present — validation skipped (evals run on fixtures)"
-        echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/eval-dataset-validation.json"
-        exit 0
+        if [ "${DATASETS_DISABLED}" = "true" ]; then
+          echo "Dataset chain disabled (DATASETS_DISABLED=true) — schema validation skipped"
+          echo '{"skipped":true,"reason":"datasets-disabled"}' > "${REPORTS_DIR}/eval-dataset-validation.json"
+          exit 0
+        fi
+        echo "ERROR: no eval dataset present but the chain is enabled — expected dataset-redact's"
+        echo "       republished dataset-input/. Broken chain, not an intended skip."
+        echo '{"skipped":false,"error":"expected-but-missing dataset (broken chain)"}' > "${REPORTS_DIR}/eval-dataset-validation.json"
+        exit 1
       fi
+    - pip install jsonschema
+    - |
+      DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
+        ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       python3 "${GAIPS_MATERIALS_DIR}/scripts/validate_eval_dataset.py" \
         --dataset "${DATASET_FILE}" \
         --schema "${GAIPS_MATERIALS_DIR}/evals/eval-dataset.schema.json" \
@@ -1742,9 +2215,14 @@ great-expectations-validate:
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
         ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
-        echo "No dataset present — GX content gate skipped (evals run on fixtures)"
-        echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/great-expectations.json"
-        exit 0
+        if [ "${DATASETS_DISABLED}" = "true" ]; then
+          echo "Dataset chain disabled (DATASETS_DISABLED=true) — GX content gate skipped"
+          echo '{"skipped":true,"reason":"datasets-disabled"}' > "${REPORTS_DIR}/great-expectations.json"
+          exit 0
+        fi
+        echo "ERROR: no dataset present but the chain is enabled — broken chain, not an intended skip"
+        echo '{"skipped":false,"error":"expected-but-missing dataset (broken chain)"}' > "${REPORTS_DIR}/great-expectations.json"
+        exit 1
       fi
       python3 "${GAIPS_MATERIALS_DIR}/scripts/run_great_expectations.py" \
         --dataset "${DATASET_FILE}" \
@@ -1770,15 +2248,23 @@ ydata-profile:
   needs: ["dataset-redact"]
   allow_failure: true   # advisory profiling — never blocks
   script:
-    - pip install ydata-profiling pandas
+    # Pin setuptools<81: it removed the bundled pkg_resources, which ydata-profiling
+    # still imports (the shared before_script upgrades setuptools to 82). Install it
+    # first so pkg_resources is present.
+    - pip install "setuptools<81" ydata-profiling pandas
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/ydata-profile"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
         ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
-        echo "No dataset present — profiling skipped (evals run on fixtures)"
-        echo '{"skipped":true,"reason":"no dataset present"}' > "${REPORTS_DIR}/ydata-profile.json"
-        exit 0
+        if [ "${DATASETS_DISABLED}" = "true" ]; then
+          echo "Dataset chain disabled (DATASETS_DISABLED=true) — profiling skipped"
+          echo '{"skipped":true,"reason":"datasets-disabled"}' > "${REPORTS_DIR}/ydata-profile.json"
+          exit 0
+        fi
+        echo "ERROR: no dataset present but the chain is enabled — broken chain, not an intended skip"
+        echo '{"skipped":false,"error":"expected-but-missing dataset (broken chain)"}' > "${REPORTS_DIR}/ydata-profile.json"
+        exit 1
       fi
       python3 "${GAIPS_MATERIALS_DIR}/scripts/run_ydata_profile.py" \
         --dataset "${DATASET_FILE}" \
@@ -1798,7 +2284,11 @@ dataset-sign:
     - when: on_success
   # Sign only AFTER scan + redaction + schema validation — attest clean, redacted,
   # on-contract data (signs the redacted bytes, never the raw download).
-  needs: ["eval-dataset-validate"]
+  # needs BOTH: eval-dataset-validate is the ordering edge (validation must pass);
+  # dataset-redact carries the actual evidence/dataset-input/ (the redacted bytes) —
+  # eval-dataset-validate republishes only its report, so without dataset-redact
+  # here this job sees no dataset and trips the broken-chain guard.
+  needs: ["eval-dataset-validate", "dataset-redact"]
   allow_failure: true   # skips gracefully when no dataset is present
   # aud "sigstore" is required by Fulcio for keyless signing (same as model-sign).
   id_tokens:
@@ -1810,10 +2300,16 @@ dataset-sign:
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
         ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       if [ -z "${DATASET_FILE}" ]; then
-        echo "No dataset file present — signing skipped"
-        exit 0
+        if [ "${DATASETS_DISABLED}" = "true" ]; then
+          echo "Dataset chain disabled (DATASETS_DISABLED=true) — dataset signing skipped"
+          exit 0
+        fi
+        echo "ERROR: no dataset to sign but the chain is enabled — broken chain, not an intended skip"
+        exit 1
       fi
       echo "Signing dataset: ${DATASET_FILE}"
+    # python:3.11-slim ships no curl — install it (+ CA certs) before fetching cosign.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
     - |
       # Install cosign (Go binary, not on PyPI) — checksum-verified, as elsewhere.
       curl -sSfL \
@@ -1851,9 +2347,10 @@ artifact-signing-gate:
     - when: on_success
   needs: ["signature-verification", "tamper-verification", "modelscan", "modelaudit-scan", "modelfile-audit", "clamav-scan", "hf-artifact-scan", "dataset-scan", "eval-dataset-validate"]
   # Enforcing chokepoint: no eval job runs unless model integrity passed. The
-  # tamper job is allow_failure so it stays green and THIS gate makes the call —
-  # but on a real tamper it never writes integrity.env, so a missing file here
-  # fails closed. (Do NOT set allow_failure:true — that would make the gate a no-op.)
+  # tamper job now hard-gates on its own (allow_failure:false), so a real tamper
+  # already blocks upstream; this gate is the defence-in-depth backstop — on a
+  # missing integrity.env (tamper job never wrote it) it still fails closed.
+  # (Do NOT set allow_failure:true — that would make the gate a no-op.)
   allow_failure: false
   before_script: []          # stdlib only; skip the venv bootstrap
   script:
@@ -1905,14 +2402,19 @@ artifact-signing-gate:
 
 # ─── AI EVALUATION ───────────────────────────────────────────────────────────
 
+# Fix #23: audits the AI/watermark stack (torch/transformers/markllm) up in the
+# sast stage alongside pip-audit and lockfile-audit — depends only on setup, so it
+# runs BEFORE markllm-watermark-eval (#35) actually installs those multi-GB deps,
+# rather than after artifact-signing-gate in ai-eval. Gating stays deferred
+# (allow_failure:true) for now.
 markllm-deps-audit:
-  stage: ai-eval
+  stage: sast
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
   image: python:3.10-slim
-  needs: ["artifact-signing-gate", "model-manifest"]
+  needs: ["setup"]
   allow_failure: true
   script:
     - pip install --quiet --upgrade pip pip-audit
@@ -1948,13 +2450,28 @@ markllm-watermark-eval:
     - when: on_success
   image: python:3.10-slim
   needs: ["artifact-signing-gate", "model-manifest"]
-  # Advisory: the live eval pulls a multi-GB transformers model and a heavy
-  # watermark stack onto a small runner, so a load/runtime failure records
-  # evidence (markllm-results.json) without blocking the security pipeline.
+  # Medium runner for disk headroom: this job downloads a ~3 GB transformers MODEL at
+  # runtime (Qwen2.5-1.5B-Instruct) — that model pull, not the torch install, is what
+  # needs the room. Torch itself is now the CPU-only wheel (see below), so the install
+  # footprint is small; the medium runner is justified by the model download alone.
+  tags: ["saas-linux-medium-amd64"]
+  # cache:{} — keep this job's deps + model out of the shared pip cache so they can't
+  # bloat other jobs' runner disk. It re-downloads its own deps.
+  cache: {}
+  # Advisory: the live eval pulls a multi-GB transformers model and evaluates a model
+  # that is NOT the signed integrity-path artifact, so a load/runtime failure records
+  # evidence (markllm-results.json) without blocking the security pipeline. (Its result
+  # is an ADVISORY input to evidence-summary — see write_ci_evidence_summary.py.)
   allow_failure: true
   script:
     - pip install --quiet --upgrade pip setuptools wheel
-    - pip install --quiet "markllm==${MARKLLM_VERSION}" "torch==${TORCH_VERSION}" "transformers==${TRANSFORMERS_VERSION}"
+    # Install torch from the CPU-only wheel index: the default PyPI build pulls the
+    # ~2 GB CUDA stack (nvidia-* wheels) onto CPU-only CI runners — gratuitous disk that
+    # was the root [Errno 28] cause. The +cpu wheel (~200 MB, no nvidia deps) matches the
+    # hash-pinned requirements-ci-markllm.txt lock. torch must land first so the markllm/
+    # transformers install below sees it already satisfied and won't re-fetch CUDA torch.
+    - pip install --quiet "torch==${TORCH_VERSION}+cpu" --index-url https://download.pytorch.org/whl/cpu
+    - pip install --quiet "markllm==${MARKLLM_VERSION}" "transformers==${TRANSFORMERS_VERSION}"
     - mkdir -p "${REPORTS_DIR}"
     - |
       # Resolve the model id dynamically from the model download. If
@@ -1986,48 +2503,32 @@ markllm-watermark-eval:
       - "${REPORTS_DIR}/markllm-results.json"
     expire_in: 7 days
 
-# Model/behaviour drift: compare this run's eval metrics against the committed
-# baseline (evals/eval-baseline.json). Same eval set, so a metric moving beyond
-# the threshold means the model or its guardrails regressed between runs.
-model-drift-detection:
-  stage: guardrail
-  rules:
-    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
-      when: never
-    - when: on_success
-  # Report producer (never blocks) — the hard gate is `drift-gate`, placed after
-  # the BOM so a drifted run still yields a signed BOM that RECORDS the drift.
-  allow_failure: true
-  variables:
-    DRIFT_THRESHOLD: "0.10"   # absolute metric movement that flags drift
-  script:
-    - mkdir -p "${REPORTS_DIR}"
-    - |
-      BASELINE="${GAIPS_MATERIALS_DIR}/evals/eval-baseline.json"
-      python3 "${GAIPS_MATERIALS_DIR}/scripts/detect_model_drift.py" \
-        --reports "${REPORTS_DIR}" \
-        --baseline "${BASELINE}" \
-        --out "${REPORTS_DIR}/model-drift.json" \
-        --threshold "${DRIFT_THRESHOLD}"
-    - |
-      # If this run seeded a baseline (none existed), surface it for the maintainer to commit.
-      if [ -f "${REPORTS_DIR}/eval-baseline.seed.json" ]; then
-        echo "Baseline seeded — commit ${REPORTS_DIR}/eval-baseline.seed.json to evals/eval-baseline.json"
-      fi
-  artifacts:
-    paths:
-      - "${REPORTS_DIR}/model-drift.json"
-      - "${REPORTS_DIR}/eval-baseline.seed.json"
-    expire_in: 30 days
+# NOTE: `model-drift-detection` was RELOCATED to the live-scans pipeline (Fix #24a).
+# It compares this run's eval METRICS to evals/eval-baseline.json, but its six
+# inputs (inspect-ai, garak, pyrit, giskard, guardrail-regression, promptfoo) are
+# produced only by the live-scan jobs — in the static pipeline they never exist,
+# so the unit (and the drift-gate that consumed it) was dead-by-construction. It
+# now lives in ci/live-scans.gitlab-ci.yml alongside those inputs. The remaining
+# drift control HERE is data/INPUT drift via evidently-drift (#38), bootstrapped
+# by data-drift-baseline-commit below.
 
-# Auto-commit the seeded drift baseline back to the repo on the FIRST run (when
-# none exists), so drift detection activates without a manual commit. Default
-# branch only; never overwrites an existing baseline; skips cleanly if no push
-# token is configured. Requires GITLAB_PUSH_TOKEN (Project Access Token, scope
-# write_repository) as a masked CI/CD variable, and write access to the branch.
-model-baseline-commit:
+# Fix #24b — data-drift baseline bootstrap. Auto-commit the seeded DATA-drift
+# reference (evals/dataset-reference.jsonl) on the FIRST run, so evidently-drift
+# (#38) leaves seed-mode and starts gating without a manual commit. This replaces
+# the former eval-baseline auto-commit, which seeded the WRONG control: the
+# eval-metric baseline and its drift unit moved to the live-scans pipeline (Fix
+# #24a), leaving the dataset reference as the real drift control the static
+# pipeline was starving. The reference is SANITIZED before commit — never a raw
+# cp — because the raw evidently seed can carry NaN-filled columns from
+# heterogeneous records. Default branch only; never overwrites an existing
+# reference; skips cleanly with no push token. Requires GITLAB_PUSH_TOKEN
+# (Project Access Token, scope write_repository) as a masked CI/CD variable.
+# Activation spans TWO default-branch runs: this job seeds+commits the reference
+# with [skip ci] (no pipeline triggered), so evidently-drift first *compares* on
+# the NEXT default-branch pipeline — not the run that does the commit.
+data-drift-baseline-commit:
   stage: guardrail
-  needs: ["model-drift-detection"]
+  needs: ["evidently-drift"]
   allow_failure: true   # a failed auto-commit must never break the build
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
@@ -2037,29 +2538,59 @@ model-baseline-commit:
     - apt-get update -qq && apt-get install -y -qq git
   script:
     - |
-      SEED="${REPORTS_DIR}/eval-baseline.seed.json"
-      DEST="${GAIPS_MATERIALS_DIR}/evals/eval-baseline.json"
+      SEED="${REPORTS_DIR}/dataset-reference.seed.jsonl"
+      DEST="${GAIPS_MATERIALS_DIR}/evals/dataset-reference.jsonl"
       if [ ! -f "${SEED}" ]; then
-        echo "No baseline seeded this run — nothing to commit"; exit 0
+        echo "No dataset reference seeded this run — nothing to commit"; exit 0
       fi
       if [ -f "${DEST}" ]; then
-        echo "Baseline already present at ${DEST} — not overwriting"; exit 0
+        echo "Reference already present at ${DEST} — not overwriting"; exit 0
       fi
       if [ -z "${GITLAB_PUSH_TOKEN}" ]; then
         echo "GITLAB_PUSH_TOKEN not set — auto-commit disabled."
-        echo "Commit ${SEED} → ${DEST} manually to activate drift detection."
+        echo "Sanitize + commit ${SEED} → ${DEST} manually to activate data-drift detection."
         exit 0
       fi
-      cp "${SEED}" "${DEST}"
+      # Sanitize, don't raw-cp: drop null / non-finite values per record and
+      # re-emit strict JSONL, so a malformed seed can never become the committed
+      # reference. Aborts the commit if the seed yields zero valid records.
+      mkdir -p "$(dirname "${DEST}")"
+      python3 - "${SEED}" "${DEST}" <<'PYEOF'
+      import json, math, sys
+      src, dst = sys.argv[1], sys.argv[2]
+      out = []
+      with open(src, encoding="utf-8") as fh:
+          for line in fh:
+              line = line.strip()
+              if not line:
+                  continue
+              rec = json.loads(line)
+              clean = {
+                  k: v for k, v in rec.items()
+                  if v is not None and not (isinstance(v, float) and not math.isfinite(v))
+              }
+              if clean:
+                  out.append(clean)
+      if not out:
+          sys.exit("Seed produced zero valid records — refusing to commit an empty reference")
+      with open(dst, "w", encoding="utf-8") as fh:
+          fh.write("\n".join(json.dumps(r, sort_keys=True) for r in out) + "\n")
+      print(f"Sanitized {len(out)} record(s) → {dst}")
+      PYEOF
       git config user.email "gaips-ci@${CI_SERVER_HOST}"
       git config user.name "GAIPS CI"
       git add "${DEST}"
-      git commit -m "ci: seed eval drift baseline [skip ci]"
+      git commit -m "ci: seed data-drift reference [skip ci]"
       # ci.skip + [skip ci] both prevent this push from triggering a new pipeline.
       git push -o ci.skip \
         "https://oauth2:${GITLAB_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" \
         "HEAD:${CI_DEFAULT_BRANCH}"
-      echo "Committed eval-baseline.json → ${CI_DEFAULT_BRANCH} (drift detection now active)"
+      # This push uses -o ci.skip + the [skip ci] commit message, so it does NOT
+      # trigger a pipeline. Activation therefore takes TWO default-branch runs:
+      # THIS run seeds + commits the reference; the NEXT default-branch pipeline is
+      # the first where evidently-drift finds the reference and actually compares.
+      echo "Committed dataset-reference.jsonl → ${CI_DEFAULT_BRANCH}."
+      echo "data-drift detection activates on the NEXT default-branch pipeline (this commit is [skip ci])."
 
 # Data/feature drift on the INPUT side — complements model-drift-detection (which
 # watches eval METRICS). Evidently's DataDriftPreset (PSI) compares a committed
@@ -2075,7 +2606,12 @@ evidently-drift:
   needs: ["dataset-redact", "eval-dataset-validate"]
   allow_failure: true   # soft gate — flip to false once a reference is committed + tuned
   script:
-    - pip install evidently pandas
+    # Pinned for reproducibility (was unpinned, floated to bleeding-edge majors).
+    # These are the versions the env last resolved; the script's API (Dataset/
+    # DataDefinition/Report, DataDriftPreset(method="psi")/TextEvals) matches this
+    # evidently line. NOTE: the compare path only runs once a reference is committed,
+    # so evidently↔pandas compat is first exercised on the first comparing run.
+    - pip install "evidently==0.7.21" "pandas==3.0.3"
     - mkdir -p "${REPORTS_DIR}" "${EVIDENCE_DIR}/evidently"
     - |
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
@@ -2136,7 +2672,6 @@ evidence-summary:
     - dvc-verify
     - evidently-drift
     - tamper-verification
-    - model-drift-detection
     - markllm-watermark-eval
   script:
     - pip install jinja2
@@ -2147,12 +2682,14 @@ evidence-summary:
         --out "${EVIDENCE_DIR}/evidence-summary.md"
     - cat "${EVIDENCE_DIR}/evidence-summary.md"
     - |
-      # If this run seeded a drift baseline (none committed yet), bundle it with
+      # If this run seeded a drift reference (none committed yet), bundle it with
       # the end-of-pipeline evidence so the maintainer can grab it from one place
-      # and commit it to evals/eval-baseline.json to activate drift detection.
-      if [ -f "${REPORTS_DIR}/eval-baseline.seed.json" ]; then
-        cp -f "${REPORTS_DIR}/eval-baseline.seed.json" "${EVIDENCE_DIR}/eval-baseline.seed.json"
-        echo "Seeded drift baseline bundled at ${EVIDENCE_DIR}/eval-baseline.seed.json — commit it to evals/eval-baseline.json to activate drift detection."
+      # and commit it to evals/dataset-reference.jsonl to activate drift detection.
+      # (evidently-drift writes dataset-reference.seed.jsonl; the old
+      # eval-baseline.seed.json seed is no longer produced by this pipeline.)
+      if [ -f "${REPORTS_DIR}/dataset-reference.seed.jsonl" ]; then
+        cp -f "${REPORTS_DIR}/dataset-reference.seed.jsonl" "${EVIDENCE_DIR}/dataset-reference.seed.jsonl"
+        echo "Seeded drift reference bundled at ${EVIDENCE_DIR}/dataset-reference.seed.jsonl — commit it to evals/dataset-reference.jsonl to activate drift detection."
       fi
     - |
       # Capture the approved model baseline (committed + reviewed) with the
@@ -2162,46 +2699,214 @@ evidence-summary:
   artifacts:
     paths:
       - "${EVIDENCE_DIR}/evidence-summary.md"
-      - "${EVIDENCE_DIR}/eval-baseline.seed.json"
+      - "${EVIDENCE_DIR}/dataset-reference.seed.jsonl"
       - "${EVIDENCE_DIR}/model-baseline.json"
     expire_in: 90 days
 
-model-signing-evidence:
-  stage: evidence
+# Builds a comprehensive RUN-EVIDENCE manifest — rich pipeline metadata, the
+# approved-vs-recorded model identity, and a sha256 hash-manifest of EVERY report,
+# SBOM, and evidence artifact produced across the whole run — then keyless-signs it
+# with cosign and self-verifies the result. Signing this one manifest therefore
+# binds the integrity of the entire run's evidence set in a single transparency-
+# logged signature. (Renamed from `model-signing-evidence`: the model itself is
+# signed by `model-sign`; this job signs evidence ABOUT the run.)
+sign-evidence:
+  # Terminal `attest` stage (last in the pipeline) so the hash-manifest below
+  # captures EVERY artifact, including the signed AI-BOM and deploy-prep outputs.
+  stage: attest
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
+  # Depend on EVERY artifact-producing job so this job receives every report/SBOM/
+  # evidence artifact in the run and can hash them all into one signed manifest.
+  # This is a SUPERSET of evidence-summary's collection set: it additionally pulls
+  # the artifact-producing jobs evidence-summary omits — setup, lockfile-audit,
+  # model-fixture-download, dataset-sign, markllm-deps-audit — so the whole-run
+  # attestation actually covers their reports/ and evidence/ files rather than
+  # silently dropping them (GitLab only downloads artifacts from jobs in needs:).
   needs:
-    - artifact-signing-gate
+    - setup
+    - semgrep-sast
+    - secret-detection
+    - gitleaks-scan
+    - pip-audit
+    - lockfile-audit
+    - pkg-integrity
+    - conda-pkg-verify
+    - syft-cyclonedx
+    - syft-spdx
+    - grype-scan
+    - trivy-scan
+    - model-fixture-download
+    - modelscan
+    - modelaudit-scan
+    - modelfile-audit
+    - clamav-scan
+    - hf-artifact-scan
     - model-digest
+    - dataset-download
+    - dataset-scan
+    - dataset-redact
+    - dataset-sign
+    - eval-dataset-validate
+    - great-expectations-validate
+    - ydata-profile
+    - dvc-verify
+    - evidently-drift
+    - tamper-verification
+    - markllm-deps-audit
+    - markllm-watermark-eval
+    - artifact-signing-gate
+    - signature-verification   # Fix #32a: pull the #19 verdict so the bundle records verified, not just notarized
     - evidence-summary
+    # ai-bom stage — captures the signed AI-BOM (the keystone an auditor reads)
+    - ai-bom-assemble
+    - ai-bom-validate
+    - ai-bom-sign
+    - dependency-track-upload
+    # deploy-prep stage — captures the publish manifest, image-sign, metrics, pages
+    - image-sign
+    - publish-signed-artifacts
+    - metrics-normalize
+    - pages
   # SIGSTORE_ID_TOKEN is the standard env var cosign reads for keyless signing.
-  # aud must be "sigstore" — Fulcio validates this claim.
+  # aud must be "sigstore" — Fulcio validates this claim. This is a GitLab-native
+  # id_token (works on any ref), independent of the protected MODEL_SIGNING_IDENTITY.
   id_tokens:
     SIGSTORE_ID_TOKEN:
       aud: "sigstore"
+  # cosign does all signing; no pip packages are needed (stdlib-only manifest build).
+  before_script: []
+  cache: {}
   script:
-    - pip install model-signing sigstore
     - apt-get update -qq && apt-get install -y -qq curl ca-certificates
     - mkdir -p "${EVIDENCE_DIR}"
     - |
-      python - <<'PYEOF'
-      import json, os, datetime
+      # Build the run-evidence manifest (stdlib only).
+      python3 - <<'PYEOF'
+      import json, os, hashlib, datetime
+      from pathlib import Path
+
+      def env(k):
+          v = os.environ.get(k, "")
+          return v if v != "" else None
+
+      def sha256_file(p):
+          h = hashlib.sha256()
+          with open(p, "rb") as f:
+              for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                  h.update(chunk)
+          return h.hexdigest()
+
+      project_dir  = os.environ["CI_PROJECT_DIR"]
+      reports_dir  = Path(os.environ["REPORTS_DIR"])
+      sbom_dir     = Path(os.environ["SBOM_DIR"])
+      evidence_dir = Path(os.environ["EVIDENCE_DIR"])
+      out          = evidence_dir / "sign-evidence.json"
+      own_files    = {"sign-evidence.json", "sign-evidence.sig", "sign-evidence.pem"}
+
+      # --- hash-manifest of every report / SBOM / evidence artifact in the run ---
+      artifacts, seen = [], set()
+      for base in (reports_dir, sbom_dir, evidence_dir):
+          if not base.exists():
+              continue
+          for p in sorted(base.rglob("*")):
+              if not p.is_file() or p.name in own_files:
+                  continue
+              rel = os.path.relpath(p, project_dir)
+              if rel in seen:
+                  continue
+              seen.add(rel)
+              artifacts.append({
+                  "path": rel,
+                  "sha256": sha256_file(p),
+                  "size_bytes": p.stat().st_size,
+              })
+
+      # --- model identity: approved baseline vs the digest model-digest recorded ---
+      model = {}
+      baseline = evidence_dir / "model-baseline.json"
+      if not baseline.exists():
+          baseline = Path(os.environ["GAIPS_MATERIALS_DIR"]) / "evals" / "model-baseline.json"
+      if baseline.exists():
+          b = json.loads(baseline.read_text()).get("model", {})
+          model.update(name=b.get("name"), path=b.get("path"),
+                       approved_sha256=b.get("sha256"))
+
+      recorded = []
+      digests_txt = evidence_dir / "model-digests.txt"
+      if digests_txt.exists():
+          for line in digests_txt.read_text().splitlines():
+              if "sha256:" in line:
+                  fpath, _, dg = line.rpartition("sha256:")
+                  fp = fpath.strip()
+                  # Fix #40-F4 (defensive to the #17 root fix): never record an absolute
+                  # /builds/… path; model-digest now writes repo-relative.
+                  if os.path.isabs(fp):
+                      fp = os.path.relpath(fp, project_dir)
+                  recorded.append({"path": fp, "sha256": dg.strip()})
+      model["recorded_digests"] = recorded
+      model["digest_match"] = bool(
+          model.get("approved_sha256")
+          and any(r["sha256"] == model["approved_sha256"] for r in recorded)
+      )
+
+      # Fix #32a — record whether the recorded digest was actually VERIFIED against a
+      # signature (signature-verification #19), not merely notarized. #19 writes a
+      # deferred marker on unprotected refs; mark the bundle unverified + reason so it
+      # is self-declaring rather than implying assurance it does not have.
+      verified, vreason = "unknown", "signature-verification did not run"
+      sigver = evidence_dir / "signature-verification.jsonl"
+      if sigver.exists():
+          recs = []
+          for ln in sigver.read_text().splitlines():
+              ln = ln.strip()
+              if ln:
+                  try:
+                      recs.append(json.loads(ln))
+                  except Exception:
+                      pass
+          if any(r.get("skipped") for r in recs):
+              verified = "false"
+              vreason = next((r.get("reason") for r in recs if r.get("skipped")), "deferred")
+          elif any(r.get("subjects") and all(s.get("match") for s in r["subjects"]) for r in recs):
+              verified, vreason = "true", None
+          elif recs:
+              verified, vreason = "false", "no signed subject matched the on-disk model"
+      model["verified"] = verified
+      if vreason:
+          model["verified_reason"] = vreason
 
       bundle = {
-          "schema_version": "1.0",
-          "pipeline_id":    os.environ["CI_PIPELINE_ID"],
-          "commit_sha":     os.environ["CI_COMMIT_SHA"],
-          "ref":            os.environ["CI_COMMIT_REF_NAME"],
-          "timestamp":      datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
-          "model_digests":  open(os.environ["EVIDENCE_DIR"] + "/model-digests.txt").read().splitlines(),
+          "schema_version": "2.0",
+          "kind": "gaips-run-evidence",
+          "generated_at": datetime.datetime.now(datetime.UTC).isoformat().replace("+00:00", "Z"),
+          "pipeline": {
+              "id":            env("CI_PIPELINE_ID"),
+              "url":           env("CI_PIPELINE_URL"),
+              "source":        env("CI_PIPELINE_SOURCE"),
+              "created_at":    env("CI_PIPELINE_CREATED_AT"),
+              "project_path":  env("CI_PROJECT_PATH"),
+              "project_url":   env("CI_PROJECT_URL"),
+              "commit_sha":    env("CI_COMMIT_SHA"),
+              "commit_short":  env("CI_COMMIT_SHORT_SHA"),
+              "commit_title":  env("CI_COMMIT_TITLE"),
+              "ref":           env("CI_COMMIT_REF_NAME"),
+              "ref_protected": env("CI_COMMIT_REF_PROTECTED"),
+              "triggered_by":  env("GITLAB_USER_LOGIN"),
+              "runner":        env("CI_RUNNER_DESCRIPTION"),
+              "signing_job_id":  env("CI_JOB_ID"),
+              "signing_job_url": env("CI_JOB_URL"),
+          },
+          "model": model,
+          "artifact_count": len(artifacts),
+          "artifacts": artifacts,
       }
 
-      out = os.environ["EVIDENCE_DIR"] + "/model-signing-evidence.json"
-      with open(out, "w") as f:
-          json.dump(bundle, f, indent=2)
+      out.write_text(json.dumps(bundle, indent=2) + "\n")
       print(json.dumps(bundle, indent=2))
+      print(f"\nHashed {len(artifacts)} artifact(s); model.digest_match={model.get('digest_match')}")
       PYEOF
     - |
       # Install cosign binary (not available via pip; each job gets a fresh container)
@@ -2216,22 +2921,37 @@ model-signing-evidence:
         | (cd /tmp && sha256sum --check --strict)
       install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
     - |
-      BUNDLE="${EVIDENCE_DIR}/model-signing-evidence.json"
+      BUNDLE="${EVIDENCE_DIR}/sign-evidence.json"
       if [ -n "${SIGSTORE_ID_TOKEN}" ]; then
         # SIGSTORE_ID_TOKEN is set by id_tokens above; cosign reads it automatically
         cosign sign-blob --yes \
-          --output-signature "${EVIDENCE_DIR}/model-signing-evidence.sig" \
-          --output-certificate "${EVIDENCE_DIR}/model-signing-evidence.pem" \
+          --output-signature "${EVIDENCE_DIR}/sign-evidence.sig" \
+          --output-certificate "${EVIDENCE_DIR}/sign-evidence.pem" \
           "${BUNDLE}"
-        echo "Evidence bundle signed via Sigstore keyless"
+        echo "Run-evidence manifest signed via Sigstore keyless"
+        # Self-verify the signature we just produced, so a broken signature fails
+        # the job here rather than shipping an unverified artifact downstream.
+        cosign verify-blob \
+          --certificate "${EVIDENCE_DIR}/sign-evidence.pem" \
+          --signature   "${EVIDENCE_DIR}/sign-evidence.sig" \
+          --certificate-identity-regexp ".+" \
+          --certificate-oidc-issuer-regexp "https://(gitlab|oauth2)\\..+" \
+          "${BUNDLE}" \
+          && echo "Self-verify OK: signature matches the manifest" \
+          || { echo "ERROR: self-verify of the signed evidence failed"; exit 1; }
       else
-        echo "SIGSTORE_ID_TOKEN not available — evidence bundle unsigned (id_tokens requires GitLab 15.7+)"
+        echo "SIGSTORE_ID_TOKEN not available — cannot sign the evidence bundle (id_tokens requires GitLab 15.7+)"
+        if [ "${EVIDENCE_SIGNING_REQUIRED}" = "true" ]; then
+          echo "ERROR: EVIDENCE_SIGNING_REQUIRED=true but no SIGSTORE_ID_TOKEN is available — refusing to ship an unsigned evidence seal"
+          exit 1
+        fi
+        echo "EVIDENCE_SIGNING_REQUIRED is not 'true' — emitting the unsigned manifest and exiting 0 (teeth-last; set EVIDENCE_SIGNING_REQUIRED=true in production to make this a hard gate)"
       fi
   artifacts:
     paths:
-      - "${EVIDENCE_DIR}/model-signing-evidence.json"
-      - "${EVIDENCE_DIR}/model-signing-evidence.sig"
-      - "${EVIDENCE_DIR}/model-signing-evidence.pem"
+      - "${EVIDENCE_DIR}/sign-evidence.json"
+      - "${EVIDENCE_DIR}/sign-evidence.sig"
+      - "${EVIDENCE_DIR}/sign-evidence.pem"
     expire_in: 90 days
 
 # ─── AI BOM ──────────────────────────────────────────────────────────────────
@@ -2252,6 +2972,12 @@ ai-bom-assemble:
     - setup
     - syft-cyclonedx
     - pip-audit
+    # Vuln sources build_ai_bom.py parses into vulnerabilities[] (#29). GitLab only
+    # downloads artifacts from jobs named here, so without these the lockfile/grype/
+    # trivy parsing is dead and the BOM undercounts known risk.
+    - lockfile-audit
+    - grype-scan
+    - trivy-scan
     - model-fixture-download
     - model-digest
     - model-sign
@@ -2270,7 +2996,6 @@ ai-bom-assemble:
     - evidently-drift
     - dataset-sign
     - markllm-deps-audit
-    - model-drift-detection
     - evidence-summary
   script:
     - mkdir -p "${SBOM_DIR}"
@@ -2286,6 +3011,7 @@ ai-bom-assemble:
         --evidence "${EVIDENCE_DIR}" \
         --models   "${MODEL_DIR}" \
         --timestamp "${TS}" \
+        --dataset-baseline "${GAIPS_MATERIALS_DIR}/evals/dataset-baseline.json" \
         --out      "${SBOM_DIR}/aibom.cyclonedx.json"
   artifacts:
     paths:
@@ -2326,92 +3052,98 @@ ai-bom-validate:
       - "${SBOM_DIR}/aibom.cyclonedx.xml"
     expire_in: 90 days
 
+# Fix #31: ai-bom-validate proves the BOM is well-FORMED; this asserts it is
+# SUBSTANTIVE — vulnerabilities[] populated when the audit found vulns (#29), every
+# model signed + verified (#32). The validate image is the .NET cyclonedx-cli (no
+# Python), so the content checks run here in python:3.11-slim instead. Advisory
+# (allow_failure: true) per the Fix #0/#23 teeth-last posture; flip --enforce once
+# the pipeline is otherwise green.
+ai-bom-content-gate:
+  stage: ai-bom
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  # Must pull the IDENTICAL audit surface ai-bom-assemble emitted — the gate runs the
+  # same build_ai_bom._vulnerabilities() over REPORTS_DIR, so any missing producer here
+  # undercounts audit-reported vulns and checks a different surface than the BOM (#29).
+  needs: ["ai-bom-assemble", "pip-audit", "lockfile-audit", "markllm-deps-audit", "grype-scan", "trivy-scan"]
+  allow_failure: true
+  before_script: []
+  cache: {}
+  script:
+    - |
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/assert_ai_bom_content.py" \
+        --bom "${SBOM_DIR}/aibom.cyclonedx.json" \
+        --reports "${REPORTS_DIR}"
+
 ai-bom-sign:
   stage: ai-bom
   rules:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  image:
-    name: "${IMAGE_CYCLONEDX}"
-    entrypoint: [""]
-  before_script: []          # cyclonedx-cli image has no Python
+  # Fix #25: keyless Sigstore signing (Fulcio cert + Rekor transparency log), the
+  # same identity-bound mechanism as model-sign / dataset-sign / sign-evidence —
+  # NOT an ephemeral, identity-less RSA key that only verifies within one run.
+  # Uses the default python:3.11-slim image (not the .NET cyclonedx-cli image): we
+  # need curl + a shell to install cosign, not the CycloneDX CLI.
   needs: ["ai-bom-validate"]
-  allow_failure: true        # advisory: signing failure should not block BOM delivery
+  # Hardened to a gate (was allow_failure:true): an unsigned AI BOM must not be
+  # delivered green. Skips cleanly only when there is genuinely no BOM to sign.
+  allow_failure: false
+  # id_tokens issues a per-job OIDC JWT; aud "sigstore" is required by Fulcio.
+  id_tokens:
+    SIGSTORE_ID_TOKEN:
+      aud: "sigstore"
   script:
     - |
       XML="${SBOM_DIR}/aibom.cyclonedx.xml"
       if [ ! -f "${XML}" ]; then
-        echo "No XML BOM present (ai-bom-validate skipped) — signing skipped"
+        echo "No XML BOM present (ai-bom-validate skipped) — nothing to sign"
         exit 0
       fi
+    # python:3.11-slim ships no curl — install it (+ CA certs) before fetching cosign.
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
     - |
-      # Obtain the RSA signing key. Preferred: a STABLE key from CI/CD variables
-      # (CYCLONEDX_SIGNING_KEY + CYCLONEDX_SIGNING_PUB, PEM) so verifiers can trust
-      # one signer identity across runs. Fallback: an ephemeral keypair — the
-      # signature verifies within this run only, not against a persistent identity.
-      if [ -n "${CYCLONEDX_SIGNING_KEY}" ]; then
-        printf '%s' "${CYCLONEDX_SIGNING_KEY}" > "${SBOM_DIR}/aibom-signing.key"
-        [ -n "${CYCLONEDX_SIGNING_PUB}" ] && \
-          printf '%s' "${CYCLONEDX_SIGNING_PUB}" > "${SBOM_DIR}/aibom-signing.pub"
-        echo "Using configured CYCLONEDX_SIGNING_KEY (stable signer identity)"
-      else
-        echo "CYCLONEDX_SIGNING_KEY not set — generating EPHEMERAL keypair (intra-run verification only)"
-        /cyclonedx keygen \
-          --private-key-file "${SBOM_DIR}/aibom-signing.key" \
-          --public-key-file "${SBOM_DIR}/aibom-signing.pub"
+      # Install cosign (Go binary, not on PyPI) — checksum-verified, as elsewhere.
+      curl -sSfL \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" \
+        -o /tmp/cosign-linux-amd64
+      curl -sSfL \
+        "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" \
+        -o /tmp/cosign_checksums.txt
+      grep -E "^[0-9a-f]{64}  cosign-linux-amd64$" /tmp/cosign_checksums.txt \
+        | (cd /tmp && sha256sum --check --strict)
+      install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
+    - |
+      XML="${SBOM_DIR}/aibom.cyclonedx.xml"
+      if [ -z "${SIGSTORE_ID_TOKEN}" ]; then
+        # A BOM exists but we cannot keyless-sign it. Do NOT pass green with an
+        # unsigned BOM — that is exactly what the old ephemeral-RSA fallback did.
+        echo "ERROR: SIGSTORE_ID_TOKEN unavailable (id_tokens requires GitLab 15.7+) — cannot sign the AI BOM"
+        exit 1
       fi
-    - |
-      # Native CycloneDX enveloped signature — embedded directly in the BOM,
-      # verifies as-is with `cyclonedx verify all` (no canonical reconstruction).
-      /cyclonedx sign bom "${SBOM_DIR}/aibom.cyclonedx.xml" \
-        --key-file "${SBOM_DIR}/aibom-signing.key"
-    - |
-      # Prove the embedded signature round-trips before publishing.
-      if [ -f "${SBOM_DIR}/aibom-signing.pub" ]; then
-        /cyclonedx verify all "${SBOM_DIR}/aibom.cyclonedx.xml" \
-          --key-file "${SBOM_DIR}/aibom-signing.pub"
-        echo "AI BOM enveloped signature verified"
-      else
-        echo "No public key available (CYCLONEDX_SIGNING_PUB unset) — skipping in-job verification"
-      fi
-    - rm -f "${SBOM_DIR}/aibom-signing.key"   # never publish the private key
+      # SIGSTORE_ID_TOKEN is read by cosign automatically. Detached keyless
+      # signature + Fulcio certificate (recorded in Rekor), mirroring dataset-sign.
+      cosign sign-blob --yes \
+        --output-signature "${SBOM_DIR}/aibom.cyclonedx.sig" \
+        --output-certificate "${SBOM_DIR}/aibom.cyclonedx.pem" \
+        "${XML}"
+      echo "AI BOM signed via Sigstore keyless (Fulcio + Rekor)"
   artifacts:
     paths:
-      - "${SBOM_DIR}/aibom.cyclonedx.xml"     # now carries the enveloped signature
-      - "${SBOM_DIR}/aibom-signing.pub"       # public key for offline verification
+      - "${SBOM_DIR}/aibom.cyclonedx.xml"     # the signed bytes
+      - "${SBOM_DIR}/aibom.cyclonedx.sig"     # detached keyless signature
+      - "${SBOM_DIR}/aibom.cyclonedx.pem"     # Fulcio cert for offline verify-blob
     expire_in: 90 days
 
-# Hard gate on model drift — runs LAST, after the BOM is built and signed, so a
-# drifted run still produces a signed BOM that records the drift. Fails the
-# pipeline when drift is detected; passes on a clean run, a seeded baseline, or
-# when drift detection was skipped (no metrics).
-drift-gate:
-  stage: ai-bom
-  rules:
-    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
-      when: never
-    - when: on_success
-  needs: ["model-drift-detection", "ai-bom-sign"]
-  before_script: []          # stdlib python only
-  allow_failure: false       # this is the gate — drift fails the pipeline
-  script:
-    - |
-      python3 - <<'PYEOF'
-      import json, os, sys
-      path = os.path.join(os.environ["REPORTS_DIR"], "model-drift.json")
-      if not os.path.exists(path):
-          print("No drift report — gate passes (drift detection skipped)"); sys.exit(0)
-      d = json.load(open(path))
-      if d.get("skipped") or d.get("seeded"):
-          print("Drift gate: baseline seeded/skipped — pass"); sys.exit(0)
-      if d.get("drift_detected"):
-          drifted = ", ".join(x["metric"] for x in d.get("drifted", []))
-          print(f"DRIFT GATE FAILED — metric(s) beyond threshold: {drifted}")
-          print("Review reports/model-drift.json; update evals/eval-baseline.json if the new behaviour is intended.")
-          sys.exit(1)
-      print("Drift gate PASSED — eval metrics within threshold of baseline")
-      PYEOF
+# NOTE: `drift-gate` was REMOVED (Fix #24a). In the static pipeline it was vacuous
+# theater — its only input, model-drift-detection, is dead-by-construction here
+# (its six live-scan eval inputs moved to the live-scans pipeline), so the hard gate
+# could only ever pass. The eval-metric drift unit + its gate belong in live-scans
+# alongside the inputs. If DATA-drift enforcement is wanted here, add a small gate
+# over evidently-drift (#38) once it has a committed reference baseline (Fix #24b).
 
 # Ingest the signed BOMs into Dependency-Track for CONTINUOUS analysis — the SBOM
 # and the AI BOM (nested under the app project) are re-scanned against new CVEs +
@@ -2464,7 +3196,10 @@ image-sign:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  needs: ["drift-gate"]
+  # drift-gate removed (was vacuous theater in the static pipeline — its only input,
+  # model-drift-detection, is dead-by-construction here; see Fix #24a). Anchored instead
+  # to the ai-bom stage's remaining hard gate so image signing still follows it.
+  needs: ["dependency-track-upload"]
   # Fulcio requires an OIDC token with aud "sigstore" for keyless signing — same
   # mechanism model-sign / dataset-sign use. The resulting cert's identity is this
   # GitLab job's SAN, which matches the Kyverno policy's gitlab issuer/subject regex.
@@ -2549,22 +3284,24 @@ publish-signed-artifacts:
         echo "$2" >> "${STAGE_DIR}/artifacts-manifest.txt"
         echo "  staged → $2"
       }
-      # AI-BOM (enveloped XML signature) + its public verification key
+      # AI-BOM (cosign keyless blob signature, Fix #25) — the signed XML plus its
+      # detached signature + Fulcio cert: the trio the PreSync hook verify-blobs.
       stage "${SBOM_DIR}/aibom.cyclonedx.xml" "aibom.cyclonedx.xml"
-      stage "${SBOM_DIR}/aibom-signing.pub"   "aibom-signing.pub"
+      stage "${SBOM_DIR}/aibom.cyclonedx.sig" "aibom.cyclonedx.sig"
+      stage "${SBOM_DIR}/aibom.cyclonedx.pem" "aibom.cyclonedx.pem"
       # Dataset cosign blob signature — normalise to dataset.dat|dataset.sig|dataset.pem
       DATASET_FILE=$(find "${EVIDENCE_DIR}/dataset-input" -maxdepth 1 -type f \
         ! -name "dataset.sig" ! -name "dataset.pem" 2>/dev/null | head -1 || true)
       [ -n "${DATASET_FILE}" ] && stage "${DATASET_FILE}" "dataset.dat"
       stage "${EVIDENCE_DIR}/dataset-input/dataset.sig" "dataset.sig"
       stage "${EVIDENCE_DIR}/dataset-input/dataset.pem" "dataset.pem"
-      # Model bundle (model_signing format) — only when the actual weights AND
-      # their model.sig are present in MODEL_DIR. NOTE: model-sign publishes only
-      # **/model.sig as artifacts, not the weights, so via `needs` alone this stays
-      # empty and the bundle is correctly skipped — a bundle without weights would
-      # fail `model_signing verify` at deploy. To publish a real bundle, have this
-      # job run in the same stage as a model-download step, or mount MODEL_DIR.
-      # The PreSync hook verifies this with `model_signing verify`, NOT cosign.
+      # Model bundle (model_signing format) — staged only when the actual weights
+      # AND their model.sig are both present in MODEL_DIR. Fix #26a: this job
+      # `needs` model-fixture-download (which populates MODEL_DIR) and model-sign
+      # (which writes **/model.sig), so on the default fixture path BOTH are
+      # present and a real bundle is published — it is skipped only when no weights
+      # were fetched (a bundle without weights would fail `model_signing verify` at
+      # deploy). The PreSync hook verifies this with `model_signing verify`, NOT cosign.
       HAVE_WEIGHTS=0
       for ext in pkl pt safetensors gguf bin h5 onnx; do
         find "${MODEL_DIR}" -type f -name "*.${ext}" -print -quit 2>/dev/null | grep -q . && HAVE_WEIGHTS=1 && break
@@ -2580,22 +3317,51 @@ publish-signed-artifacts:
     - |
       STAGE_DIR="${EVIDENCE_DIR}/publish"
       BASE="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${EVIDENCE_PACKAGE_NAME}/${EVIDENCE_PACKAGE_VERSION}"
+      RESULT="${STAGE_DIR}/publish-result.json"
       if [ ! -s "${STAGE_DIR}/artifacts-manifest.txt" ]; then
-        echo "Nothing signed to publish (no AI-BOM/dataset/model) — skipping upload"; exit 0
+        echo "Nothing signed to publish (no AI-BOM/dataset/model) — skipping upload"
+        printf '{"status":"skipped","reason":"nothing to publish","uploaded":0,"failed":0}\n' > "${RESULT}"
+        exit 0
       fi
+      # Fix #26b — track per-file outcomes. A partial upload must NOT pass green:
+      # the deploy gate would fetch some artifacts and 404 on others. Count
+      # failures, record a publish-result signal, and exit non-zero if any failed.
+      UPLOADED=0; FAILED=0
       while IFS= read -r f; do
         echo "PUT ${BASE}/${f}"
-        curl -sSf --retry 3 \
-          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-          --upload-file "${STAGE_DIR}/${f}" \
-          "${BASE}/${f}"
-        echo "  uploaded ${f}"
+        if curl -sSf --retry 3 \
+            --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+            --upload-file "${STAGE_DIR}/${f}" \
+            "${BASE}/${f}"; then
+          echo "  uploaded ${f}"; UPLOADED=$((UPLOADED + 1))
+        else
+          echo "  FAILED ${f}"; FAILED=$((FAILED + 1))
+        fi
       done < "${STAGE_DIR}/artifacts-manifest.txt"
-      echo "Published signed artifacts to ${BASE}"
-      echo "→ Point the PreSync ConfigMap ARTIFACT_BASE_URL at: ${BASE}"
+      STATUS="ok"; [ "${FAILED}" -gt 0 ] && STATUS="partial"
+      printf '{"status":"%s","base_url":"%s","uploaded":%s,"failed":%s}\n' \
+        "${STATUS}" "${BASE}" "${UPLOADED}" "${FAILED}" > "${RESULT}"
+      # Fix #26c — the package version is branch-scoped (EVIDENCE_PACKAGE_VERSION
+      # defaults to the ref slug). The PreSync ConfigMap ARTIFACT_BASE_URL must
+      # track the DEPLOYED ref: on the default branch this BASE is canonical; on a
+      # feature branch it is only a preview. Repoint ARTIFACT_BASE_URL at the
+      # default branch's package once merged, or the deploy verifies stale bytes.
+      if [ "${CI_COMMIT_BRANCH:-}" = "${CI_DEFAULT_BRANCH:-}" ]; then
+        echo "→ Canonical (default-branch) publish. Point the PreSync ConfigMap ARTIFACT_BASE_URL at: ${BASE}"
+      else
+        echo "→ Branch-scoped PREVIEW publish (${CI_COMMIT_REF_SLUG}). Do NOT repoint the deploy here;"
+        echo "  after merge, ARTIFACT_BASE_URL should track the '${CI_DEFAULT_BRANCH}' package version."
+      fi
+      if [ "${FAILED}" -gt 0 ]; then
+        echo "ERROR: ${FAILED} artifact(s) failed to upload — partial publish, refusing to report success"
+        exit 1
+      fi
+      echo "Published ${UPLOADED} signed artifact(s) to ${BASE}"
   artifacts:
+    when: always   # persist the publish-result signal even on a partial-upload failure
     paths:
       - "${EVIDENCE_DIR}/publish/artifacts-manifest.txt"
+      - "${EVIDENCE_DIR}/publish/publish-result.json"
     expire_in: 90 days
 
 # ─── METRICS DASHBOARD ───────────────────────────────────────────────────────

@@ -1,71 +1,65 @@
-# GAIPS CI Pipeline — Python dependency source file
+# GAIPS CI Pipeline — Python dependency source (CORE group)
 #
-# This file lists the pip packages the pipeline installs across its jobs.
-# NOT covered here: tools installed by container images or standalone binaries.
-# Run the following on a Python 3.11-slim Linux container to generate
-# a pinned, hash-verified requirements-ci.txt:
+# Scope: this lists the packages THIS (static) .gitlab-ci.yml pipeline installs.
+# The AI red-team / live-eval tools (garak, giskard, inspect-ai, inspect-evals,
+# pyrit) belong to the SEPARATE live-scans pipeline and are intentionally NOT here.
 #
+# The pipeline's deps don't reliably co-resolve as one lockfile: the markllm
+# watermark stack pins old huggingface_hub<1.0 / Pillow==9.4.0, and the data
+# quality group (evidently + ydata-profiling) pins narrow numpy/pandas ranges.
+# Those packages also run in ISOLATED per-job venvs, so they never actually share
+# one environment.
+#
+# Therefore the source list is split into independently-resolvable GROUPS, one
+# file each, all matching the glob `requirements-ci*.in`:
+#
+#   requirements-ci.in              <- this file (core foundational tools)
+#   requirements-ci-markllm.in      <- markllm watermark stack (also markllm-deps-audit)
+#   requirements-ci-dataquality.in  <- great-expectations / evidently / ydata / dvc
+#
+# The `lockfile-audit` job compiles + pip-audits EACH group on its own and merges
+# the per-group results into one lockfile-audit.json. A group that still cannot be
+# resolved into a single lockfile is reported as a WARNING (not a failure) -- its
+# packages remain covered at runtime by the per-job `.audit-env` after_script.
+#
+# Regenerate a group lock locally on a Python 3.11-slim Linux container:
 #   pip install pip-tools
 #   pip-compile --generate-hashes --output-file requirements-ci.txt requirements-ci.in
 #
-# Commit the resulting requirements-ci.txt and update CI jobs to use:
-#   pip install -r ci/requirements-ci.txt
-#
-# Regenerate whenever a package needs to be updated.
+# This CORE group's hash-pinned lock IS committed beside this file as requirements-ci.txt
+# (generated on the Linux CI runner by lockfile-audit; runner paths sanitized). It serves
+# as the reproducibility/vuln-audit reference. NOTE: jobs install targeted per-job subsets
+# (e.g. dataset-redact → presidio only), not the whole group, so CI installs are NOT wired
+# to --require-hashes against it — version pinning already bounds the install. The heavy
+# markllm group is intentionally NOT hash-locked here (covered by markllm-deps-audit).
 
-# ── Vault / secrets ──────────────────────────────────────────────────────────
+# -- Vault / secrets ----------------------------------------------------------
 hvac
 
-# ── Package auditing ─────────────────────────────────────────────────────────
+# -- Package auditing ---------------------------------------------------------
 pip-audit
 pip-tools
 
-# ── Model signing / integrity ────────────────────────────────────────────────
+# -- Model signing / integrity ------------------------------------------------
 model-signing
 sigstore
 
-# ── Model scanning ───────────────────────────────────────────────────────────
+# -- Model scanning -----------------------------------------------------------
 modelscan
 huggingface_hub
 
-# ── AI red-teaming and evaluation ────────────────────────────────────────────
-garak
-giskard[llm]
+# -- HTTP / data (shared) -----------------------------------------------------
 requests
 pandas
-inspect-ai
-inspect-evals
-pyrit
 
-# ── Watermark evaluation (heavy — audited separately by markllm-deps-audit) ──
-# Pins mirror MARKLLM_VERSION / TORCH_VERSION / TRANSFORMERS_VERSION in
-# .gitlab-ci.yml. transformers stays on 4.x — markllm 0.1.5 predates the 5.x major.
-markllm==0.1.5
-torch==2.12.0
-transformers==4.57.6
-
-# ── Eval-dataset contract validation (eval-dataset-validate) ─────────────────
+# -- Eval-dataset contract validation (eval-dataset-validate) -----------------
 jsonschema
 
-# ── Data redaction — PII (dataset-redact); secrets handled by gitleaks binary ─
+# -- Data redaction -- PII (dataset-redact); secrets handled by gitleaks binary
 presidio-analyzer
 presidio-anonymizer
 # NOTE: dataset-redact also runs `python -m spacy download en_core_web_sm`
 # (spaCy is pulled in transitively by presidio-analyzer).
 
-# ── Data quality / drift (each runs in an isolated job venv) ─────────────────
-# These are installed per-job (great-expectations-validate, evidently-drift,
-# ydata-profile, dvc-verify) just like giskard/markllm above, so they do not all
-# have to co-resolve here; listed for SBOM completeness. ydata-profiling pins
-# narrow numpy/pandas/matplotlib ranges — if pip-compile cannot resolve the full
-# set together, drop it from the lockfile and rely on the job-level install.
-great-expectations
-evidently
-ydata-profiling
-dvc[all]
-
-# ── Dependency-Track BOM upload (dependency-track-upload) ────────────────────
-# requests is already listed under AI red-teaming; DT upload reuses it.
-
-# ── Evidence reporting ───────────────────────────────────────────────────────
+# -- Evidence reporting -------------------------------------------------------
 jinja2

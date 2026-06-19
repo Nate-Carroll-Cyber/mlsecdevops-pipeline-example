@@ -565,9 +565,14 @@ lockfile-audit:
     - when: on_success
   needs: ["setup"]
   allow_failure: true
-  # cache:{} — pip-compile --generate-hashes downloads the heavy groups' wheels
-  # (torch/tf/CUDA) into the pip cache dir to hash them, bloating the shared cache and
-  # filling the small runner's disk. This job doesn't benefit from a warm cache.
+  # cache:{} — pip-compile --generate-hashes downloads each group's wheels into the
+  # pip cache dir to hash them; keeping this out of the shared cache stops that bloat
+  # reaching other jobs' runner disk. This job doesn't benefit from a warm cache.
+  #
+  # Stays on the SMALL runner: the markllm group pins torch==2.12.0+cpu (CPU wheel,
+  # ~200 MB, no nvidia-* deps) rather than the default ~2 GB CUDA build, so hashing
+  # it no longer exhausts disk ([Errno 28]). That was the ROOT cause the small group
+  # locks (core/markllm) silently failed to generate — not the runner size.
   cache: {}
   script:
     - pip install --quiet pip-tools pip-audit
@@ -2422,22 +2427,28 @@ markllm-watermark-eval:
     - when: on_success
   image: python:3.10-slim
   needs: ["artifact-signing-gate", "model-manifest"]
-  # Medium runner for disk headroom: this job installs the multi-GB torch/transformers
-  # stack and pulls a transformers model — it OOM'd disk ([Errno 28]) on a small runner,
-  # and because its markllm-results.json is a REQUIRED artifact for evidence-summary, that
-  # disk failure cascaded into a BLOCKING evidence-summary failure. (Same fix as modelaudit-scan.)
+  # Medium runner for disk headroom: this job downloads a ~3 GB transformers MODEL at
+  # runtime (Qwen2.5-1.5B-Instruct) — that model pull, not the torch install, is what
+  # needs the room. Torch itself is now the CPU-only wheel (see below), so the install
+  # footprint is small; the medium runner is justified by the model download alone.
   tags: ["saas-linux-medium-amd64"]
-  # cache:{} — this is the main cache bloater: it installs the multi-GB torch/transformers
-  # watermark stack. Keeping it out of the shared pip cache stops that bloat reaching every
-  # other job's runner disk (the [Errno 28] root cause). It re-downloads its own deps.
+  # cache:{} — keep this job's deps + model out of the shared pip cache so they can't
+  # bloat other jobs' runner disk. It re-downloads its own deps.
   cache: {}
-  # Advisory: the live eval pulls a multi-GB transformers model and a heavy
-  # watermark stack onto a small runner, so a load/runtime failure records
-  # evidence (markllm-results.json) without blocking the security pipeline.
+  # Advisory: the live eval pulls a multi-GB transformers model and evaluates a model
+  # that is NOT the signed integrity-path artifact, so a load/runtime failure records
+  # evidence (markllm-results.json) without blocking the security pipeline. (Its result
+  # is an ADVISORY input to evidence-summary — see write_ci_evidence_summary.py.)
   allow_failure: true
   script:
     - pip install --quiet --upgrade pip setuptools wheel
-    - pip install --quiet "markllm==${MARKLLM_VERSION}" "torch==${TORCH_VERSION}" "transformers==${TRANSFORMERS_VERSION}"
+    # Install torch from the CPU-only wheel index: the default PyPI build pulls the
+    # ~2 GB CUDA stack (nvidia-* wheels) onto CPU-only CI runners — gratuitous disk that
+    # was the root [Errno 28] cause. The +cpu wheel (~200 MB, no nvidia deps) matches the
+    # hash-pinned requirements-ci-markllm.txt lock. torch must land first so the markllm/
+    # transformers install below sees it already satisfied and won't re-fetch CUDA torch.
+    - pip install --quiet "torch==${TORCH_VERSION}+cpu" --index-url https://download.pytorch.org/whl/cpu
+    - pip install --quiet "markllm==${MARKLLM_VERSION}" "transformers==${TRANSFORMERS_VERSION}"
     - mkdir -p "${REPORTS_DIR}"
     - |
       # Resolve the model id dynamically from the model download. If

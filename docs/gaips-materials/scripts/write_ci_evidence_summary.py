@@ -6,16 +6,24 @@ from pathlib import Path
 
 EXPECTED = [
     "semgrep.json",
-    "markllm-results.json",
     # The endpoint-dependent live evals (promptfoo/garak/giskard/inspect-ai/pyrit/
     # guardrail-regression) were split into the separate live-scan pipeline
     # (docs/gaips-materials/ci/live-scans.gitlab-ci.yml) — they no longer run here,
     # so they are not gated as required artifacts in this static pipeline.
+    #
+    # markllm-results.json was DEMOTED to ADVISORY (below): markllm-watermark-eval is
+    # itself allow_failure:true (it pulls a multi-GB transformers model on a runner and
+    # evals a model that is NOT the signed integrity-path artifact), so a load/OOM/disk
+    # ([Errno 28]) failure that prevents it writing the file must not hard-block the
+    # security-evidence gate. It previously did: required-MISSING always fails (below),
+    # so a markllm disk failure cascaded into a BLOCKING evidence-summary failure.
 ]
 
 # Advisory artifacts — displayed for completeness but NOT gated (they skip
-# cleanly when their input is absent, so missing ≠ failure).
+# cleanly when their input is absent, so missing ≠ failure). A present-but-FAILED
+# advisory verdict is logged as a warning but does not fail the job.
 ADVISORY = [
+    "markllm-results.json",
     "modelaudit-summary.json",
     "great-expectations.json",
     "ydata-profile.json",

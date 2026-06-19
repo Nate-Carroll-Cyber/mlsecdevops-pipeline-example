@@ -125,9 +125,9 @@ All packages below are installed fresh in each job container. None are pinned in
 | `pandas` | — | `giskard-scan` **(live-scan)** | ⚠️ Unpinned | Data manipulation (required by giskard) |
 | `inspect-ai` | — | `inspect-ai-eval` **(live-scan)** | ⚠️ Unpinned | Structured AI evaluation framework |
 | `inspect-evals` | — | `inspect-ai-eval` **(live-scan)** | ⚠️ Unpinned | Built-in eval tasks (MMLU, TruthfulQA, WMDP, GDM CTF) |
-| `markllm` | — | `markllm-watermark-eval` | ⚠️ Unpinned | LLM watermark detection |
-| `torch` | — | `markllm-watermark-eval` | ⚠️ Unpinned | PyTorch (required by markllm) |
-| `transformers` | — | `markllm-watermark-eval` | ⚠️ Unpinned | Hugging Face Transformers (required by markllm) |
+| `markllm` | `==0.1.5` | `markllm-watermark-eval` | ✅ Pinned (`MARKLLM_VERSION`) | LLM watermark detection |
+| `torch` | `==2.12.0+cpu` | `markllm-watermark-eval` | ✅ Pinned, CPU-only wheel (`TORCH_VERSION`) | PyTorch — installed from the PyTorch CPU index (no `nvidia-*` CUDA deps; ~200 MB vs ~2 GB) to bound runner disk |
+| `transformers` | `==4.57.6` | `markllm-watermark-eval` | ✅ Pinned (`TRANSFORMERS_VERSION`) | Hugging Face Transformers (required by markllm) |
 | `pyrit` | — | `pyrit-scan` **(live-scan)** | ⚠️ Unpinned | Microsoft PyRIT adversarial red-teaming framework |
 | `jsonschema` | — | `eval-dataset-validate` | ⚠️ Unpinned | Draft-07 validation of eval dataset records against `evals/eval-dataset.schema.json` |
 | `presidio-analyzer` | — | `dataset-redact` | ⚠️ Unpinned | Microsoft Presidio PII detection (pulls in `spacy`) |

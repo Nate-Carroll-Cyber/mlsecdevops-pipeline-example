@@ -1049,7 +1049,7 @@ This is the pipeline's live AI-watermarking self-test: it proves the model can b
 6. Writes a JSON report with `status` (`passed`/`failed`), per-prompt results, and metrics; any import/load/generation failure writes a `failed` report and exits non-zero.
 7. Artifacts are uploaded `when: always`.
 
-**Output file(s):** `reports/markllm-results.json` — the watermark generate-then-detect self-test result, including per-prompt outputs, detection results, and an overall pass/fail `status` that `evidence-summary` reads as a required verdict.
+**Output file(s):** `reports/markllm-results.json` — the watermark generate-then-detect self-test result, including per-prompt outputs, detection results, and an overall pass/fail `status` that `evidence-summary` reads as an **advisory** verdict (this job is `allow_failure` and evaluates a model that is not the signed integrity-path artifact, so its result is displayed and a failure is logged but does not block the gate).
 
 ### Stage 7 — Guardrail / Drift
 
@@ -1098,8 +1098,8 @@ This is the pipeline's consolidating gate: it gathers reports from across the ru
 **Step by step, in plain English**
 1. Skips on `[sigstore-discovery]` commits; otherwise installs `jinja2` and creates the evidence directory.
 2. Runs `write_ci_evidence_summary.py` against the reports directory — invoked WITHOUT `--enforce-verdicts`, so it runs in advisory-verdict mode (teeth deferred).
-3. For each required artifact (`semgrep.json`, `markllm-results.json`) it reads a 3-state VERDICT — pass / fail / inert (present but no pass/fail signal) — and treats a missing file as `absent`.
-4. For advisory artifacts (e.g. `evidently-drift.json`, `modelaudit-summary.json`, `great-expectations.json`, `dependency-track.json`) it records the same 3-state verdict but never gates on them.
+3. For the required artifact (`semgrep.json`) it reads a 3-state VERDICT — pass / fail / inert (present but no pass/fail signal) — and treats a missing file as `absent`. A missing required artifact is the only thing that hard-fails the gate.
+4. For advisory artifacts (`markllm-results.json`, `evidently-drift.json`, `modelaudit-summary.json`, `great-expectations.json`, `dependency-track.json`, etc.) it records the same 3-state verdict but never gates on them — so a markllm disk/OOM hiccup that prevents the file being written can no longer cascade into a blocking `evidence-summary` failure.
 5. Builds the `evidence-summary.md` tables (Artifact / Present / Verdict / Detail) plus a Gate section, and emits warnings to the log for failing verdicts.
 6. Hard-fails (exit 1) only when a REQUIRED artifact is MISSING; a present-but-failing required verdict merely warns and would only block under `--enforce-verdicts`.
 7. Bundles `dataset-reference.seed.jsonl` into the evidence dir if a drift reference was seeded this run (commit it to `evals/dataset-reference.jsonl` to activate drift detection).

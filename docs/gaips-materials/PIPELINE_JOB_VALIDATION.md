@@ -2167,6 +2167,14 @@ Seed contents (pasted `dataset-reference.seed.jsonl`):
 **Findings (most damning first):**
 - 🔴 **F1 — Presence ≠ pass; the gate never reads the artifacts.** `EXPECTED = [semgrep.json, markllm-results.json]`, checked via `.exists()` only — the script opens no file and inspects no finding/verdict. semgrep findings, a markllm watermark-detection failure, etc. all pass as long as the files exist. An existence gate presented as an "evaluation gate."
 - 🔴 **F2 — The "required" set is just 2 weak files; the strongest controls aren't checked at all.** Post-split, `EXPECTED` was trimmed to `semgrep.json` + `markllm-results.json`. None of the hard gates' outputs — `clamav-scan`, `signature-verification`/`tamper-verification`, `dataset-scan`, `artifact-signing-gate`, `pip-audit` — are in `EXPECTED` *or even* `ADVISORY`. So a core integrity report silently going missing would **not** trip this gate; it verifies the integrity chain produced nothing.
+> **✅ RESOLVED (2026-06-19, session 10) — `markllm-results.json` demoted out of `EXPECTED`.** `markllm-watermark-eval`
+> is `allow_failure:true` and evaluates a model that is NOT the signed integrity-path artifact, yet a disk/OOM
+> ([Errno 28]) failure that stopped it writing the file hard-failed this gate (required-MISSING always fails). It is
+> now an **ADVISORY** artifact ([write_ci_evidence_summary.py:18](scripts/write_ci_evidence_summary.py#L18)): its
+> verdict is still shown and a failure is logged, but absence no longer blocks. `EXPECTED` is now `semgrep.json` only.
+> (F1's verdict-reading was already addressed by Fix #33; F2's broader "add the strong integrity controls to EXPECTED"
+> point remains open and is unaffected by this change.)
+
 - ⚠️ **F3 — Advisory `False` rows blur "skipped-by-design" vs "broken."** `great-expectations.json`=False (#30 deferred, ff9bd7e unpushed), `ydata-profile.json`=False (#31 same), `dependency-track.json`=False (DT creds unset) — all legitimately absent here, but the table renders a bare `False` with no 3-state distinction. A genuinely broken producer looks identical to a deferred one (same skip-disguises-break theme as #22/#29).
 - ⚠️ **F4 — It bundles vacuous/empty evidence as if it were signal.** `evidently-drift.json`=True is the **seed-mode** report (`{seeded:true,drift_detected:false}` — no drift assessment, per #38), and the bundle also carries #38's empty `evidence/evidently/` dir. "Present:True" overstates — a drift report exists but contains no drift verdict.
 - ⚠️ **F5 — The drift-baseline bundle path is dead (confirms #36).** Lines 2409-2411 bundle `eval-baseline.seed.json` *if present* — it isn't (upload WARNING), because #36 skipped before producing a seed (dead-by-construction). The advertised "grab the seed from the evidence bundle and commit it" workflow has nothing to grab. Upload WARNs; job still succeeds (the path sits unconditionally in `artifacts:`).

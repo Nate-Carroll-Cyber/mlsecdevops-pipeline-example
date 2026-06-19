@@ -1,4 +1,4 @@
-# Session Handoff — GAIPS Model Pipeline (updated 2026-06-18, session 5)
+# Session Handoff — GAIPS Model Pipeline (updated 2026-06-19, session 5)
 
 > **NAMING:** This is the **GAIPS model pipeline**. The repo/dir is named `counter-spy` and
 > holds untracked, unrelated project dirs (`services/`, `packages/`, `src/`, `ctf-frontend/`)
@@ -11,7 +11,7 @@
 
 ---
 
-# ▶️ STATUS (2026-06-18, session 5): REVIEW OF `e0311ab` → 6 FINDINGS (3 P1 / 3 P2) ALL FIXED + committed `d7585b7` + **PUSHED** (CI triggered). RESUME AT: watch this branch's pipeline; the deeper protected/default-branch validation remains open.
+# ▶️ STATUS (2026-06-19, session 5): 🟢 **PIPELINE GREEN on `56beedc`.** Reviewed `e0311ab` (6 findings → `d7585b7`), then fixed 3 run failures across two pushes (`bd26e57` gitleaks+tamper, `56beedc` lockfile-audit) + added a per-job README reference. The feature-branch pipeline now passes end-to-end. RESUME AT: the protected/default-branch validation run for the signing/identity legs (the only substantive open item).
 
 > **What this session did.** A review of `e0311ab` (the #29–#34 implementation commit) found **6 findings where
 > behavior didn't match the docs/commit claims**. All fixed in one commit (`d7585b7`), then the branch was
@@ -126,9 +126,17 @@
 > file + gate posture), in the user's requested format. Authored via 6 parallel sub-agents (one per stage group) that
 > read each job block + backing script; assembled and verified (50 `####` blocks, 11 `### Stage` headers).
 >
-> **➡️ NEXT:** push this turn's commit → watch the 3rd run; `lockfile-audit` should now compile the core/markllm/
-> dataquality groups (or WARN per group) and go green. Still open (unchanged): the protected/default-branch validation
-> run for the signing/identity legs.
+> **✅ RESULT — 3rd run on `56beedc` PASSED (full pipeline GREEN).** All three run failures are resolved and
+> confirmed on CI: `gitleaks-scan` pulls from GHCR, `tamper-verification` passes (content-based compare; baseline
+> migrated to relative-path form on first green run), and `lockfile-audit` is green (per-group compile/audit/merge).
+> The whole feature-branch pipeline now passes end-to-end.
+>
+> **➡️ NEXT (only substantive open item):** the **protected/default-branch validation run** for the legs that can't
+> execute on this unprotected feature branch — `signature-verification` #19 (real verify vs DEFER), keyless
+> `ai-bom-sign` / `model-sign` identity binding, and `data-drift-baseline-commit` (needs default branch +
+> `GITLAB_PUSH_TOKEN`). Non-blocking follow-ups still parked: commit the `lockfile-audit` core lock as
+> `ci/requirements-ci.txt` for `--require-hashes` (#0 teeth), then drop `allow_failure` on the audits + `markllm-deps-audit`
+> (#23) once green there. Housekeeping: stale `.git/gc.log` (auto-gc paused) — clear with `git gc` when convenient.
 
 ---
 

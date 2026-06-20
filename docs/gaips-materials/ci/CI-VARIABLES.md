@@ -1,8 +1,11 @@
 # GAIPS CI Pipeline — CI/CD Variable Reference
 
-Every variable the repo-root `.gitlab-ci.yml` reads, where it's set, and what it gates. Set
-these in **GitLab → Settings → CI/CD → Variables** (or fetch from Vault via the
-`vault-secrets` job — see the *Source* column).
+Every variable the repo-root `.gitlab-ci.yml` reads, where it's set, and what it gates. By
+default, set these directly in **GitLab → Settings → CI/CD → Variables**. Secrets can
+optionally be sourced from HashiCorp Vault via the `vault-secrets` job (see the *Source*
+column) when that backend is configured.
+
+> **Secrets management.** HashiCorp Vault remains the recommended production-grade secrets management option for this pipeline, especially when centralized auditability, short-lived credentials, and policy-based secret access are required. To reduce operating costs for lab, demo, and early validation environments, this repository also supports standard GitLab CI/CD variables as a lower-cost fallback when `VAULT_ADDR` is not configured.
 
 **Legend**
 - **Source:** `you` = set as a CI/CD variable · `vault` = fetched by `vault-secrets`
@@ -35,10 +38,11 @@ Run one-off historic scans or repository history cleanup separately when needed.
 
 ---
 
-## 2. Secrets fetched by `vault-secrets` (or set directly if not using Vault)
+## 2. Secrets — set as CI/CD variables (optionally sourced from Vault)
 
-Each maps to a Vault path `secret/data/gaips/ci/<name>` (field `value`). If you're
-**not** using Vault, set these directly as CI/CD variables instead.
+Set these directly as masked CI/CD variables. Optionally, when Vault is configured,
+the `vault-secrets` job fetches each from the Vault path `secret/data/gaips/ci/<name>`
+(field `value`) instead.
 
 | Variable | Vault path (`…/ci/…`) | Masked | Seeded by TF? | Purpose / consuming jobs |
 | --- | --- | --- | --- | --- |
@@ -50,6 +54,7 @@ Each maps to a Vault path `secret/data/gaips/ci/<name>` (field `value`). If you'
 | `CI_REGISTRY_TOKEN` | `registry-token` | Yes | ✅ stub | Registry token (provisioned for app/registry use). |
 | `DT_API_URL` | `dt-api-url` | No | ❌ add manually | Dependency-Track base URL (see §4). |
 | `DT_API_KEY` | `dt-api-key` | Yes | ❌ add manually | Dependency-Track API key (needs BOM_UPLOAD + VIEW). |
+| `RL_TOKEN` | `secure-software-token` | Yes | ❌ add manually | Spectra Assure **Community** Personal Access Token for `secure-software-scan` (OSS dependency reputation/malware gate, see §4). Blank → the job skips. |
 
 For projects not using Vault yet, set `MODEL_SIGNING_IDENTITY` and
 `SIGSTORE_OIDC_ISSUER` directly as GitLab project CI/CD variables after running
@@ -90,8 +95,37 @@ verification identifiers, not secrets; leave variable expansion off.
 | `DT_API_URL` | vault/you | No | `""` | Dependency-Track URL (no trailing `/api`). Blank → `dependency-track-upload` skips. Wiring runbook + turnkey instance: [`deployment/dependency-track/`](../deployment/dependency-track/) (Fix #34). |
 | `DT_API_KEY` | vault/you | Yes | `""` | Dependency-Track API key. |
 | `DT_FAIL_ON` | default | No | `FAIL` | `violationState`(s) that fail the DT policy gate (comma list). |
+| `RL_TOKEN` | vault/you | Yes | `""` | Spectra Assure **Community** PAT. Set it as a GitLab CI/CD variable of **either type** — a normal *Variable* (holds the token) or a *File* variable (holds a path GitLab writes the token to); the script handles both. Mark it **Masked and hidden** + **Protected**. Vault injects it via path `secure-software-token`. Blank → the job skips. |
+| `RL_TOKEN_FILE` | you | n/a | `""` | Optional alias for `RL_TOKEN`, same value-or-path handling. Only needed if you want a second, explicitly file-named variable. |
+| `RL_FAIL_ON` | default | No | `""` | **Enforcement switch** for `secure-software-scan`. Blank → report-only scan (always green; publishes `reports/secure-software.json`). `malware,tampering` → gate the pipeline on a recent malware/tampering verdict. Same pattern as `DT_FAIL_ON`. |
+| `RL_API_URL` | default | No | `""` → `https://data.reversinglabs.com/api/oss/community/v2/free` | API base. Default is the **free Community** API. **Portal** accounts override with their portal base *ending in* `/community`, e.g. `https://<org>.secure.software/api/public/v1/community`. Endpoint paths (`/user/account`, `/find/packages`, `/report/...`) are appended to whichever base is set. |
 | `DVC_REMOTE_URL` | you | No | `""` | `s3://`/`gs://`/`azure://`/`ssh://` remote for `dvc-verify` to pull pinned data/models. Blank → reports status only. |
 | `GITLAB_API_TOKEN` | you | Yes | `""` | Project/group access token with **`read_api`** scope. Enables the operational block of `metrics-normalize` (pipeline/job duration, queue time, status by stage via the GitLab API). **Blank → the operational block skips cleanly; report-derived metrics + the Pages dashboard still render.** |
+
+> **Storing the Spectra Assure Community PAT before Vault is ready.**
+> **Settings → CI/CD → Variables → Add variable**, **Key = `RL_TOKEN`**,
+> **Value =** the PAT, then choose **either**:
+> - **Type = Variable**, **Visibility = Masked and hidden** — works when the token
+>   matches GitLab's mask regex (single line, ≥ 8 chars, charset
+>   `a–z A–Z 0–9 + / = @ : . _ -`); or
+> - **Type = File** — if the token won't save as masked (chars outside that set).
+>   GitLab writes the value to a tmpfile and exposes its *path*; the script reads
+>   the token from that file. Not log-redacted, but never printed by the job.
+>
+> Set **Protect variable = ON** (so it's only exported on protected branches/tags —
+> test on a protected branch, or untick while testing) and **Expand variable
+> reference = OFF**. "Masked and hidden" can never be revealed after saving, so keep
+> the original PAT in your password manager. When Vault is wired in, the
+> `secure-software-token` path injects `RL_TOKEN` directly — delete the manual
+> variable then.
+>
+> **Verify the token before spending a pipeline run** — the account endpoint does
+> not consume quota:
+> ```
+> RL_TOKEN='<your-PAT>' python3 docs/gaips-materials/scripts/secure_software_scan.py --check-token
+> ```
+> Prints the account, subscription tier, monthly request usage, and the per-request
+> package cap; exits non-zero if the token is invalid/expired.
 
 ---
 

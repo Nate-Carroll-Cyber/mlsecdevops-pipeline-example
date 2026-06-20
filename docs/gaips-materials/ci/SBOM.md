@@ -21,7 +21,7 @@ The pipeline is a DAG across ten stages. `model-integrity` converges on `artifac
 flowchart TD
     setup[setup + vault-secrets]
     subgraph SAST [sast]
-      s1[semgrep · secret-detection · gitleaks<br/>pip-audit · pkg-integrity · conda-verify]
+      s1[semgrep · secret-detection · gitleaks<br/>pip-audit · secure-software-scan · pkg-integrity · conda-verify]
     end
     subgraph SBOM [sbom]
       s2[syft-cyclonedx · syft-spdx · dvc-verify]
@@ -138,7 +138,7 @@ All packages below are installed fresh in each job container. None are pinned in
 | `evidently` | — | `evidently-drift` | ⚠️ Unpinned | Data/feature drift (DataDriftPreset/PSI) + LLM TextEvals over the dataset |
 | `ydata-profiling` | — | `ydata-profile` | ⚠️ Unpinned | Advisory dataset profile; pins narrow numpy/pandas/matplotlib ranges |
 | `dvc` | `[all]` | `dvc-verify` | ⚠️ Unpinned | Data/model version lineage; verifies workspace vs pinned versions |
-| `requests` | — | `dependency-track-upload` | ⚠️ Unpinned | HTTP client for the Dependency-Track REST API |
+| `requests` | — | `dependency-track-upload`, `secure-software-scan` | ⚠️ Unpinned | HTTP client for the Dependency-Track and ReversingLabs Spectra Assure Community REST APIs |
 | `pandas` | — | `great-expectations-validate`, `evidently-drift`, `ydata-profile` | ⚠️ Unpinned | Dataset loading for the data-quality jobs |
 | `pip` / `setuptools` / `wheel` | — | All Python jobs (before_script) | ⚠️ Unpinned | Upgraded to latest in every job before_script |
 
@@ -160,6 +160,7 @@ All packages below are installed fresh in each job container. None are pinned in
 
 | Risk | Status | Notes |
 | --- | --- | --- |
+| No upstream reputation/malware gate on OSS dependencies (pip-audit/grype/trivy catch *known CVEs*, not *malicious packages* — typosquats, account-takeover injections, removed/tampered releases) | ✅ Added | New `secure-software-scan` (sast stage, next to `pip-audit`; `scripts/secure_software_scan.py`) polls the ReversingLabs Spectra Assure **Community** catalogue for each pinned dependency (purl, batched 5/request) and reads its per-version `assessments.malware`/`assessments.tampering` verdict + `incidents`. Enforcement switch `RL_FAIL_ON`: blank = report-only; `malware,tampering` = gate. Skips cleanly when `RL_TOKEN` is unset. **Remaining action:** create a Community PAT, set `RL_TOKEN` (masked+protected), then flip `RL_FAIL_ON` to `malware,tampering` to enforce. |
 | `cosign` binary downloaded with no checksum verification | ✅ Fixed | All four install sites (`model-signing-install`, `dataset-sign`, `sign-evidence`, `image-sign`) download `cosign_checksums.txt` and verify via `sha256sum --check --strict` before installing |
 | `promptfoo` unpinned | ✅ Fixed | Pinned to `0.121.15` via `PROMPTFOO_VERSION` (now in the separate [live-scan pipeline](live-scans.gitlab-ci.yml)) |
 | `torch` + `transformers` unaudited | ✅ Fixed | New `markllm-deps-audit` job runs `pip-audit` against `torch`, `transformers`, and `markllm` before `markllm-watermark-eval` |

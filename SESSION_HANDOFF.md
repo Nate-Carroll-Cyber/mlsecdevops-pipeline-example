@@ -1,4 +1,4 @@
-# Session Handoff — GAIPS Model Pipeline (updated 2026-06-19, session 10)
+# Session Handoff — GAIPS Model Pipeline (updated 2026-06-20, session 10)
 
 > **NAMING:** This is the **GAIPS model pipeline**. The repo/dir is named `counter-spy` and
 > holds untracked, unrelated project dirs (`services/`, `packages/`, `src/`, `ctf-frontend/`)
@@ -25,7 +25,61 @@
 >
 > **The pipeline is now fully validated end-to-end on the protected default branch.** The session-5 open item is CLOSED.
 >
-> **RESUME / REMAINING (none blocking):** (1) **Revoke the GitLab PAT** (used all session for polling/MR — in this transcript). (2) Drift activation remains deliberately deferred — needs `GITLAB_PUSH_TOKEN` AND a realistically-sized real-data reference (Q2); don't activate on the gandalf set. (3) DependencyTrack still needs a DT instance + `DT_API_*`. (4) The 1 remaining semgrep INFO (`run-as-non-root` on the PreSync hook) is a documented accepted limitation (root needed for runtime apt). (5) The feature branch `gaips-pipeline-required-fixes` is merged but not deleted; the local branch is a doc commit (`d333ea0`) behind `main`'s merge commit.
+> **✅ SESSION 10 cont. (2026-06-20) — DRIFT ACTIVATED + a real bug found, fixed, and CI-VERIFIED; README file-tree added.**
+>
+> **Drift activation (user-directed).** Took the `main`-run `evidently-drift` seed (`dataset-reference.seed.jsonl`),
+> sanitized it exactly as `data-drift-baseline-commit` would (null/non-finite dropped, `sort_keys`, abort-if-empty),
+> and **committed the 112-record `evals/dataset-reference.jsonl`** (MR !2, merge `e4670dc`). Also **documented the full
+> seed→sanitize→commit→compare process** in the README ("Activating Data-Drift Detection" — both the auto
+> `GITLAB_PUSH_TOKEN` path and the manual path, with the honest "reference must be a representative *normal* corpus or
+> the PSI signal is vacuous" caveat).
+>
+> **Activating it exposed a latent bug seed-mode had hidden (the comparison path had NEVER run).** `evidently-drift`
+> crashed: `StatTestInvalidFeatureTypeError: psi isn't applicable to feature of type text` — `DataDriftPreset(method="psi")`
+> ran PSI on the free-text `prompt` column. And `find_drift()` looked for a `drift_detected` boolean evidently 0.7.21
+> doesn't emit, so even past the crash it would fail CLOSED. **Fixed `run_evidently_report.py` (commit `1f66080`, merged
+> MR !3 `cecbe2de`):** restrict `DataDriftPreset(columns=[category, similarity], method="psi")` (text→TextEvals, `id`
+> excluded), declare `numerical_columns`, and rewrite `find_drift()` to read the `{count, share}` drift metric vs
+> `config.drift_share` (located by value SHAPE, not index). **Verified LOCALLY first** (evidently==0.7.21/pandas==3.0.3 on
+> py3.12, both directions: self-compare→`drift_detected:false` share 0.0; synthetic shift→`true` share 1.0), THEN
+> **CI-VERIFIED GREEN** (pipeline `2616269036`, job 14952386581): `evidently-drift` SUCCESS, `"seeded": false` (the FIRST
+> real comparison ever), `drift_detected:false`, "No data drift — 112 vs 112". **The seed→commit→compare chain is now
+> proven end-to-end.**
+>
+> **README top — file tree + public-mirror notes (commit `99a7636`, LOCAL-ONLY, not pushed).** Added a "Repository File
+> Tree" (91 tracked files; the unrelated app dirs `services/`/`packages/`/`src/`/`ctf-frontend/` are NOT tracked, so the
+> repo is already cleanly separated) + a "Publishing to a Public GitHub Repo" section. **CORRECTION the user made:** the
+> GitHub repo is a **public hosting/sharing MIRROR — CI STAYS IN GitLab** (no GitHub Actions port; `.gitlab-ci.yml` ships
+> as-is and runs in GitLab).
+>
+> **Cost discipline this session.** `ci.skip` on all doc pushes; cancelled the redundant `merge_request_event` pipeline
+> that every MR merge spawns (job rules use bare `when: on_success`); cancelled the low-value drift *watch*-run, fixed the
+> bug, then spent ONE run to verify. Verified the evidently fix LOCALLY before any billable run (per
+> [[feedback-diagnose-root-batch-pushes]]).
+>
+> **Git state (newest first; branch `gaips-pipeline-required-fixes`, `main` is protected default):**
+> ```
+> 99a7636  docs: README file tree + public-GitHub-mirror notes            ← LOCAL-ONLY (not pushed)
+> 1f66080  fix: evidently-drift PSI on cat/num + verdict extraction        ← on main (MR !3 cecbe2de), CI-verified
+> aca218b  feat: activate data-drift — commit reference + document process ← on main (MR !2 e4670dc)
+> 8c71db6  ci: scope markllm out of lockfile-audit + commit hash-locks     ← on main (MR !1 58ad3b1)
+> 4c02a5e  ci: CPU-only torch root fix + decouple markllm gate             ← on main
+> ```
+>
+> **RESUME / REMAINING (none blocking):**
+> 1. **⚠️ Revoke the GitLab PAT** — polling is fully done; nothing uses it now. (In this transcript.)
+> 2. **Push the local README commit `99a7636`** when convenient (rides the next push/MR; or `ci.skip`-push it).
+> 3. **Drift is now ACTIVE but plumbing-only** on the gandalf set (self-compare → always "no drift"). The code/chain is
+>    proven; for a *meaningful* signal, author a realistically-sized real "normal" reference corpus (Q2). Integrity/tamper
+>    is already covered by the SHA-pin + signing.
+> 4. **DependencyTrack** still needs a DT instance + `DT_API_URL`/`DT_API_KEY` (inert by design).
+> 5. **1 semgrep INFO** (`run-as-non-root`, PreSync hook) — accepted limitation (root needed for runtime apt); documented.
+> 6. **Optional:** add a `merge_request_event` exclusion to the job rules so MR merges stop spawning a duplicate pipeline.
+> 7. **Public GitHub mirror prep** (when ready): secret-hygiene first (the `gitleaks-scan`/`secret-detection` gates already
+>    enforce it — confirm green), drop the 4 working docs (`SESSION_HANDOFF.md`, `PIPELINE_JOB_VALIDATION.md`,
+>    `PIPELINE_FIX_PLAN_29-34.md`, `gitlab-pipeline-setup-notes.md`), add a `LICENSE`. Checklist is in the README top.
+> 8. Feature branch `gaips-pipeline-required-fixes` is merged but not deleted; local tip (`99a7636`) is 1 doc commit ahead
+>    of `main`'s last merge.
 
 **Verified session-9's work end-to-end (pipeline `2615013930`, sha `02bc8d4`, all 48 jobs green).** Pulled the
 CI-produced `sbom/aibom.cyclonedx.json` and confirmed `ai-bom-assemble` — which had NEVER run in CI before the

@@ -113,6 +113,28 @@ variables:
   DT_API_URL: ""                    # e.g. https://dtrack.example.com (no trailing /api)
   DT_API_KEY: ""                    # masked; needs BOM_UPLOAD + VIEW perms
   DT_FAIL_ON: "FAIL"                # violationState(s) that fail the gate (comma list)
+  # ── ReversingLabs Spectra Assure Community — OSS dep reputation/malware gate ───
+  # secure-software-scan polls the free Community catalogue for each pinned
+  # dependency and gates on a recent malware/tampering verdict. RL_TOKEN is a
+  # Spectra Assure Community Personal Access Token — set it as a MASKED CI/CD
+  # variable, Type=Variable (NOT File), Key exactly RL_TOKEN. PROTECT it ONLY if
+  # the pipeline runs on a protected branch (e.g. main): a Protected variable is
+  # NOT injected on an unprotected branch, so on a feature branch a protected
+  # RL_TOKEN silently never reaches the job (the empty default below wins and the
+  # scan skips). Blank → the job skips cleanly. Or fetch from Vault once configured.
+  # RL_FAIL_ON is the enforcement switch: blank = report-only scan;
+  # "malware,tampering" = gate the pipeline on a hit (mirrors DT_FAIL_ON).
+  # RL_REQUIRE_TOKEN turns a missing/non-injected token from a silent green skip
+  # into a LOUD hard failure — set it once you INTEND the scan to run, so a
+  # misconfigured variable can't masquerade as a passing pipeline that scanned nothing.
+  RL_TOKEN: ""                      # masked; protect ONLY for protected-branch runs; blank → skips
+  RL_FAIL_ON: "malware,tampering"   # "" = report-only · "malware,tampering" = gate (ENFORCING; harmless on skip branches)
+  # RL_REQUIRE_TOKEN is NOT defaulted "true" here on purpose: that would hard-fail
+  # MR/feature pipelines (where a Protected RL_TOKEN can't inject) and block merges.
+  # Set it as a PROTECTED UI variable = "true" so it scopes to protected branches
+  # (main) only — non-protected runs then skip cleanly.
+  RL_REQUIRE_TOKEN: ""              # "" = skip-if-no-token · set "true" as a PROTECTED UI var to hard-fail on main
+  RL_API_URL: ""                    # blank → https://my.secure.software/api/public/v1 (swap `my`→`us`/`ca` by region)
   # ── DVC — data/model version lineage (optional) ───────────────────────────────
   # Set DVC_REMOTE_URL (s3://, gs://, azure://, ssh://…) to enable `dvc pull` in
   # dvc-verify. Without it, the job reports tracked-vs-workspace status only; with
@@ -350,6 +372,7 @@ vault-secrets:
           "gaips/ci/registry-token":       "CI_REGISTRY_TOKEN",
           "gaips/ci/dt-api-url":           "DT_API_URL",
           "gaips/ci/dt-api-key":           "DT_API_KEY",
+          "gaips/ci/secure-software-token": "RL_TOKEN",
       }
 
       lines = []
@@ -543,6 +566,63 @@ pip-audit:
       - "${REPORTS_DIR}/pip-audit-cyclonedx.json"
     expire_in: 7 days
   allow_failure: true
+
+# ReversingLabs Spectra Assure Community — OSS dependency reputation/malware gate.
+# The malware-equivalent of pip-audit: where pip-audit screens the SAME lockfile
+# for known CVEs, this screens it for MALICIOUS packages (typosquats, account-
+# takeover injections, removed/tampered releases). Both are lockfile-driven, so it
+# sits here in sast next to pip-audit rather than in vuln-scan (which scans the
+# SBOM/filesystem/image). Polls the free Community catalogue per dependency (purl),
+# batched at 5 packages/request (the Community Free-plan per-request cap).
+#
+# Enforcement switch — RL_FAIL_ON (mirrors DT_FAIL_ON):
+#   ""                  → report-only scan (always exit 0; just publishes the report)
+#   "malware,tampering" → gate (fail the pipeline on a hit)
+# allow_failure:false is correct for BOTH modes: secure_software_scan.py returns 0
+# in report-only/skip and exits 1 only when an enforced category trips — so the
+# switch lives in the script's exit code, not in this YAML.
+#
+# Skips cleanly when RL_TOKEN is unset (same convention as dependency-track-upload
+# skipping on an unset DT_API_KEY), so the pipeline runs unchanged until a token
+# is wired in. needs vault-secrets so a Vault-sourced RL_TOKEN is available once
+# Vault is configured; today vault-secrets skips and RL_TOKEN comes straight from
+# the masked CI/CD variable.
+secure-software-scan:
+  stage: sast
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  # Runs AFTER pip-audit (the local CVE audit of the same lockfile) before spending
+  # any external API quota. NOTE: pip-audit is allow_failure:true (advisory), so
+  # this is ordering, not a conditional skip — it runs regardless of pip-audit's
+  # findings. (To truly skip the API call when pip-audit finds CVEs, pip-audit
+  # would need to be a hard gate.)
+  needs: ["pip-audit", "vault-secrets"]
+  allow_failure: false
+  script:
+    - pip install requests
+    - mkdir -p "${REPORTS_DIR}"
+    # Pre-flight: validate the token via the no-quota account endpoint so a bad
+    # token fails fast and cheap here with a clear message, instead of mid-scan.
+    # Exits 0 (no-op) when no token is set — the scan step below then skips cleanly.
+    - python3 "${GAIPS_MATERIALS_DIR}/scripts/secure_software_scan.py" --check-token
+    - !reference [.resolve-reqs, script]
+    - |
+      if [ -z "${REQ_FILE}" ]; then
+        echo "No requirements file to scan — skipping Spectra Assure Community scan"
+        echo '{"skipped":true,"reason":"no requirements file"}' > "${REPORTS_DIR}/secure-software.json"
+        exit 0
+      fi
+      python3 "${GAIPS_MATERIALS_DIR}/scripts/secure_software_scan.py" \
+        --requirements "${REQ_FILE}" \
+        --ecosystem pypi \
+        --fail-on "${RL_FAIL_ON}" \
+        --report "${REPORTS_DIR}/secure-software.json"
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/secure-software.json"
+    expire_in: 30 days
 
 # Fix #0-B — hash-pinned lockfile audit. The manifest pip-audit above resolves to
 # the root requirements.txt (pandas/requests/jinja2) and never reaches the full

@@ -1,10 +1,13 @@
 # GAIPS CI Pipeline — End-to-End Setup Runbook
 
 This is the full path from an empty GitLab project to a green run of the
-repo-root `.gitlab-ci.yml` with **HCP Vault Dedicated** as the secrets backend, and on to
-deploy-time signature verification. Each part is independent — the pipeline runs
+repo-root `.gitlab-ci.yml` and on to deploy-time signature verification. By default,
+secrets are supplied as **GitLab CI/CD variables**; **HCP Vault Dedicated** (Part A) is
+an optional production-grade backend. Each part is independent — the pipeline runs
 green with **nothing** configured (every integration skips cleanly), so wire them
 in as you need them.
+
+> **Secrets management.** HashiCorp Vault remains the recommended production-grade secrets management option for this pipeline, especially when centralized auditability, short-lived credentials, and policy-based secret access are required. To reduce operating costs for lab, demo, and early validation environments, this repository also supports standard GitLab CI/CD variables as a lower-cost fallback when `VAULT_ADDR` is not configured.
 
 **Conventions**
 - `…` placeholders are yours to fill (`<gitlab-host>`, `<cluster>`, etc.).
@@ -20,17 +23,19 @@ in as you need them.
 | Need | Why |
 | --- | --- |
 | GitLab **≥ 15.7** | `id_tokens:` OIDC issuance (Vault + Sigstore keyless). Older → `CI_JOB_JWT_V2` fallback (deprecated 16.x). |
-| Terraform **≥ 1.6**, `vault` CLI | Provision Vault (Part A). |
+| Terraform **≥ 1.6**, `vault` CLI | **Optional** — only to provision Vault (Part A). Skip if using GitLab CI/CD variables. |
 | An **HCP Vault Dedicated** cluster (or self-managed Vault ≥ 1.12) | Secrets backend. Optional — see Part B3 to skip Vault entirely. |
 | A GitLab runner | Default Docker runner is fine. |
 
 ---
 
-# Part A — Provision the secrets backend (HCP Vault)
+# Part A — (Optional) Provision HashiCorp Vault for production secrets
 
-> Skip this whole part if you are **not** using Vault — see **Part B3** to supply
-> secrets as plain CI/CD variables instead. The `vault-secrets` job falls back
-> automatically when `VAULT_ADDR` is unset.
+> **Optional, production-grade path.** Skip this whole part for lab/demo/early
+> validation — see **Part B3** to supply secrets as plain GitLab CI/CD variables
+> instead. The `vault-secrets` job falls back automatically when `VAULT_ADDR` is
+> unset. Use Vault when you need centralized auditability, short-lived credentials,
+> and policy-based secret access.
 
 ### A1. Create the cluster and namespace
 1. In the HCP portal, create a **Vault Dedicated** cluster. Enable the **public

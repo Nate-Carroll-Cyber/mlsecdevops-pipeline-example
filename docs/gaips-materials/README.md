@@ -2,6 +2,51 @@
 
 This directory contains the concrete starter artifacts and fixtures used by the GAIPS course docs. It is intentionally self-contained so a class can run without production accounts, private credentials, gated models, or undefined instructor assets.
 
+## Repository File Tree
+
+Every file tracked in this repo is part of the GAIPS model pipeline (the repo/dir is named `counter-spy`, but the unrelated app directories are **not** tracked here). This is the complete, authoritative layout:
+
+```
+counter-spy/   (GAIPS model pipeline — repo root)
+├── .gitlab-ci.yml          ← the pipeline definition (static security pipeline)
+├── requirements.txt        ← root runtime pins
+├── .gitleaks.toml          ← secret-scan config
+├── .gitignore
+├── SESSION_HANDOFF.md       ← working/session log (not an end-user doc)
+└── docs/
+    ├── gitlab-pipeline-setup-notes.md
+    └── gaips-materials/
+        ├── README.md  SETUP.md  PIPELINE_JOB_VALIDATION.md  PIPELINE_FIX_PLAN_29-34.md
+        ├── ci/
+        │   ├── live-scans.gitlab-ci.yml   live-scans.md   ← endpoint-dependent live-eval pipeline
+        │   ├── CI-VARIABLES.md  SBOM.md
+        │   └── requirements-ci{,-markllm,-dataquality}.{in,txt}  ← grouped CI dep locks
+        ├── scripts/         24 Python scripts — build_ai_bom, run_evidently_report,
+        │                    write_ci_evidence_summary, redact_dataset, detect_model_drift,
+        │                    dependency_track_upload, validate_eval_dataset, …
+        ├── evals/           datasets + baselines + schema (model-baseline.json,
+        │                    dataset-baseline.json, dataset-reference.jsonl,
+        │                    gandalf-ignore-instructions-test.jsonl, eval-dataset.schema.json, …)
+        ├── fixtures/        static red-team/eval outputs (garak, giskard, pyrit, inspect-ai)
+        ├── guardrails/      llama-guard / prompt-guard / model-armor fixtures
+        ├── hugging-face-hub/  HF scan fixture + review guide
+        ├── model-signing/   lab-model, tampered-model, signing fixture
+        └── deployment/
+            ├── argocd/       application, appproject, verify-signatures PreSync hook
+            ├── kubernetes/   rag-app, weaviate, network-policy, kyverno image-verify policy
+            ├── dependency-track/  docker-compose + README
+            └── vault/        terraform/, gaips-policy.hcl, jwt-auth-config.hcl
+```
+
+### Publishing to a Public GitHub Repo (hosting & sharing)
+
+**CI continues to run in GitLab.** GitHub is a public mirror for hosting and sharing the product — not a second CI runner. `.gitlab-ci.yml` and `ci/live-scans.gitlab-ci.yml` ship **as-is**: they document the pipeline and execute in GitLab; GitHub simply displays them. No GitHub Actions port is intended. Before making the repo public:
+
+- **Secret / identity hygiene (do this first).** Confirm nothing sensitive is committed: no PATs or tokens, no real internal hosts or signer identities (the committed examples use placeholders — e.g. the ArgoCD ConfigMap's `MODEL_SIGNING_IDENTITY: ci-signer@example.invalid`; the real value lives only in GitLab protected CI/CD variables, not in the repo), and fixtures/datasets contain only synthetic or sanitized data. The `gitleaks-scan` + `secret-detection` jobs already gate this in CI — confirm they're green before publishing.
+- **Exclude internal working docs** from the public repo: `SESSION_HANDOFF.md`, `PIPELINE_JOB_VALIDATION.md`, `PIPELINE_FIX_PLAN_29-34.md`, `gitlab-pipeline-setup-notes.md` (session/working artifacts, not end-user material).
+- **Add a `LICENSE`** for public distribution, and keep this README as the product entry point.
+- Everything else — `scripts/`, `evals/`, `fixtures/`, `guardrails/`, `model-signing/`, `deployment/`, the `.md` docs, `requirements*.{in,txt}`, `.gitleaks.toml` — is shareable as-is.
+
 ## Directory Map
 
 | Directory | Purpose |

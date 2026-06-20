@@ -1,8 +1,11 @@
 # GAIPS CI Pipeline — CI/CD Variable Reference
 
-Every variable the repo-root `.gitlab-ci.yml` reads, where it's set, and what it gates. Set
-these in **GitLab → Settings → CI/CD → Variables** (or fetch from Vault via the
-`vault-secrets` job — see the *Source* column).
+Every variable the repo-root `.gitlab-ci.yml` reads, where it's set, and what it gates. By
+default, set these directly in **GitLab → Settings → CI/CD → Variables**. Secrets can
+optionally be sourced from HashiCorp Vault via the `vault-secrets` job (see the *Source*
+column) when that backend is configured.
+
+> **Secrets management.** HashiCorp Vault remains the recommended production-grade secrets management option for this pipeline, especially when centralized auditability, short-lived credentials, and policy-based secret access are required. To reduce operating costs for lab, demo, and early validation environments, this repository also supports standard GitLab CI/CD variables as a lower-cost fallback when `VAULT_ADDR` is not configured.
 
 **Legend**
 - **Source:** `you` = set as a CI/CD variable · `vault` = fetched by `vault-secrets`
@@ -35,10 +38,11 @@ Run one-off historic scans or repository history cleanup separately when needed.
 
 ---
 
-## 2. Secrets fetched by `vault-secrets` (or set directly if not using Vault)
+## 2. Secrets — set as CI/CD variables (optionally sourced from Vault)
 
-Each maps to a Vault path `secret/data/gaips/ci/<name>` (field `value`). If you're
-**not** using Vault, set these directly as CI/CD variables instead.
+Set these directly as masked CI/CD variables. Optionally, when Vault is configured,
+the `vault-secrets` job fetches each from the Vault path `secret/data/gaips/ci/<name>`
+(field `value`) instead.
 
 | Variable | Vault path (`…/ci/…`) | Masked | Seeded by TF? | Purpose / consuming jobs |
 | --- | --- | --- | --- | --- |

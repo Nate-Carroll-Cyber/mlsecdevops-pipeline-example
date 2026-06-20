@@ -57,6 +57,14 @@ variables:
   # ── Pinned tool versions — update here to roll the whole pipeline ─────────────
   # Find current releases at each tool's GitHub releases page before bumping.
   COSIGN_VERSION: "v2.4.1"
+  # image-provenance-verify needs a SEPARATE, newer cosign: publishers (e.g. Aqua/trivy)
+  # now store image signatures as OCI-referrers `sigstore.bundle.v0.3` artifacts with NO
+  # legacy `.sig` tag, which cosign 2.4.1 cannot discover ("no signatures found" — verified
+  # locally against aquasec/trivy). cosign v3.x reads the new bundle format with the plain
+  # `cosign verify` command (confirmed: v3.1.1 verifies trivy, exit 0). Kept separate from
+  # COSIGN_VERSION so the model/dataset/evidence/image SIGNING jobs stay on the validated
+  # 2.4.1 (a 2→3 bump there is a breaking-change risk unrelated to this gate).
+  COSIGN_VERIFY_VERSION: "v3.1.1"
   # Python signing/scanning toolchain — PINNED exact versions (no floors) so the
   # model-integrity jobs are reproducible. Update here to roll the whole pipeline.
   MODEL_SIGNING_VERSION: "1.1.1"      # `pip install model-signing==${MODEL_SIGNING_VERSION}`
@@ -710,9 +718,10 @@ image-provenance-verify:
   script:
     - apt-get update -qq && apt-get install -y -qq curl ca-certificates
     - |
-      # Pinned, checksum-verified cosign (identical pattern to model-signing-install).
-      curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /tmp/cosign-linux-amd64
-      curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" -o /tmp/cosign_checksums.txt
+      # Pinned, checksum-verified cosign — v3.x (COSIGN_VERIFY_VERSION), required to read
+      # the OCI-referrers bundle-format signatures publishers now use (see var comment).
+      curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERIFY_VERSION}/cosign-linux-amd64" -o /tmp/cosign-linux-amd64
+      curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERIFY_VERSION}/cosign_checksums.txt" -o /tmp/cosign_checksums.txt
       grep -E "^[0-9a-f]{64}  cosign-linux-amd64$" /tmp/cosign_checksums.txt | (cd /tmp && sha256sum --check --strict)
       install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
       cosign version
@@ -723,18 +732,23 @@ image-provenance-verify:
       : > "${FAILED}"
 
       # SIGNED images — publisher documents a keyless verifying identity → cosign verify.
-      # Add a line as each identity is confirmed (one call per image).
+      # Add a line as each identity is confirmed (one call per image). cosign wants a
+      # repo@digest ref, so strip the human-readable :tag from the repo:tag@sha256 pin.
+      # NOTE: cosign output is intentionally NOT suppressed — a verify gate must show WHY
+      # it failed (the prior 2>/dev/null hid a "no signatures found" from the wrong cosign).
       verify_one() {
-        echo "── verify (signed): $1"
-        if cosign verify "$1" --certificate-identity-regexp "$2" \
-             --certificate-oidc-issuer "$3" >/dev/null 2>&1; then
-          echo "   VERIFIED — identity $2"
+        ref="$1"; idre="$2"; iss="$3"
+        digest="${ref##*@}"; repo="${ref%@*}"; repo="${repo%:*}"; vref="${repo}@${digest}"
+        echo "── verify (signed): ${vref}"
+        if cosign verify "${vref}" --certificate-identity-regexp "${idre}" \
+             --certificate-oidc-issuer "${iss}"; then
+          echo "   VERIFIED — identity ${idre}"
         else
-          echo "   VERIFY FAILED — $1"
-          echo "$1" >> "${FAILED}"
+          echo "   VERIFY FAILED — ${vref}"
+          echo "${vref}" >> "${FAILED}"
         fi
       }
-      verify_one "${IMAGE_TRIVY}" 'https://github.com/aquasecurity/trivy/\.github/workflows/.+' "${ISSUER_GHA}"
+      verify_one "${IMAGE_TRIVY}" 'https://github\.com/aquasecurity/trivy/\.github/workflows/.+' "${ISSUER_GHA}"
       signed_checked=1
 
       # DIGEST-PINNED ONLY — no publisher-documented keyless image signature. Integrity

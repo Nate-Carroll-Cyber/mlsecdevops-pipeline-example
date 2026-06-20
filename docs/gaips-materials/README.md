@@ -75,6 +75,37 @@ python docs/gaips-materials/scripts/parquet_to_jsonl.py \
 
 **Output.** A JSONL file under `evals/`, one record per line, validating against `eval-dataset.schema.json`. After conversion: record the source dataset + revision + license in `evals/dataset-baseline.json`, compute the file's SHA-256, and set it as `DATASET_EXPECTED_SHA256` (the integrity pin). The committed Lakera `gandalf_ignore_instructions` test split (112 records, MIT) was produced this way.
 
+## Activating Data-Drift Detection
+
+**Purpose.** `evidently-drift` watches the **input** side for distribution drift: Evidently's `DataDriftPreset` (PSI) compares the *current* dataset against a **committed reference snapshot** at `evals/dataset-reference.jsonl`. Until that reference exists the job runs in **seed-mode** — it emits a `{"seeded": true, "drift_detected": false}` placeholder (that is the seed default, **not** a real "no drift" verdict) and writes a candidate reference to `reports/dataset-reference.seed.jsonl` for you to commit. Activation is what turns the placeholder into an actual comparison.
+
+**How activation works (the seed → commit → compare chain).** Activation deliberately spans **two default-branch runs**:
+
+1. **Seed.** On a default-branch run with no committed reference, `evidently-drift` writes `reports/dataset-reference.seed.jsonl` (a snapshot of the current dataset).
+2. **Commit the reference.** The seed is **sanitized** (null / non-finite values dropped per record, re-emitted as strict JSONL, aborts if zero valid records — never a raw `cp`) and committed to `evals/dataset-reference.jsonl`. Two ways:
+   - **Automatic** — `data-drift-baseline-commit` does this for you on the default branch **if `GITLAB_PUSH_TOKEN` is set** (a PAT with `write_repository`). It commits with `[skip ci]` + `-o ci.skip` so it never loops, and never overwrites an existing reference.
+   - **Manual** (when `GITLAB_PUSH_TOKEN` is unset) — download the seed from the `evidently-drift` job artifact, sanitize it the same way, and commit it:
+     ```bash
+     # from the evidently-drift job artifacts: reports/dataset-reference.seed.jsonl
+     python3 - reports/dataset-reference.seed.jsonl docs/gaips-materials/evals/dataset-reference.jsonl <<'PY'
+     import json, math, sys
+     src, dst = sys.argv[1], sys.argv[2]
+     out = [{k: v for k, v in json.loads(l).items()
+             if v is not None and not (isinstance(v, float) and not math.isfinite(v))}
+            for l in open(src, encoding="utf-8") if l.strip()]
+     out = [r for r in out if r]
+     assert out, "seed produced zero valid records — refusing to commit an empty reference"
+     open(dst, "w", encoding="utf-8").write("\n".join(json.dumps(r, sort_keys=True) for r in out) + "\n")
+     print(f"sanitized {len(out)} record(s) -> {dst}")
+     PY
+     git add docs/gaips-materials/evals/dataset-reference.jsonl && git commit -m "ci: seed data-drift reference"
+     ```
+3. **Compare.** The **next** default-branch pipeline finds `evals/dataset-reference.jsonl`, so `evidently-drift` runs the PSI comparison and emits a real verdict (`"seeded": false`, `"drift_detected": true|false`). (The automatic commit uses `[skip ci]`, so its *next* run is the first to compare; a manual commit pushed normally triggers that comparison run directly.)
+
+**⚠️ The reference must be a representative "normal" corpus, or the signal is vacuous.** PSI drift only means something when the committed reference is a realistic baseline of *expected* data and the current data can plausibly diverge from it. If the reference is the **same fixture** the pipeline re-uses every run (e.g. the single-class adversarial `gandalf` set), then reference ≈ current on every run → "no drift" forever, and the gate is plumbing-only theater. In that mode, **integrity/tamper detection is already covered better** by the deterministic `DATASET_EXPECTED_SHA256` pin (`dataset-download`) plus `dataset-sign` — drift adds nothing over those until a real reference exists. `evidently-drift` is a **soft gate** (`allow_failure: true`) and never blocks the pipeline; treat its verdict as monitoring, not enforcement, until a representative reference is in place.
+
+**Output.** `evals/dataset-reference.jsonl` committed (the activated baseline) → subsequent `evidently-drift` runs report a real PSI verdict in `reports/evidently-drift.json` and an HTML/JSON report under `evidence/evidently/`.
+
 ## CI Execution Policy
 
 The repo-root `.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, prompt/eval config, and guardrail baselines. A companion [`ci/live-scans.gitlab-ci.yml`](ci/live-scans.gitlab-ci.yml) holds the endpoint-dependent live evals as a separate pipeline for a project with a model endpoint — see [`ci/live-scans.md`](ci/live-scans.md).

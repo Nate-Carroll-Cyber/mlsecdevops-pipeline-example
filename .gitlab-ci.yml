@@ -116,12 +116,24 @@ variables:
   # ── ReversingLabs Spectra Assure Community — OSS dep reputation/malware gate ───
   # secure-software-scan polls the free Community catalogue for each pinned
   # dependency and gates on a recent malware/tampering verdict. RL_TOKEN is a
-  # Spectra Assure Community Personal Access Token — set it as a MASKED + PROTECTED
-  # CI/CD variable (or fetch from Vault once configured). Blank → the job skips
-  # cleanly. RL_FAIL_ON is the enforcement switch: blank = report-only scan;
+  # Spectra Assure Community Personal Access Token — set it as a MASKED CI/CD
+  # variable, Type=Variable (NOT File), Key exactly RL_TOKEN. PROTECT it ONLY if
+  # the pipeline runs on a protected branch (e.g. main): a Protected variable is
+  # NOT injected on an unprotected branch, so on a feature branch a protected
+  # RL_TOKEN silently never reaches the job (the empty default below wins and the
+  # scan skips). Blank → the job skips cleanly. Or fetch from Vault once configured.
+  # RL_FAIL_ON is the enforcement switch: blank = report-only scan;
   # "malware,tampering" = gate the pipeline on a hit (mirrors DT_FAIL_ON).
-  RL_TOKEN: ""                      # masked + protected; blank → secure-software-scan skips
-  RL_FAIL_ON: ""                    # "" = report-only · "malware,tampering" = gate
+  # RL_REQUIRE_TOKEN turns a missing/non-injected token from a silent green skip
+  # into a LOUD hard failure — set it once you INTEND the scan to run, so a
+  # misconfigured variable can't masquerade as a passing pipeline that scanned nothing.
+  RL_TOKEN: ""                      # masked; protect ONLY for protected-branch runs; blank → skips
+  RL_FAIL_ON: "malware,tampering"   # "" = report-only · "malware,tampering" = gate (ENFORCING; harmless on skip branches)
+  # RL_REQUIRE_TOKEN is NOT defaulted "true" here on purpose: that would hard-fail
+  # MR/feature pipelines (where a Protected RL_TOKEN can't inject) and block merges.
+  # Set it as a PROTECTED UI variable = "true" so it scopes to protected branches
+  # (main) only — non-protected runs then skip cleanly.
+  RL_REQUIRE_TOKEN: ""              # "" = skip-if-no-token · set "true" as a PROTECTED UI var to hard-fail on main
   RL_API_URL: ""                    # blank → https://my.secure.software/api/public/v1 (swap `my`→`us`/`ca` by region)
   # ── DVC — data/model version lineage (optional) ───────────────────────────────
   # Set DVC_REMOTE_URL (s3://, gs://, azure://, ssh://…) to enable `dvc pull` in

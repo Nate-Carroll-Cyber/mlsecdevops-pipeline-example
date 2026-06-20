@@ -334,6 +334,16 @@ def main() -> None:
                         help="per-request HTTP timeout in seconds")
     args = parser.parse_args()
 
+    # RL_REQUIRE_TOKEN: teeth-last switch (same pattern as EVIDENCE_SIGNING_REQUIRED).
+    # Default off → a missing token is a clean skip, so the pipeline runs unchanged
+    # until a token is wired in. Set to "true"/"1"/"yes" once you INTEND the scan to
+    # run: a missing/non-injected token then becomes a LOUD hard failure instead of a
+    # silent green skip — this is what catches "the CI/CD variable never reached the
+    # job" (protected-var-on-unprotected-branch, wrong Key, env scope) the moment it
+    # happens, instead of leaving a passing pipeline that scanned nothing.
+    require_token = os.environ.get("RL_REQUIRE_TOKEN", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
     # --check-token: validate the token (no quota cost) and exit, before any of the
     # scan setup that needs a --report path or a requirements file. Designed as a
     # CI pre-flight: exit 0 when NO token is set (nothing to check — the scan job
@@ -345,9 +355,17 @@ def main() -> None:
             raise SystemExit(1)
         token = _token()
         if not token:
+            if require_token:
+                print("ERROR: RL_REQUIRE_TOKEN is set but no RL_TOKEN / RL_TOKEN_FILE "
+                      "reached this job. The CI/CD variable did not inject — check it is "
+                      "not Protected on an unprotected branch, the Key is exactly "
+                      "RL_TOKEN, and the environment scope matches.")
+                raise SystemExit(1)
             print("No token (RL_TOKEN / RL_TOKEN_FILE) configured — nothing to check "
                   "(the scan job will skip cleanly)")
             raise SystemExit(0)
+        # Length-masked confirmation so the CI log itself proves the variable arrived.
+        print(f"TOKEN PRESENT (RL_TOKEN reached the job, length={len(token)}) — validating…")
         raise SystemExit(check_account(_api_url(), token, args.timeout))
 
     if not args.report and not args.dump_raw:
@@ -372,9 +390,16 @@ def main() -> None:
 
     token = _token()
     if not token:
+        if require_token:
+            print("ERROR: RL_REQUIRE_TOKEN is set but no RL_TOKEN / RL_TOKEN_FILE reached "
+                  "the job — refusing to skip. The CI/CD variable did not inject "
+                  "(Protected on an unprotected branch? wrong Key? env scope?).")
+            write({"skipped": False, "error": "RL_REQUIRE_TOKEN set but no token injected"})
+            raise SystemExit(1)
         print("No token (RL_TOKEN / RL_TOKEN_FILE) — Spectra Assure Community scan skipped")
         write({"skipped": True, "reason": "no RL_TOKEN / RL_TOKEN_FILE configured"})
         return
+    print(f"TOKEN OK (length={len(token)}) — proceeding with Spectra Assure Community scan")
 
     if requests is None:
         print("ERROR: requests not installed — cannot reach Spectra Assure Community")

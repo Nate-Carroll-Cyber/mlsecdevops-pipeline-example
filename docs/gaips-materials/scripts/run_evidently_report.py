@@ -32,6 +32,10 @@ import pandas as pd
 
 TEXT_COLS = ("question", "prompt", "expected")
 CAT_COLS = ("category",)
+NUM_COLS = ("similarity", "score")
+# Identifier columns are excluded from drift entirely — every value is unique, so
+# PSI over them is meaningless noise (and high-cardinality).
+ID_COLS = ("id", "case_id")
 
 
 def load_dataframe(path: Path) -> pd.DataFrame:
@@ -45,31 +49,27 @@ def load_dataframe(path: Path) -> pd.DataFrame:
 
 
 def find_drift(result: dict) -> dict:
-    """Heuristically pull a drift verdict out of the snapshot dict.
+    """Extract the dataset-drift verdict from Evidently 0.7.x's serialized snapshot.
 
-    Evidently's serialized shape moves between versions; rather than bind to one
-    layout, scan for the dataset-drift signal (a boolean 'drift detected' plus a
-    drifted-column share/count) wherever it appears.
+    `DataDriftPreset` emits a drifted-columns summary metric whose value is
+    ``{"count": <n>, "share": <0..1>}``; drift is flagged when that share meets the
+    metric's ``drift_share`` threshold (default 0.5). We locate that metric by its
+    value SHAPE — not a positional index — because `TextEvals` adds sibling metrics
+    (scalar floats) whose order is not guaranteed. Verified against evidently 0.7.21:
+    a self-comparison yields share 0.0 (drift_detected False); a fully-shifted
+    dataset yields share 1.0 (drift_detected True).
     """
     found = {"drift_detected": None, "drifted_columns": None, "drift_share": None}
-
-    def walk(node):
-        if isinstance(node, dict):
-            for k, v in node.items():
-                kl = str(k).lower()
-                if isinstance(v, bool) and "drift" in kl and "detected" in kl:
-                    found["drift_detected"] = v
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
-                    if "number_of_drifted_columns" in kl or ("drifted" in kl and "count" in kl):
-                        found["drifted_columns"] = v
-                    if "share_of_drifted_columns" in kl or "drift_share" in kl:
-                        found["drift_share"] = v
-                walk(v)
-        elif isinstance(node, list):
-            for item in node:
-                walk(item)
-
-    walk(result)
+    for metric in (result.get("metrics") or []):
+        value = metric.get("value")
+        if isinstance(value, dict) and "count" in value and "share" in value:
+            share = value.get("share")
+            threshold = (metric.get("config") or {}).get("drift_share", 0.5)
+            found["drifted_columns"] = value.get("count")
+            found["drift_share"] = share
+            if isinstance(share, (int, float)) and not isinstance(share, bool):
+                found["drift_detected"] = bool(share >= threshold)
+            break
     return found
 
 
@@ -131,14 +131,33 @@ def main() -> None:
 
     present_text = [c for c in TEXT_COLS if c in current_df.columns]
     present_cat = [c for c in CAT_COLS if c in current_df.columns]
+    present_num = [c for c in NUM_COLS if c in current_df.columns]
+    # PSI drift applies to CATEGORICAL + NUMERICAL columns ONLY. Free-text columns
+    # (prompt/question) are handled by TextEvals descriptors instead — running PSI on
+    # a text feature raises StatTestInvalidFeatureTypeError — and identifier columns
+    # (id/case_id) are excluded entirely (unique values → meaningless drift).
+    drift_cols = present_cat + present_num
     definition = DataDefinition(
         text_columns=present_text or None,
         categorical_columns=present_cat or None,
+        numerical_columns=present_num or None,
     )
     current_ds = Dataset.from_pandas(current_df, data_definition=definition)
     reference_ds = Dataset.from_pandas(reference_df, data_definition=definition)
 
-    metrics = [DataDriftPreset(method="psi")]
+    if not drift_cols:
+        # Text-only dataset: TextEvals could still describe it, but there is no
+        # categorical/numerical column to PSI-compare, so there is no drift verdict
+        # to gate on. Report no-drift (don't fail closed) and stop.
+        print("No categorical/numerical columns to drift-test — PSI skipped (text-only dataset).")
+        write({"skipped": False, "seeded": False, "reference_records": len(reference_df),
+               "current_records": len(current_df), "text_columns": present_text,
+               "categorical_columns": present_cat, "numerical_columns": present_num,
+               "verdict_extracted": False, "drift_detected": False,
+               "note": "no categorical/numerical columns to PSI-test"})
+        return
+
+    metrics = [DataDriftPreset(columns=drift_cols, method="psi")]
     if present_text:
         metrics.append(TextEvals())
     report = Report(metrics, include_tests=True)
@@ -172,6 +191,8 @@ def main() -> None:
         "current_records": len(current_df),
         "text_columns": present_text,
         "categorical_columns": present_cat,
+        "numerical_columns": present_num,
+        "drift_columns": drift_cols,
         "verdict_extracted": verdict_extracted,
         **drift,
     }

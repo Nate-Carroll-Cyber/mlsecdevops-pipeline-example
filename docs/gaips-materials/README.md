@@ -21,9 +21,9 @@ counter-spy/   (GAIPS model pipeline — repo root)
         │   ├── live-scans.gitlab-ci.yml   live-scans.md   ← endpoint-dependent live-eval pipeline
         │   ├── CI-VARIABLES.md  SBOM.md
         │   └── requirements-ci{,-markllm,-dataquality}.{in,txt}  ← grouped CI dep locks
-        ├── scripts/         24 Python scripts — build_ai_bom, run_evidently_report,
+        ├── scripts/         25 Python scripts — build_ai_bom, run_evidently_report,
         │                    write_ci_evidence_summary, redact_dataset, detect_model_drift,
-        │                    dependency_track_upload, validate_eval_dataset, …
+        │                    dependency_track_upload, secure_software_scan, validate_eval_dataset, …
         ├── evals/           datasets + baselines + schema (model-baseline.json,
         │                    dataset-baseline.json, dataset-reference.jsonl,
         │                    gandalf-ignore-instructions-test.jsonl, eval-dataset.schema.json, …)
@@ -158,11 +158,11 @@ The repo-root `.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intend
 > **Full setup runbook:** [`SETUP.md`](SETUP.md) walks the entire path end to end — provisioning HCP Vault (or self-managed Vault) with Terraform, GitLab CI/CD variables, the first pipeline run, optional integrations (Dependency-Track, HF/dataset scanning, DVC), and deploy-time Kyverno + Argo CD verification.
 > **CI/CD variable catalog:** [`ci/CI-VARIABLES.md`](ci/CI-VARIABLES.md) lists every variable the pipeline reads, its source (you / Vault / GitLab), masking, default, and what it gates. Terraform inputs: [`deployment/vault/terraform/terraform.tfvars.example`](deployment/vault/terraform/terraform.tfvars.example).
 
-The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, and `deploy-prep`. It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, ModelScan, ModelAudit, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, MarkLLM live watermark evaluation, model-drift detection, evidence, a consolidated CycloneDX 1.6 AI BOM artifact (also pushed to Dependency-Track), a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification. It performs **no inference** and needs no model endpoint.
+The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, and `deploy-prep`. It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, OSS dependency reputation/malware screening (ReversingLabs Spectra Assure Community), ModelScan, ModelAudit, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, MarkLLM live watermark evaluation, model-drift detection, evidence, a consolidated CycloneDX 1.6 AI BOM artifact (also pushed to Dependency-Track), a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification. It performs **no inference** and needs no model endpoint.
 
 > **Live evals run in a separate pipeline.** The endpoint-dependent evals — `promptfoo-eval`, `garak-scan`, `giskard-scan`, `inspect-ai-eval`, `pyrit-scan`, and `guardrail-regression` — were split out into a standalone config, [`ci/live-scans.gitlab-ci.yml`](ci/live-scans.gitlab-ci.yml), meant to run as the root pipeline of a *separate* project that has a live model endpoint. See [`ci/live-scans.md`](ci/live-scans.md).
 
-Before copying this CI file into a student lab repository, add or adapt `requirements.txt`, `models/`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, `scripts/detect_model_drift.py`, the data-quality collectors (`scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/dependency_track_upload.py`), `evals/eval-dataset.schema.json`, and (after the first run seeds it) `evals/eval-baseline.json`. Configure signing and Hugging Face variables in GitLab CI/CD settings (no model endpoint is needed — this pipeline does no inference). Fixture files under `docs/gaips-materials/fixtures/` remain offline interpretation aids, not automatic CI pass-throughs.
+Before copying this CI file into a student lab repository, add or adapt `requirements.txt`, `models/`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, `scripts/detect_model_drift.py`, the data-quality collectors (`scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/dependency_track_upload.py`, `scripts/secure_software_scan.py`), `evals/eval-dataset.schema.json`, and (after the first run seeds it) `evals/eval-baseline.json`. Configure signing and Hugging Face variables in GitLab CI/CD settings (no model endpoint is needed — this pipeline does no inference). Fixture files under `docs/gaips-materials/fixtures/` remain offline interpretation aids, not automatic CI pass-throughs.
 
 The endpoint-dependent live-eval materials (`evals/promptfoo.yaml`, `guardrails/baseline.json`, `scripts/pyrit_scan.py`, `scripts/run_guardrail_regression.py`, `scripts/collect_garak_report.py`, `scripts/collect_inspect_report.py`, `scripts/run_giskard_live.py`) belong to the separate live-scan pipeline — see [`ci/live-scans.md`](ci/live-scans.md).
 
@@ -179,7 +179,7 @@ flowchart TD
     setup[setup<br/>+ vault-secrets]
 
     subgraph SAST [sast]
-      sast_jobs[semgrep · secret-detection · gitleaks<br/>pip-audit · pkg-integrity · conda-verify]
+      sast_jobs[semgrep · secret-detection · gitleaks<br/>pip-audit · secure-software-scan · pkg-integrity · conda-verify]
     end
     subgraph SBOM [sbom]
       sbom_jobs[syft-cyclonedx · syft-spdx · dvc-verify]
@@ -246,6 +246,7 @@ flowchart TD
 | `secret-detection` | Runs GitLab native Secret Detection against the current HEAD checkout (`GIT_DEPTH: 1`, `SECRET_DETECTION_LOG_OPTIONS: "--max-count=1"`). `allow_failure: false`, but the gate trips **only on `Critical`-severity findings** — High/Medium/Low are reported, not blocked. Historic secret cleanup is handled as a separate repository hygiene task so old training/app fixtures do not keep blocking current CI. |
 | `gitleaks-scan` | Runs the configurable Gitleaks hard gate with the repo's `.gitleaks.toml`; this complements native Secret Detection and remains enabled. |
 | `pip-audit` | Audits `requirements.txt` against OSV, PyPI advisory DB, and GitHub Advisory DB; outputs JSON and CycloneDX (use CycloneDX for CVSS score analysis). |
+| `secure-software-scan` | The malware-equivalent of `pip-audit` on the same lockfile: polls the ReversingLabs Spectra Assure **Community** catalogue for each pinned dependency (purl, batched 5/request) and gates on a recent **malware/tampering** verdict. Enforcement switch `RL_FAIL_ON` (blank = report-only; `malware,tampering` = gate). Skips cleanly when `RL_TOKEN` is unset. Backing script: `scripts/secure_software_scan.py`. |
 | `pkg-integrity` | Checks for hash-pinning in `requirements.txt`; generates a hashed lockfile if absent; verifies no dependency conflicts in an isolated venv via `pip check`. |
 | `conda-pkg-verify` | Advisory cross-resolution of `requirements.txt` in a `conda-forge`-only environment with strict channel priority, recording an environment manifest. Non-gating: the `conda install` and `pip check` are best-effort (`|| true`), and it reads `requirements.txt` directly (no `.resolve-reqs` fallback), so if that file is absent or conda-incompatible the manifest reflects a near-empty environment rather than the project's packages. |
 
@@ -417,6 +418,7 @@ The authoritative map of **what each job emits** — every GitLab `artifacts:` p
 | `secret-detection` | `gl-secret-detection-report.json` (.json — GitLab **secret_detection** report), `reports/secret-detection.json` (.json) | 7 days |
 | `gitleaks-scan` | `reports/gitleaks.json` (.json), `reports/gitleaks.log` (.log) | 7 days |
 | `pip-audit` | `reports/pip-audit.json` (.json), `reports/pip-audit-cyclonedx.json` (.json — CycloneDX) | 7 days |
+| `secure-software-scan` | `reports/secure-software.json` (.json — per-dependency reputation/malware verdicts + gate result) | 30 days |
 | `lockfile-audit` | `reports/requirements-ci.txt` (.txt — hash-pinned lock), `reports/lockfile-audit.json` (.json), `reports/lockfile-audit-cyclonedx.json` (.json — CycloneDX) | 7 days |
 | `markllm-deps-audit` † | `reports/markllm-deps-audit.json` (.json) | 7 days |
 | `pkg-integrity` | `reports/pkg-integrity.env` (.env), `reports/pkg-integrity-manifest.json` (.json), `requirements.hashed.txt` (.txt) | 7 days |
@@ -635,6 +637,22 @@ This is the hash-pinned dependency audit (Fix #0-B) that covers the full static 
 7. Prints totals and notes which groups were unresolvable.
 
 **Output file(s):** `reports/lockfile-audit.json` — merged, deduplicated audit across all resolvable groups; plus per-group `reports/requirements-ci*.txt` locks, `reports/requirements-ci*-audit*.json` per-group audits, and `reports/lockfile-unresolved-groups.txt`.
+
+#### `secure-software-scan` — stage: `sast` · gate driven by `RL_FAIL_ON` (report-only by default) · output: `reports/secure-software.json`
+
+**What this job is for**
+The malware-equivalent of `pip-audit` on the same lockfile: where `pip-audit` finds *known CVEs*, this screens for *malicious packages* — typosquats, account-takeover injections, and removed/tampered releases — by polling the ReversingLabs Spectra Assure **Community** catalogue for each pinned dependency. It reads each package version's malware/tampering verdict and gates on a recent incident, closing the upstream-reputation gap in the supply-chain chain. It sits in `sast` next to `pip-audit` (both lockfile-driven), ahead of the SBOM-driven `vuln-scan` stage.
+
+**Step by step, in plain English**
+1. Runs on the default Python image; `needs: ["pip-audit", "vault-secrets"]`, so it runs **after `pip-audit`** — the local CVE audit of the same lockfile — before spending any external API quota (ordering only: `pip-audit` is advisory/`allow_failure`, so this still runs regardless of its findings). Installs `requests`.
+2. **Token pre-flight:** runs `secure_software_scan.py --check-token`, which validates the token against the **no-quota** account endpoint (`GET {base}/user/account`; default base is the free Community API `https://data.reversinglabs.com/api/oss/community/v2/free`, overridable via `RL_API_URL` for Portal accounts). A present-but-invalid/expired token **fails the job fast and cheap here** with a clear message instead of mid-scan; an unset token is a no-op (exit 0) so the scan step below skips cleanly. You can run the same command locally before pushing: `RL_TOKEN='<PAT>' python3 docs/gaips-materials/scripts/secure_software_scan.py --check-token`.
+3. Resolves the requirements file (root `requirements.txt` → compiled CI lock → `.in`); clean-skips with a note if none is found.
+4. Skips cleanly when `RL_TOKEN` is unset — the pipeline runs unchanged until a Community token is wired in.
+5. Parses the lockfile into `pkg:pypi/<name>@<version>` purls and submits them to `{base}/find/packages` **in batches of five** (the Community Free-plan per-request cap), retrying briefly on rate-limit (429).
+6. For each package, matches the **pinned version** and reads *that version's* `assessments.malware.status` / `assessments.tampering.status` (the RL verdict; requires a non-`compact` response, which the script requests), its version-level `incidents`, and the package `all_malicious` rollup. The package's **lifetime** incident counts (e.g. a mature package's hundreds of historical yanks) are recorded as `package_incident_history` for context but **never gate** — only the pinned version's own signals do, to avoid false positives.
+7. Applies the **enforcement switch** `RL_FAIL_ON`: blank → report-only (always exit 0, just publishes the report); `malware,tampering` → fail the pipeline on a hit. A 404 means the package isn't in the Community catalogue (typical for private/internal deps) and is recorded as `not_in_catalogue`, not a gate failure; other API errors (401/402/429/500) fail an enforced gate so it never passes green without evaluating.
+
+**Output file(s):** `reports/secure-software.json` — per-dependency reputation/malware verdicts, packages not in the catalogue, operational errors, and the gate result.
 
 #### `pkg-integrity` — stage: `sast` · advisory (allow_failure) · output: `reports/pkg-integrity.env`, `reports/pkg-integrity-manifest.json`, `requirements.hashed.txt`
 

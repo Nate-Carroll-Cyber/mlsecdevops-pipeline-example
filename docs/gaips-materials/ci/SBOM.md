@@ -21,7 +21,7 @@ The pipeline is a DAG across ten stages. `model-integrity` converges on `artifac
 flowchart TD
     setup[setup + vault-secrets]
     subgraph SAST [sast]
-      s1[semgrep · secret-detection · gitleaks<br/>pip-audit · secure-software-scan · pkg-integrity · conda-verify]
+      s1[semgrep · secret-detection · gitleaks<br/>pip-audit · lockfile-audit · secure-software-scan<br/>image-provenance-verify · pkg-integrity · conda-verify]
     end
     subgraph SBOM [sbom]
       s2[syft-cyclonedx · syft-spdx · dvc-verify]

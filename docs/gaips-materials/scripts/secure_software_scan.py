@@ -2,13 +2,20 @@
 """Poll ReversingLabs Spectra Assure Community for OSS package reputation/malware.
 
 This is a supply-chain reputation gate for the project's *own* dependencies: it
-reads the pinned requirements lockfile, asks the Spectra Assure Community
+reads the pinned requirements lockfile(s), asks the Spectra Assure Community
 catalogue what it knows about each package@version, and gates the pipeline on a
 recent **malware** or **tampering** verdict.
 
+Pass --requirements once per file to scan the FULL accessed-library surface — the
+compiled group locks (ci/requirements-ci*.txt) plus the markllm group's pins —
+not just the 3-package root requirements.txt. Pins are merged and de-duplicated
+across files so the heavily-overlapping group locks cost one search per unique
+package.
+
 Flow (mirrors the Community API's batched search usage):
-  1. Parse the requirements lockfile into (name, version) pins → purls
-     `pkg:{ecosystem}/{name}@{version}` (e.g. pkg:pypi/numpy@1.2.3).
+  1. Parse each requirements file into (name, version) pins, merge + de-dup
+     across files, and build purls `pkg:{ecosystem}/{name}@{version}`
+     (e.g. pkg:pypi/numpy@1.2.3).
   2. POST them to `{base}/find/packages` in batches — the search endpoint
      accepts at most FIVE packages per request on the Community Free plan
      (50 on Enterprise), so the default batch size is 5.
@@ -118,7 +125,12 @@ def parse_requirements(path: Path) -> list[tuple[str, str | None]]:
             continue
         m = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*==\s*([^\s\\]+)", line)
         if m:
-            entry = (normalize_name(m.group(1)), m.group(2))
+            # Drop the PEP 440 local-version segment (everything after '+', e.g.
+            # torch 2.12.0+cpu → 2.12.0): local builds aren't published to PyPI, so
+            # the purl must reference the canonical release for the catalogue to
+            # match the exact pinned version rather than fall back to latest.
+            version = m.group(2).split("+", 1)[0]
+            entry = (normalize_name(m.group(1)), version)
         else:
             m2 = re.match(r"^([A-Za-z0-9][A-Za-z0-9._-]*)", line)
             if not m2:
@@ -314,8 +326,10 @@ def evaluate_package(purl: str, pkg: dict, want_version: str | None,
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--requirements", default="requirements.txt",
-                        help="requirements lockfile to scan (default: requirements.txt)")
+    parser.add_argument("--requirements", action="append", default=None,
+                        help="requirements/lockfile to scan; repeat the flag to scan "
+                             "several (pins are merged and de-duplicated across files "
+                             "to conserve API quota). Default: requirements.txt")
     parser.add_argument("--ecosystem", default="pypi",
                         help="purl ecosystem / Community repository (default: pypi)")
     parser.add_argument("--report", help="output report JSON path (required unless --check-token)")
@@ -406,16 +420,41 @@ def main() -> None:
         write({"skipped": True, "reason": "requests missing"})
         raise SystemExit(1)
 
-    req_path = Path(args.requirements)
-    if not req_path.exists():
-        print(f"No requirements file at {req_path} — nothing to scan")
-        write({"skipped": True, "reason": f"{req_path} not found"})
+    req_files = [Path(p) for p in (args.requirements or ["requirements.txt"])]
+    existing = [p for p in req_files if p.exists()]
+    missing = [str(p) for p in req_files if not p.exists()]
+    if not existing:
+        print(f"No requirements file(s) found: {', '.join(str(p) for p in req_files)} "
+              "— nothing to scan")
+        write({"skipped": True, "reason": "no requirements files found",
+               "requirements": [str(p) for p in req_files]})
         return
 
-    pins = parse_requirements(req_path)
+    # Merge + globally de-duplicate pins across every file. The core and
+    # dataquality group locks share most of their transitive closure, so a
+    # per-(name,version) de-dup across files scans each package ONCE — keeping the
+    # Community search-quota cost proportional to the unique stack, not the sum of
+    # the lockfiles.
+    pins: list[tuple[str, str | None]] = []
+    seen_pins: set[tuple[str, str | None]] = set()
+    per_file_counts: dict[str, dict[str, int]] = {}
+    for p in existing:
+        file_pins = parse_requirements(p)
+        new = 0
+        for entry in file_pins:
+            if entry not in seen_pins:
+                seen_pins.add(entry)
+                pins.append(entry)
+                new += 1
+        per_file_counts[str(p)] = {"parsed": len(file_pins), "new_after_dedup": new}
+        print(f"  parsed {p}: {len(file_pins)} pin(s), {new} new after de-dup")
+    if missing:
+        print(f"  note: {len(missing)} configured file(s) not present, skipped: "
+              + ", ".join(missing))
     if not pins:
-        print(f"No parseable pins in {req_path} — nothing to scan")
-        write({"skipped": True, "reason": "no parseable requirements"})
+        print("No parseable pins in any requirements file — nothing to scan")
+        write({"skipped": True, "reason": "no parseable requirements",
+               "requirements": [str(p) for p in existing]})
         return
 
     batch_size = max(1, min(args.batch_size, DEFAULT_BATCH_SIZE))
@@ -434,8 +473,9 @@ def main() -> None:
         items.append({"uuid": purl, "purl": purl})
 
     print(f"Spectra Assure Community: {base}")
-    print(f"  scanning {len(items)} {args.ecosystem} package(s) from {req_path} "
-          f"in batches of {batch_size}; mode={'ENFORCE ' + ','.join(sorted(fail_on)) if enforce else 'report-only'}")
+    print(f"  scanning {len(items)} unique {args.ecosystem} package(s) from "
+          f"{len(existing)} file(s) in batches of {batch_size}; "
+          f"mode={'ENFORCE ' + ','.join(sorted(fail_on)) if enforce else 'report-only'}")
 
     if args.dump_raw:
         print(json.dumps(search_batch(base, token, items[:batch_size], args.timeout), indent=2))
@@ -479,7 +519,8 @@ def main() -> None:
         "skipped": False,
         "api_url": base,
         "ecosystem": args.ecosystem,
-        "requirements": str(req_path),
+        "requirements": [str(p) for p in existing],
+        "requirements_parsed": per_file_counts,
         "batch_size": batch_size,
         "enforce": enforce,
         "gate_fail_on": sorted(fail_on),

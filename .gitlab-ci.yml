@@ -63,14 +63,31 @@ variables:
   SIGSTORE_PY_VERSION: "4.3.0"        # `pip install sigstore==${SIGSTORE_PY_VERSION}`
   MODELAUDIT_VERSION: "0.2.47"        # `pip install modelaudit[all]==${MODELAUDIT_VERSION}` (was a >= floor)
   GITLEAKS_VERSION: "8.30.1"          # dataset-redact secret scan (no 'v' in tarball name)
-  IMAGE_SEMGREP: "semgrep/semgrep:1.165.0"       # semgrep-sast runs IN this image (no unpinned pip install)
-  IMAGE_MINICONDA: "continuumio/miniconda3:26.3.2"
-  IMAGE_SYFT: "anchore/syft:v1.45.1-debug"
-  IMAGE_GRYPE: "anchore/grype:v0.114.0-debug"
-  IMAGE_TRIVY: "aquasec/trivy:0.71.1"   # pinned to an exact tag — keep in sync with the trivy-db schema
-  IMAGE_CYCLONEDX: "cyclonedx/cyclonedx-cli:0.32.0"   # AI BOM schema validation / format conversion
-  IMAGE_GITLEAKS: "ghcr.io/gitleaks/gitleaks:v8.30.1" # gitleaks-scan SAST job image (pinned; GHCR — gitleaks has no Docker Hub repo; keep in sync with GITLEAKS_VERSION)
-  IMAGE_CLAMAV: "clamav/clamav:1.4"                   # clamav-scan job — pinned to an exact tag (patch-floating line)
+  # Container images are pinned by IMMUTABLE DIGEST (name:tag@sha256:…), not by tag
+  # alone. A tag is a mutable pointer the publisher/registry can repoint to different
+  # bytes; only the digest fixes the exact content the CI tool images (= the job
+  # execution environment, which sees the repo + injected secrets) actually run. The
+  # human-readable :tag is kept for legibility; the @sha256 is what Docker resolves.
+  # To roll an image: bump the tag, re-resolve the index digest
+  #   docker buildx imagetools inspect <name>:<tag> --format '{{.Manifest.Digest}}'
+  # (use the multi-arch INDEX digest so the runner still resolves its own arch), and
+  # update the @sha256 here. Digests captured 2026-06-20.
+  IMAGE_SEMGREP: "semgrep/semgrep:1.165.0@sha256:f4791a54c891eabe1188248135574e6e03dfc31dfd3f3b747c7bec7079bfed1b"       # semgrep-sast runs IN this image (no unpinned pip install)
+  IMAGE_MINICONDA: "continuumio/miniconda3:26.3.2@sha256:a297bed7a4be5d57720fc7b99d700131048ced4205a8e590d514d8d5d000bd6b"
+  IMAGE_SYFT: "anchore/syft:v1.45.1-debug@sha256:e7473bc351617e6b64bbf87c4906307724d05bbf5484e55d4c2d226eea90bce9"
+  IMAGE_GRYPE: "anchore/grype:v0.114.0-debug@sha256:c7a0a7fdb173e2a3cd71946be01dd3247782299b3c01e4cbff9aa426e073ba5f"
+  IMAGE_TRIVY: "aquasec/trivy:0.71.1@sha256:53570e6911c2361ebe7995228088cf83a6b9b73e7f3cdca44bd8f8f425e80fa7"   # keep in sync with the trivy-db schema
+  IMAGE_CYCLONEDX: "cyclonedx/cyclonedx-cli:0.32.0@sha256:9a858a15e7b0843606efc0ff19d5f7575011a5428d7f3d343b4f6cf09d8f0d4e"   # AI BOM schema validation / format conversion
+  IMAGE_GITLEAKS: "ghcr.io/gitleaks/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f" # gitleaks-scan SAST job image (GHCR — gitleaks has no Docker Hub repo; keep in sync with GITLEAKS_VERSION)
+  IMAGE_CLAMAV: "clamav/clamav:1.4@sha256:6432d03326d02dbec5abc07defc4aac785b93e6cfb2834cb8dd22ac32dcc3ebd"                   # clamav-scan job
+  # Base images (were hardcoded inline per-job; centralized here + digest-pinned).
+  IMAGE_PYTHON_311: "python:3.11-slim@sha256:ae52c5bef62a6bdd42cd1e8dffef86b9cd284bde9427da79839de7a4b983e7ca"  # default job image
+  IMAGE_PYTHON_310: "python:3.10-slim@sha256:fa184fce49c170a8b1032a4f752f9fe1a7e463e7f5795a3952ca275e166fa913"  # markllm jobs (3.10-pinned)
+  IMAGE_SECRETS: "registry.gitlab.com/security-products/secrets:4@sha256:a7ac3e17f154de0027e6a4677991c5d4e7a2acac429137eb1c210fc7e5d24370"  # GitLab secret-detection
+  # Teeth-last switch for image-provenance-verify (mirrors RL_FAIL_ON / EVIDENCE_SIGNING_REQUIRED):
+  # blank → report-only (cosign-verify the signed images, never block); "true" → fail the
+  # pipeline when a SIGNED image fails to verify. Unsigned/digest-only images never gate.
+  IMAGE_VERIFY_REQUIRE: ""
   PROMPTFOO_VERSION: "0.121.15"
   # MarkLLM watermark stack — pinned to current, markllm-compatible versions and
   # shared by markllm-deps-audit and markllm-watermark-eval. transformers stays on
@@ -237,7 +254,7 @@ variables:
       || echo "[audit-env] pip-audit reported findings for ${CI_JOB_NAME} (advisory) — see ${REPORTS_DIR}/pip-audit-env-${CI_JOB_NAME}.json"
 
 default:
-  image: python:3.11-slim
+  image: ${IMAGE_PYTHON_311}
   interruptible: true
   before_script:
     - !reference [.python-secure, before_script]
@@ -432,7 +449,7 @@ secret-detection:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  image: registry.gitlab.com/security-products/secrets:4
+  image: ${IMAGE_SECRETS}
   before_script: []
   needs: ["setup"]
   variables:
@@ -568,12 +585,25 @@ pip-audit:
   allow_failure: true
 
 # ReversingLabs Spectra Assure Community — OSS dependency reputation/malware gate.
-# The malware-equivalent of pip-audit: where pip-audit screens the SAME lockfile
-# for known CVEs, this screens it for MALICIOUS packages (typosquats, account-
-# takeover injections, removed/tampered releases). Both are lockfile-driven, so it
-# sits here in sast next to pip-audit rather than in vuln-scan (which scans the
+# The malware-equivalent of lockfile-audit: where pip-audit/lockfile-audit screen
+# the dependency stack for known CVEs, this screens it for MALICIOUS packages
+# (typosquats, account-takeover injections, removed/tampered releases). It sits
+# here in sast next to pip-audit rather than in vuln-scan (which scans the
 # SBOM/filesystem/image). Polls the free Community catalogue per dependency (purl),
 # batched at 5 packages/request (the Community Free-plan per-request cap).
+#
+# COVERAGE — the FULL accessed-library surface, not the root manifest. The job
+# feeds every dependency GROUP to the scanner: the committed hash-pinned locks
+# ci/requirements-ci.txt (core) + ci/requirements-ci-dataquality.txt — the same
+# surface lockfile-audit compiles — PLUS the markllm group's pins from
+# ci/requirements-ci-markllm.in (torch / transformers / markllm), where the
+# RCE-class CVEs actually live. The markllm group is not hash-locked (its closure
+# exhausts the runner under pip-compile), but a reputation scan only reads pin
+# strings and POSTs purls — no compile, no install — so it covers that group too.
+# The scanner merges + de-dups pins across files, so the ~300 unique packages cost
+# one search each, not the sum of the (heavily overlapping) lockfiles. This
+# deliberately does NOT scan the 3-package root requirements.txt, which shadowed
+# the real stack (the same blind spot lockfile-audit was created to fix).
 #
 # Enforcement switch — RL_FAIL_ON (mirrors DT_FAIL_ON):
 #   ""                  → report-only scan (always exit 0; just publishes the report)
@@ -593,8 +623,8 @@ secure-software-scan:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  # Runs AFTER pip-audit (the local CVE audit of the same lockfile) before spending
-  # any external API quota. NOTE: pip-audit is allow_failure:true (advisory), so
+  # Runs AFTER pip-audit (the local CVE audit) before spending any external API
+  # quota. NOTE: pip-audit is allow_failure:true (advisory), so
   # this is ordering, not a conditional skip — it runs regardless of pip-audit's
   # findings. (To truly skip the API call when pip-audit finds CVEs, pip-audit
   # would need to be a hard gate.)
@@ -607,21 +637,135 @@ secure-software-scan:
     # token fails fast and cheap here with a clear message, instead of mid-scan.
     # Exits 0 (no-op) when no token is set — the scan step below then skips cleanly.
     - python3 "${GAIPS_MATERIALS_DIR}/scripts/secure_software_scan.py" --check-token
-    - !reference [.resolve-reqs, script]
     - |
-      if [ -z "${REQ_FILE}" ]; then
-        echo "No requirements file to scan — skipping Spectra Assure Community scan"
-        echo '{"skipped":true,"reason":"no requirements file"}' > "${REPORTS_DIR}/secure-software.json"
+      # Scan the FULL accessed-library surface, NOT the 3-package root
+      # requirements.txt. Build one --requirements flag per dependency GROUP,
+      # preferring the committed hash-pinned lock (ci/requirements-ci*.txt — the
+      # same surface lockfile-audit compiles) and falling back to the .in source
+      # for any group with no committed lock. The markllm group is intentionally
+      # NOT hash-locked (its multi-GB closure exhausts the runner under
+      # `pip-compile --generate-hashes`), but THIS scan only reads pin strings and
+      # POSTs purls — it never compiles or installs — so it reads the markllm .in
+      # directly and DOES cover the high-risk torch / transformers / markllm pins
+      # the malware/tampering gate must see. secure_software_scan.py merges +
+      # de-dups pins across files, so the overlapping core/dataquality locks cost
+      # one search per unique package.
+      CI_DIR="${GAIPS_MATERIALS_DIR}/ci"
+      REQ_ARGS=""
+      for IN_FILE in "${CI_DIR}/requirements-ci.in" "${CI_DIR}"/requirements-ci-*.in; do
+        [ -e "${IN_FILE}" ] || continue
+        STEM=$(basename "${IN_FILE}" .in)
+        LOCK="${CI_DIR}/${STEM}.txt"
+        if [ -f "${LOCK}" ]; then
+          REQ_ARGS="${REQ_ARGS} --requirements ${LOCK}"
+          echo "  group ${STEM}: scanning committed lock ${LOCK}"
+        else
+          REQ_ARGS="${REQ_ARGS} --requirements ${IN_FILE}"
+          echo "  group ${STEM}: no committed lock — scanning pins from ${IN_FILE}"
+        fi
+      done
+      if [ -z "${REQ_ARGS}" ]; then
+        echo "No requirements-ci* files to scan — skipping Spectra Assure Community scan"
+        echo '{"skipped":true,"reason":"no requirements-ci* files"}' > "${REPORTS_DIR}/secure-software.json"
         exit 0
       fi
       python3 "${GAIPS_MATERIALS_DIR}/scripts/secure_software_scan.py" \
-        --requirements "${REQ_FILE}" \
+        ${REQ_ARGS} \
         --ecosystem pypi \
         --fail-on "${RL_FAIL_ON}" \
         --report "${REPORTS_DIR}/secure-software.json"
   artifacts:
     paths:
       - "${REPORTS_DIR}/secure-software.json"
+    expire_in: 30 days
+
+# ── Container-image PROVENANCE verification (cosign keyless) ──────────────────
+# Digest-pinning the IMAGE_*@sha256 references above fixes INTEGRITY — we run the
+# exact bytes we recorded. This job adds the PROVENANCE half: cosign-verify that
+# those bytes were published by the genuine maintainer (the same control image-sign
+# + Kyverno apply to the workload image, here applied to the CI tool/base images —
+# the job execution environment that sees the repo + injected secrets).
+#
+# It can only verify images whose publisher signs with Sigstore KEYLESS. An OCI
+# referrers-API probe of every image (2026-06-20) found that TRIVY is the ONLY one
+# carrying a discoverable cosign signature (sigstore bundle); its verifying identity
+# is confirmed from the Aqua docs. Every other image — anchore syft/grype (both
+# variants, Docker Hub AND ghcr.io), semgrep, miniconda, cyclonedx-cli, clamav,
+# gitleaks, python, gitlab-secrets — returns empty referrers (unsigned upstream), so
+# there is nothing to cosign-verify; they are pinned-by-digest only and logged
+# EXPLICITLY below so the gap is visible, never implied-covered. (See ci/SBOM.md →
+# Supply-Chain Control Coverage. NB: no anchore→ghcr switch — ghcr is unsigned too.)
+#
+# Teeth-last (mirrors RL_FAIL_ON): report-only by default; IMAGE_VERIFY_REQUIRE=true
+# fails the pipeline when a SIGNED image fails to verify. allow_failure:false because
+# the enforce/report switch lives in the script's exit code, not this YAML.
+image-provenance-verify:
+  stage: sast
+  rules:
+    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
+      when: never
+    - when: on_success
+  needs: []
+  allow_failure: false
+  script:
+    - apt-get update -qq && apt-get install -y -qq curl ca-certificates
+    - |
+      # Pinned, checksum-verified cosign (identical pattern to model-signing-install).
+      curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign-linux-amd64" -o /tmp/cosign-linux-amd64
+      curl -sSfL "https://github.com/sigstore/cosign/releases/download/${COSIGN_VERSION}/cosign_checksums.txt" -o /tmp/cosign_checksums.txt
+      grep -E "^[0-9a-f]{64}  cosign-linux-amd64$" /tmp/cosign_checksums.txt | (cd /tmp && sha256sum --check --strict)
+      install -m 0755 /tmp/cosign-linux-amd64 /usr/local/bin/cosign
+      cosign version
+    - |
+      mkdir -p "${REPORTS_DIR}"
+      ISSUER_GHA="https://token.actions.githubusercontent.com"
+      FAILED="${REPORTS_DIR}/.image-verify-failed"
+      : > "${FAILED}"
+
+      # SIGNED images — publisher documents a keyless verifying identity → cosign verify.
+      # Add a line as each identity is confirmed (one call per image).
+      verify_one() {
+        echo "── verify (signed): $1"
+        if cosign verify "$1" --certificate-identity-regexp "$2" \
+             --certificate-oidc-issuer "$3" >/dev/null 2>&1; then
+          echo "   VERIFIED — identity $2"
+        else
+          echo "   VERIFY FAILED — $1"
+          echo "$1" >> "${FAILED}"
+        fi
+      }
+      verify_one "${IMAGE_TRIVY}" 'https://github.com/aquasecurity/trivy/\.github/workflows/.+' "${ISSUER_GHA}"
+      signed_checked=1
+
+      # DIGEST-PINNED ONLY — no publisher-documented keyless image signature. Integrity
+      # is fixed by the @sha256 pin; provenance is not independently provable here.
+      dcount=0
+      for ref in "${IMAGE_SEMGREP}" "${IMAGE_MINICONDA}" "${IMAGE_SYFT}" "${IMAGE_GRYPE}" \
+                 "${IMAGE_CYCLONEDX}" "${IMAGE_GITLEAKS}" "${IMAGE_CLAMAV}" \
+                 "${IMAGE_PYTHON_311}" "${IMAGE_PYTHON_310}" "${IMAGE_SECRETS}"; do
+        echo "── digest-pinned only (no verifiable upstream signature): ${ref}"
+        dcount=$((dcount + 1))
+      done
+
+      nfail=$(wc -l < "${FAILED}" | tr -d ' '); rm -f "${FAILED}"
+      echo "image-provenance-verify: ${signed_checked} signed image(s) checked, ${nfail} verify failure(s); ${dcount} digest-pinned-only"
+      printf '{"signed_checked":%s,"verify_failures":%s,"digest_pinned_only":%s}\n' \
+        "${signed_checked}" "${nfail}" "${dcount}" > "${REPORTS_DIR}/image-provenance.json"
+
+      require="$(printf '%s' "${IMAGE_VERIFY_REQUIRE:-}" | tr '[:upper:]' '[:lower:]')"
+      case "${require}" in
+        1|true|yes|on)
+          if [ "${nfail}" -gt 0 ]; then
+            echo "IMAGE PROVENANCE GATE FAILED — ${nfail} signed image(s) failed cosign verify (IMAGE_VERIFY_REQUIRE set)"
+            exit 1
+          fi
+          echo "IMAGE PROVENANCE GATE PASSED — all signed images verified" ;;
+        *)
+          echo "report-only (set IMAGE_VERIFY_REQUIRE=true to gate on a signed-image verify failure)" ;;
+      esac
+  artifacts:
+    paths:
+      - "${REPORTS_DIR}/image-provenance.json"
     expire_in: 30 days
 
 # Fix #0-B — hash-pinned lockfile audit. The manifest pip-audit above resolves to
@@ -1208,7 +1352,7 @@ model-sign:
 
 sigstore-identity-discover:
   stage: model-integrity
-  image: python:3.11-slim
+  image: ${IMAGE_PYTHON_311}
   needs: []
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" && $CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
@@ -1562,7 +1706,7 @@ modelaudit-scan:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  image: python:3.11-slim
+  image: ${IMAGE_PYTHON_311}
   # modelaudit[all] pulls heavy ML frameworks (tensorflow/torch/…); on a saas-linux-small
   # runner its install + the ~750 MB model fixture overflow the ephemeral disk ([Errno 28],
   # even with --no-cache-dir). A medium runner has the disk headroom. cache:{} drops the
@@ -2493,7 +2637,7 @@ markllm-deps-audit:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  image: python:3.10-slim
+  image: ${IMAGE_PYTHON_310}
   needs: ["setup"]
   allow_failure: true
   script:
@@ -2528,7 +2672,7 @@ markllm-watermark-eval:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  image: python:3.10-slim
+  image: ${IMAGE_PYTHON_310}
   needs: ["artifact-signing-gate", "model-manifest"]
   # Medium runner for disk headroom: this job downloads a ~3 GB transformers MODEL at
   # runtime (Qwen2.5-1.5B-Instruct) — that model pull, not the torch install, is what

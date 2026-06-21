@@ -191,6 +191,23 @@ For GitLab keyless model signing, first discover the exact verification inputs:
 These two values are public Sigstore identity strings, not secrets, but they are
 exact-match verification inputs. Do not guess or hand-edit the identity string.
 
+#### Optional: enforcement switches (teeth-last — gates are OFF by default)
+
+Several checks **run and report on every pipeline regardless of these variables** —
+the variable only decides whether a failure **blocks** the pipeline. They default to
+off so a fresh pipeline goes green; turn each on (as a GitLab CI/CD variable) once
+you've seen it pass and want it to bite. You do **not** need to set any of these to
+make the checks run.
+
+| Variable | Default | Set to | Effect when enabled |
+| --- | --- | --- | --- |
+| `IMAGE_VERIFY_REQUIRE` | `""` (report-only) | `true` | `image-provenance-verify` **fails the pipeline** if a *signed* tool image (today: trivy) fails cosign verify. Verification itself always runs and writes `reports/image-provenance.json` either way; unsigned/digest-only images never gate. |
+| `RL_FAIL_ON` | `""` (report-only) | `malware,tampering` | `secure-software-scan` **fails the pipeline** on a malware/tampering verdict (needs `RL_TOKEN`). |
+| `EVIDENCE_SIGNING_REQUIRED` | `"false"` | `true` | `sign-evidence` **fails** if it can't sign the evidence bundle (no `SIGSTORE_ID_TOKEN`) instead of shipping it unsigned. |
+
+> Recommended order: run the pipeline once and confirm the check passes in its
+> report, *then* flip the corresponding switch to `true`.
+
 ### B4. Confirm OIDC issuance
 The Vault/Sigstore jobs declare `id_tokens:` blocks (GitLab ≥ 15.7). Nothing to
 configure — but on older GitLab the jobs fall back to `CI_JOB_JWT_V2`; upgrade if

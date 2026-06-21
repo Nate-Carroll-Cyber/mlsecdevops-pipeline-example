@@ -99,6 +99,7 @@ verification identifiers, not secrets; leave variable expansion off.
 | `RL_TOKEN_FILE` | you | n/a | `""` | Optional alias for `RL_TOKEN`, same value-or-path handling. Only needed if you want a second, explicitly file-named variable. |
 | `RL_FAIL_ON` | default | No | `""` | **Enforcement switch** for `secure-software-scan`. Blank → report-only scan (always green; publishes `reports/secure-software.json`). `malware,tampering` → gate the pipeline on a recent malware/tampering verdict. Same pattern as `DT_FAIL_ON`. |
 | `RL_API_URL` | default | No | `""` → `https://data.reversinglabs.com/api/oss/community/v2/free` | API base. Default is the **free Community** API. **Portal** accounts override with their portal base *ending in* `/community`, e.g. `https://<org>.secure.software/api/public/v1/community`. Endpoint paths (`/user/account`, `/find/packages`, `/report/...`) are appended to whichever base is set. |
+| `IMAGE_VERIFY_REQUIRE` | default | No | `""` | **Enforcement switch** for `image-provenance-verify`. The job **always** cosign-verifies the signed tool images and writes `reports/image-provenance.json` regardless of this var — it does **not** turn verification on/off. Blank → report-only (a verify failure logs but the job stays green). `true` → the job **fails the pipeline** if a *signed* image fails to verify (unsigned/digest-only images never gate). Set it (e.g. as a GitLab CI/CD variable) only once you want the gate to bite. Same teeth-last pattern as `RL_FAIL_ON` / `EVIDENCE_SIGNING_REQUIRED`. |
 | `DVC_REMOTE_URL` | you | No | `""` | `s3://`/`gs://`/`azure://`/`ssh://` remote for `dvc-verify` to pull pinned data/models. Blank → reports status only. |
 | `GITLAB_API_TOKEN` | you | Yes | `""` | Project/group access token with **`read_api`** scope. Enables the operational block of `metrics-normalize` (pipeline/job duration, queue time, status by stage via the GitLab API). **Blank → the operational block skips cleanly; report-derived metrics + the Pages dashboard still render.** |
 
@@ -176,7 +177,8 @@ match an internal mirror or bump a tool.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `COSIGN_VERSION` | `v2.4.1` | cosign release (checksum-verified at install). |
+| `COSIGN_VERSION` | `v2.4.1` | cosign release for the **signing** jobs (`model-signing-install`, `dataset-sign`, `sign-evidence`, `image-sign`); checksum-verified at install. |
+| `COSIGN_VERIFY_VERSION` | `v3.1.1` | Separate cosign release for `image-provenance-verify` only. **v3.x is required** to read image signatures stored as OCI-referrers `sigstore.bundle.v0.3` artifacts (e.g. trivy) — cosign 2.4.1 reports "no signatures found" for those. Kept apart from `COSIGN_VERSION` so the signing jobs stay on the validated 2.4.1 (a 2→3 bump there is an unrelated breaking-change risk). |
 | `GITLEAKS_VERSION` | `8.30.1` | gitleaks **binary** for `dataset-redact` (checksum-verified). |
 | `PROMPTFOO_VERSION` | `0.121.15` | `npm install -g promptfoo@…` (used by the separate [live-scan pipeline](live-scans.md), not this one). |
 | `MARKLLM_VERSION` | `0.1.5` | Pinned `markllm` for `markllm-deps-audit` + `markllm-watermark-eval`. |
@@ -196,9 +198,13 @@ match an internal mirror or bump a tool.
 | `PIP_TRUSTED_HOST` | `pypi.org files.pythonhosted.org` | Trusted hosts for the index above. |
 | `CONDA_CHANNEL` | `conda-forge` | Strict-priority conda channel for `conda-pkg-verify`. |
 
-> **All scanner images are now tag-pinned** via these `IMAGE_*` variables — no job
-> uses `:latest`. Remaining hardening (see `SBOM.md`): append `@sha256:…` digests
-> for byte-exact reproducibility, and pin `python`/`node` to a full minor.
+> **All images are now pinned by immutable `@sha256:` digest** via these `IMAGE_*`
+> variables (the table shows the readable `:tag`; the CI file appends the digest).
+> The base `python`/secrets images were centralized into `IMAGE_PYTHON_311` /
+> `IMAGE_PYTHON_310` / `IMAGE_SECRETS` and digest-pinned too. *Provenance* (who
+> published the bytes) is a separate control: `image-provenance-verify` cosign-verifies
+> the signed images (trivy today) — see `SBOM.md` → *Supply-Chain Control Coverage*
+> and the `IMAGE_VERIFY_REQUIRE` switch above.
 
 ---
 

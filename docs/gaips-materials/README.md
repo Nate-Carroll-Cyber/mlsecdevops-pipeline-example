@@ -1443,3 +1443,105 @@ This is the terminal job of the whole pipeline: it seals the run by building a h
 8. When signing ran, self-verifies with `cosign verify-blob` against the just-produced cert/signature; if self-verify fails, the job fails rather than shipping an unverified seal.
 
 **Output file(s):** `evidence/sign-evidence.json` (the whole-run hash-manifest + provenance + model verdict, always produced), `evidence/sign-evidence.sig` (detached keyless signature) and `evidence/sign-evidence.pem` (Fulcio cert) — the latter two present only when a `SIGSTORE_ID_TOKEN` was available to sign. When signed and self-verified, this is the terminal seal over the entire run.
+
+---
+
+## Control Alignment: What the Pipeline Produces Evidence For
+
+This pipeline should not be described as a certification engine. A CI job cannot, by itself, prove ISO/IEC 42001 conformity, NIST compliance, or CSA control maturity. What it can do is produce repeatable evidence for specific controls: source scans, dependency inventories, model hashes, signatures, vulnerability reports, dataset provenance, redaction reports, validation results, AI-BOMs, deployment-verification artifacts, and final attestations.
+
+That distinction matters. The pipeline **supports control objectives**; governance still has to decide which controls are required, which findings block release, which exceptions are allowed, and who signs off.
+
+> The pipeline produces evidence that supports specific AI security, software supply-chain, model-integrity, data-integrity, monitoring, and deployment-control objectives across CSA AICM/CCM, NIST SP 800-53, NIST AI RMF, ISO/IEC 42001, and ISO/IEC 27002. It does **not** make the organization "compliant" with any of them.
+
+A useful way to describe the pipeline is as a control-evidence system mapped across six themes: vulnerability and code security, supply-chain integrity, environment isolation, access and secret management, adversarial testing, and continuous monitoring.
+
+> **Read this section alongside [Validation Status & Known Gaps](#validation-status--known-gaps).** A mapping below means the pipeline is *designed* to produce that evidence — not that the control has executed. Several deploy-time mappings (Kyverno, Argo CD PreSync) and integration mappings (Dependency-Track, Vault) are **wired but never run** in the lab CI; they support the listed objectives only once the consuming infrastructure exists.
+
+### 1. Vulnerability scanning and secure code evidence
+
+The `sast`, `sbom`, and `vuln-scan` stages support the classic secure-development and vulnerability-management controls. Semgrep checks source code patterns, GitLab Secret Detection and Gitleaks look for committed secrets, `pip-audit` checks Python packages for known vulnerabilities, Syft produces CycloneDX and SPDX inventories, and Grype/Trivy scan SBOM, filesystem, and image surfaces. ReversingLabs `secure-software-scan` adds dependency reputation/malware screening over the full accessed-library surface.
+
+| Pipeline evidence | Relevant controls |
+| --- | --- |
+| Semgrep SAST, secure coding findings | ISO/IEC 27002:2022 8.28 Secure Coding |
+| Secret Detection, Gitleaks | NIST SP 800-53 SI-7; ISO/IEC 27002 5.17, 8.2 |
+| `pip-audit`, Grype, Trivy | CSA AICM MDS-02 Artifact Scanning; NIST SP 800-53 SI-7 |
+| Syft CycloneDX/SPDX SBOMs | CSA AICM STA-16 Service Bill of Materials; ISO/IEC 27002 5.9 Inventory |
+| ReversingLabs `secure-software-scan` | CSA AICM MDS-02; NIST SP 800-53 SI-7 |
+
+"Vulnerability scanning" is not one control. A CVE scanner, an SBOM generator, a filesystem scanner, a secret scanner, and a malware/reputation scanner each answer a different question.
+
+### 2. Pipeline integrity, AI-BOMs, provenance, and artifact signing
+
+The `setup`, `model-integrity`, `ai-bom`, `deploy-prep`, and `attest` stages support supply-chain provenance and artifact-integrity controls. The pipeline records Git version provenance, validates the model manifest, signs the model, signs the redacted dataset, signs the AI-BOM, optionally signs the workload image, publishes signed artifacts, and finally signs a hash manifest over the evidence bundle. The four deploy-relevant signatures are distinct: `model-sign` (model), `dataset-sign` (redacted dataset), `ai-bom-sign` (AI-BOM), `image-sign` (workload image); `sign-evidence` signs the whole-run evidence manifest for audit retention rather than as a deploy gate.
+
+| Pipeline evidence | Relevant controls |
+| --- | --- |
+| Git/version provenance from `setup` | NIST SP 800-53 SR-4 Provenance; ISO/IEC 42001 A.6 AI system life cycle |
+| Model baseline validation via `model-manifest` | ISO/IEC 42001 A.6.2.3 documentation; A.6.2.4 verification and validation |
+| Model digest, tamper check, signature verification | CSA AICM MDS-08 Integrity Checks; MDS-09 Model Signing; NIST SP 800-53 SI-7 |
+| Dataset hash pinning and dataset signing | CSA AICM DSP-21 Data Poisoning Prevention & Detection; DSP-23 Data Integrity Check; ISO/IEC 42001 A.7 and A.7.5 |
+| AI-BOM assembly and signing | CSA AICM STA-16 Service BOM; NIST SP 800-53 SR-4; ISO/IEC 27002 5.9 and 5.33 |
+| Final signed run-evidence manifest | NIST SP 800-53 AU-6 Audit Review, Analysis, and Reporting; ISO/IEC 27002 5.33 Protection of Records |
+
+The AI-BOM is not just an inventory artifact. It is the object that binds software components, model components, dataset components, vulnerabilities, signatures, provenance, and evaluation evidence into a portable control-evidence record.
+
+### 3. Infrastructure as code, separation of environments, and blast-radius reduction
+
+The deployment materials support the deployment-control side of the story: Kyverno admission policy, Argo CD PreSync verification, Kubernetes manifests, Vault configuration, and Dependency-Track deployment materials. These are wired as deployment manifests and external integrations but, per [Validation Status & Known Gaps](#validation-status--known-gaps), are **not proven in the lab CI run** without a real cluster, Vault, Dependency-Track instance, and built workload image.
+
+| Pipeline / deployment evidence | Relevant controls |
+| --- | --- |
+| Kubernetes and Argo CD deployment manifests | ISO/IEC 27002 8.31 Separation of development, test, and production environments |
+| Kyverno image-signature admission policy | NIST SP 800-53 CM-4 impact analysis / controlled change; SI-7 integrity |
+| Argo CD PreSync verification of model, dataset, and AI-BOM | CSA AICM AIS-13 AI Sandboxing; MDS-09 Model Signing; DSP-23 Data Integrity |
+| Digest-pinned CI/tool images and image provenance verification | NIST SP 800-53 SI-7; CSA AICM MDS-02 |
+
+CI success alone does not prove the cluster enforced anything. That requires Kyverno and Argo CD to verify the signed image, model, dataset, and AI-BOM **during deployment** — which has not run here.
+
+### 4. Pipeline access control and secret management
+
+The `vault-secrets` job and GitLab protected-variable fallback support access-control and secret-management objectives. Vault is the recommended production-grade path for centralized auditability, short-lived credentials, and policy-based secret access; GitLab CI/CD variables are a lower-cost fallback when `VAULT_ADDR` is not configured.
+
+| Pipeline evidence | Relevant controls |
+| --- | --- |
+| Vault OIDC secret retrieval | NIST SP 800-53 AC-3 Access Enforcement; AC-6 Least Privilege |
+| GitLab protected variables / fallback variables | ISO/IEC 27002 5.17 Authentication Information; 8.2 Privileged Access Rights |
+| Signing identity and Sigstore issuer controls | CSA AICM IAM-18 authorization bounds for AI integrations |
+| Change-controlled model manifest and baseline files | NIST SP 800-53 CM-3, CM-5, SA-10 |
+
+This is also where the **control-state model** belongs. Job existence does not mean active control; active control does not mean enforced control; a control is enforced only when a bad result can block release. If Vault is not configured, the job exists but the Vault control is inactive. If ReversingLabs has no token, the malware dependency scan is inactive. If a job is `allow_failure: true`, it may produce evidence but does not block release.
+
+### 5. Adversarial testing, AI evaluation, and guardrail validation
+
+The main pipeline's `ai-eval` stage provides static MarkLLM watermark evidence; the endpoint-dependent tests live in the separate live-scan pipeline (Promptfoo, Garak, Giskard, Inspect AI, PyRIT, guardrail regression), which requires a live model endpoint — see [`ci/live-scans.md`](ci/live-scans.md).
+
+| Pipeline evidence | Relevant controls |
+| --- | --- |
+| MarkLLM watermark generation/detection evidence | NIST AI RMF MEASURE function evidence; ISO/IEC 42001 A.6.2.4 verification and validation |
+| Promptfoo, Garak, Giskard, Inspect AI, PyRIT live scans | CSA AICM MDS-06 and MDS-07 Adversarial Attack; NIST SP 800-53 CA-8 / CA-8(2); SA-11(6) |
+| Guardrail regression | CSA AICM TVM-11 Guardrails; NIST AI RMF MEASURE-2.6 |
+| Prompt injection and input/output checks | CSA AICM AIS-08 Input Validation, AIS-09 Output Validation, AIS-15 Prompt Differentiation, DSP-25 Prompt Injection Defense where adopted |
+
+The static pipeline does not pretend to red-team a nonexistent endpoint: it produces **artifact and evidence assurance**. The live-scan pipeline produces **behavioral assurance** against a deployed endpoint.
+
+### 6. Continuous monitoring, drift, audit, and operational metrics
+
+The `guardrail`, `evidence`, `deploy-prep`, and `attest` stages support monitoring and audit controls. Evidently checks input-side drift when a meaningful reference exists; `evidence-summary` reads verdicts rather than just file presence; `metrics-normalize` folds CI signals into a normalized operational-metrics document (marking derived gates enforcing vs advisory when the GitLab Jobs API is available); `pages` renders a dashboard; `dependency-track-upload`, when configured, turns a point-in-time SBOM/AI-BOM into continuous dependency analysis; `sign-evidence` seals the run.
+
+| Pipeline evidence | Relevant controls |
+| --- | --- |
+| Evidently input drift | CSA AICM LOG-14 Input Monitoring; MDS-10 Model Monitoring; NIST SP 800-53 SI-4 |
+| Live model-drift detection | NIST AI RMF MEASURE-2.7 continuous testing and monitoring; MANAGE-4.1 post-deployment monitoring |
+| Evidence summary and signed evidence manifest | NIST SP 800-53 AU-6; ISO/IEC 27002 5.33 Protection of Records |
+| Operational metrics dashboard | ISO/IEC 27002 8.15 / 8.16 logging and monitoring activities |
+| Dependency-Track upload | CSA AICM STA-16; NIST SP 800-53 SI-4 continuous monitoring |
+
+Caveat: drift is weak when the reference is just the same static fixture reused every run (the current gandalf case). There, dataset hash pinning and dataset signing provide stronger integrity evidence than a vacuous drift result — see [Validation Status & Known Gaps](#validation-status--known-gaps).
+
+### ISO/IEC 42001 — a management-system layer, not a single job
+
+ISO/IEC 42001 fits at the management-system layer rather than as one pipeline job. The strongest mappings are A.6 (AI system life cycle), A.7 (data for AI systems), A.6.2.4 (verification and validation), A.7.5 (data provenance), A.6.2.5 (deployment), A.6.2.6 (operation and monitoring), and A.6.2.8 (event logging). The pipeline supports those objectives by recording provenance, validating model and dataset baselines, producing signed AI-BOMs, preserving evidence summaries, and separating static artifact assurance from live endpoint testing.
+
+> Use "**produces evidence supporting** ISO/IEC 42001 Annex A life-cycle, data, deployment, monitoring, and logging controls," **not** "mapped to ISO 42001 compliance." The former is defensible; the latter overstates what a CI pipeline can establish.

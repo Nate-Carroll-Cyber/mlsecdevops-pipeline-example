@@ -38,6 +38,25 @@
 
 ---
 
+# ⚠️ VALIDATION STATUS / KNOWN GAPS (2026-06-21) — what's PROVEN vs WIRED-BUT-NEVER-RUN
+
+> Honest audit (grounded in current `.gitlab-ci.yml` + `deployment/`, not memory). A job that RUNS ≠ a control that's PROVEN. The **build/scan/sign** half is validated; the **deploy-time-verify** half and **external-integration** gates are NOT — they're inert placeholders awaiting infra (workload image, K8s+Kyverno/Argo, Dependency-Track, Vault) this repo can't self-test. Mirrored to `README.md` → *Validation Status & Known Gaps*.
+>
+> **✅ PROVEN (green on a real run):** git-provenance, semgrep, gitleaks, pip-audit, `lockfile-audit`, syft/grype/trivy, model digest/sign/**verify** (real keyless verify on session-10 `main`; the zero-sig vacuous-pass hole is CLOSED — code now `exit 1`s if models exist with 0 verified sigs, [.gitlab-ci.yml:1488](.gitlab-ci.yml#L1488)), tamper-verification, modelaudit, clamav, dataset chain, AI-BOM assemble/validate/sign, evidence/sign-evidence, `image-provenance-verify` (trivy VERIFIED, CI-confirmed 2026-06-20).
+>
+> **🟡 RUNS BUT VACUOUS / coverage boundary:** `evidently-drift` (gandalf single-class → self-compare → "no drift" forever; needs a real normal corpus); `model-drift-detection` (dead-by-construction here, reads live-scan-only eval files → always skips); `modelscan` (excludes `.gguf` → 0 files on the only model; GGUF covered by modelaudit+clamav only); **30/46 jobs `allow_failure:true`** (advisory, don't block).
+>
+> **❌ NEVER EXECUTED — "no clue if it works", placeholders only:**
+> - **Deploy-time verify (entire half):** `image-sign` inert (`IMAGE_REF` unset → skip; pipeline builds NO image — workload image is a separate app pipeline's output); **Kyverno** policy (`deployment/kubernetes/policies/kyverno-verify-image-signatures.yaml`) + **Argo CD PreSync hook** (`deployment/argocd/verify-signatures-presync-hook.yaml`) run only in a cluster, never in CI, with example identities (`ghcr.io/example/*`, `ci-signer@example.invalid`, `gitlab.example.com`).
+> - **`dependency-track-upload`** — DT_API_URL/KEY unset → skip; the only CVE-policy BLOCKING gate never evaluated; even wired it gates on authored DT policies (no policies = green w/ criticals).
+> - **Vault** (`vault-secrets`, Vault tamper durability) — VAULT_ADDR unset → CI-vars fallback; Vault path unvalidated.
+> - **`hf-artifact-scan`** — HF_MODEL_IDS unset → skip.
+> - **Live-scan pipeline** (promptfoo/garak/giskard/inspect-ai/pyrit) — separate, needs inference endpoint; unvalidated.
+>
+> **⏳ IMPLEMENTED, PENDING the protected-`main` merge run to confirm:** `secure-software-scan` full-surface (~304 pkgs — only runs on protected ref; live-API/quota/real-verdict-blocks-via-RL_FAIL_ON all unverified until merge); digest pulls for the heavier scanner images (only `python:3.11-slim` proven so far).
+
+---
+
 # ▶️ STATUS (2026-06-19, session 10): 🟢 **Session-9 onboarding CONFIRMED GREEN + provenance validated; disk [Errno 28] fixed at the ROOT (CPU-only torch), not band-aided; markllm gate decoupled; lockfile-audit scoped + core/dataquality hash-locks COMMITTED. Merging to `main` for the protected signing/identity run (#2).**
 
 > **LATEST (session 10 cont.):** Feature push #1 (`29dd004`, pipeline `2615287408`) came back GREEN: semgrep WARNING fixed (down to 1 INFO `run-as-non-root`, left as a documented limitation — the PreSync hook apt-gets root tools at runtime); `lockfile-audit` core-first reorder WORKED — the security-critical CORE lock now generates (`requirements-ci.txt`, 108 pkgs). The markllm group still `[Errno 28]`'d (its multi-GB closure alone is too big for a small runner) AND pip-audit was disk-failing by *installing* the 236-pkg dataquality lock. **Per user decision ("scope markllm out, commit core+dataquality, move on"), commit `8c71db6`:** (1) skip the markllm group in `lockfile-audit` (redundant — `markllm-deps-audit` already vuln-audits it at the same pins); (2) `pip-audit --no-deps` (verified flag — audits the fully-pinned `--generate-hashes` lock WITHOUT a venv install) → kills the dataquality `[Errno 28]`; (3) **committed** `docs/gaips-materials/ci/requirements-ci.txt` (108) + `requirements-ci-dataquality.txt` (236), runner paths sanitized, as the reproducibility/vuln-audit reference. **NOT wiring `--require-hashes`** — jobs install targeted per-job subsets, not whole groups, so it'd be wrong-grained; version pinning already bounds installs (the disk durability goal is met). `8c71db6` is committed locally, lockfile-audit change will be validated ON the `main` run (advisory, won't block).

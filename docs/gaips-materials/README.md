@@ -168,6 +168,64 @@ Before copying this CI file into a student lab repository, add or adapt `require
 
 The endpoint-dependent live-eval materials (`evals/promptfoo.yaml`, `guardrails/baseline.json`, `scripts/pyrit_scan.py`, `scripts/run_guardrail_regression.py`, `scripts/collect_garak_report.py`, `scripts/collect_inspect_report.py`, `scripts/run_giskard_live.py`) belong to the separate live-scan pipeline — see [`ci/live-scans.md`](ci/live-scans.md).
 
+## Validation Status & Known Gaps
+
+Honest status of what has actually executed and proven itself versus what is wired
+but **never run** (because the consuming infrastructure — a built workload image, a
+Kubernetes cluster with Kyverno/Argo CD, a Dependency-Track instance, a Vault — does
+not exist in this lab setup). A job that *runs* is not the same as a control that has
+*proven it works*. This pipeline's **build / scan / sign** half is validated; its
+**deploy-time-verify** half and **external-integration** gates are not.
+
+**✅ Validated (executed green on a real run):** Git provenance, semgrep, gitleaks,
+pip-audit, `lockfile-audit` (core + dataquality locks), syft/grype/trivy, model
+digest/sign/**verify** (real keyless verify on the protected `main` run; the
+zero-signature vacuous-pass hole is closed — it now fails if models exist with no
+verified signature), tamper-verification, modelaudit, clamav, dataset
+download→scan→redact→validate→sign, AI-BOM assemble/validate/sign, evidence-summary,
+sign-evidence, and `image-provenance-verify` (cosign-verifies trivy; CI-confirmed).
+
+**🟡 Runs but proves little (vacuous / coverage boundary):**
+- `evidently-drift` — mechanism is green, but on the single-class gandalf set it
+  self-compares → "no drift" forever. Statistically meaningless until a realistically
+  sized *normal* reference corpus exists.
+- `model-drift-detection` — dead-by-construction here (its 6 eval inputs live only in
+  the live-scan pipeline) → always skips; relocated to live-scans, unvalidated there.
+- `modelscan` — excludes `.gguf`, so it scans 0 files on the only shipped model; GGUF
+  malware coverage rests on `modelaudit` + `clamav`, not modelscan.
+- **30 of 46 jobs are `allow_failure: true`** (advisory) — most "gates" report rather
+  than block, by the teeth-last design, until their enforcement switch is flipped.
+
+**❌ Never executed — wired with placeholders, cannot be claimed to work:**
+- **Deploy-time verification (the whole "verify at deploy" half):**
+  `image-sign` is inert (`IMAGE_REF` unset → skips; this pipeline builds **no**
+  container image — the workload image is a separate app pipeline's output); the
+  **Kyverno** ClusterPolicy (`deployment/kubernetes/policies/kyverno-verify-image-signatures.yaml`)
+  and the **Argo CD PreSync hook** (`deployment/argocd/verify-signatures-presync-hook.yaml`)
+  are Kubernetes manifests that only run in a cluster — never in CI — and carry
+  example identities (`ghcr.io/example/*`, `ci-signer@example.invalid`,
+  `gitlab.example.com`).
+- **`dependency-track-upload`** — `DT_API_URL`/`DT_API_KEY` unset → skips; the only
+  CVE-policy *blocking* gate has never evaluated. When wired, it gates on authored DT
+  **policies**, so a DT with none passes green even with criticals.
+- **Vault** (`vault-secrets`, Vault-backed tamper durability) — `VAULT_ADDR` unset →
+  CI-vars fallback; the Vault auth/fetch path is unvalidated.
+- **`hf-artifact-scan`** — `HF_MODEL_IDS` unset → skips; never scans external HF repos.
+- **Live-scan pipeline** (promptfoo/garak/giskard/inspect-ai/pyrit) — separate
+  pipeline, needs an inference endpoint; see [`ci/live-scans.md`](ci/live-scans.md).
+
+**⏳ Implemented, pending one protected-`main` run to confirm:**
+- `secure-software-scan` full-surface scan (~304 packages) — only runs on a protected
+  ref (`RL_TOKEN` is protected), so the live-API behavior, quota, and any *real*
+  malware/tampering verdict (which **blocks**, since `RL_FAIL_ON` enforces) are
+  unverified until the merge run.
+- Digest pulls for the heavier scanner images (syft/grype/trivy/semgrep/…) — only
+  `python:3.11-slim`'s digest pull is proven so far.
+
+**To close the biggest unknowns** you need infrastructure this repo can't self-test:
+a built+pushed workload image, a Kubernetes cluster running Kyverno + Argo CD (the
+deploy-verify chain), a Dependency-Track instance, and a Vault.
+
 ## Pipeline Walkthrough
 
 Jobs within each stage run in parallel unless a `needs:` dependency forces sequencing.

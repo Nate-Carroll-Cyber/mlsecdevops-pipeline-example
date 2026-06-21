@@ -239,10 +239,10 @@ def build_html(doc: dict) -> str:
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>GAIPS CI Metrics — {esc(p.get('short_sha'))}</title>
+<title>MLSECDEVOPS GitLab Pipeline CI Metrics — {esc(p.get('short_sha'))}</title>
 <style>{CSS}</style></head><body>
 <header class="top">
-  <h1>GAIPS CI Operational Metrics</h1>
+  <h1>MLSECDEVOPS GitLab Pipeline CI Operational Metrics</h1>
   <div class="meta">{title_link} · ref <code>{esc(p.get('ref'))}</code>
     · commit <code>{esc(p.get('short_sha'))}</code> · {esc(p.get('project'))}
     · pipeline created {esc(doc.get('pipeline_created_at', doc.get('generated_at')))}

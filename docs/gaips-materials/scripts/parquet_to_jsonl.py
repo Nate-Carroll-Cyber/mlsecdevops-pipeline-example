@@ -4,7 +4,7 @@
 This is a ONE-TIME ingest/provenance tool, not a CI job. The pipeline's dataset
 chain (`dataset-scan`, `redact_dataset.py`, `validate_eval_dataset.py`, Evidently,
 Great Expectations, YData) is JSON/JSONL throughout, so inbound datasets are
-normalised to JSONL at ingest rather than teaching every job to read Parquet —
+normalised to JSONL at ingest rather than having every job read Parquet —
 the same pattern as `csv_to_jsonl.py`. Unlike the CI scripts (stdlib-only), this
 tool needs `pyarrow` to read Parquet; that dependency never enters the pipeline.
 

@@ -1,6 +1,6 @@
-# GAIPS Weaviate Helm values review fixture.
+# MLSECDEVOPS GitLab Pipeline Weaviate Helm values review fixture.
 # This file is for configuration review. Adapt exact keys to the Weaviate Helm
-# chart version used by the class, then verify rendered manifests before live use.
+# chart version in use, then verify rendered manifests before live use.
 
 authentication:
   anonymous_access:

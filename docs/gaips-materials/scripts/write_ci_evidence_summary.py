@@ -6,10 +6,8 @@ from pathlib import Path
 
 EXPECTED = [
     "semgrep.json",
-    # The endpoint-dependent live evals (promptfoo/garak/giskard/inspect-ai/pyrit/
-    # guardrail-regression) were split into the separate live-scan pipeline
-    # (docs/gaips-materials/ci/live-scans.gitlab-ci.yml) — they no longer run here,
-    # so they are not gated as required artifacts in this static pipeline.
+    # The endpoint-dependent live evals are not part of this pipeline, so they are
+    # not gated as required artifacts here.
     #
     # markllm-results.json was DEMOTED to ADVISORY (below): markllm-watermark-eval is
     # itself allow_failure:true (it pulls a multi-GB transformers model on a runner and

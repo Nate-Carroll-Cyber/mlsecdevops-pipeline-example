@@ -1,33 +1,33 @@
-# GAIPS Materials
+# MLSECDEVOPS GitLab Pipeline
 
-This directory contains the concrete starter artifacts and fixtures used by the GAIPS course docs. It is intentionally self-contained so a class can run without production accounts, private credentials, gated models, or undefined instructor assets.
+This directory contains the concrete artifacts and fixtures for the MLSECDEVOPS GitLab Pipeline. It is intentionally self-contained so it can run without production accounts, private credentials, gated models, or undefined assets.
+
+**Approximate GitLab credit cost: 95 credits**
+
+**Example model:** [Qwen2.5-1.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF) — file `qwen2.5-1.5b-instruct-q2_k.gguf` (Q2_K quantization, ~718 MiB), pinned by SHA-256 as the model fixture.
 
 ## Repository File Tree
 
-Every file tracked in this repo is part of the GAIPS model pipeline (the repo/dir is named `counter-spy`, but the unrelated app directories are **not** tracked here). This is the complete, authoritative layout:
+Every file tracked in this repo is part of the MLSECDEVOPS GitLab Pipeline; the unrelated app directories are **not** tracked here. This is the complete, authoritative layout:
 
 ```
-counter-spy/   (GAIPS model pipeline — repo root)
+mlsecdevops-pipeline/   (MLSECDEVOPS GitLab Pipeline — repo root)
 ├── .gitlab-ci.yml          ← the pipeline definition (static security pipeline)
 ├── requirements.txt        ← root runtime pins
 ├── .gitleaks.toml          ← secret-scan config
 ├── .gitignore
-├── SESSION_HANDOFF.md       ← working/session log (not an end-user doc)
 └── docs/
-    ├── gitlab-pipeline-setup-notes.md
     └── gaips-materials/
-        ├── README.md  SETUP.md  PIPELINE_JOB_VALIDATION.md  PIPELINE_FIX_PLAN_29-34.md
+        ├── README.md  SETUP.md
         ├── ci/
-        │   ├── live-scans.gitlab-ci.yml   live-scans.md   ← endpoint-dependent live-eval pipeline
         │   ├── CI-VARIABLES.md  SBOM.md
         │   └── requirements-ci{,-markllm,-dataquality}.{in,txt}  ← grouped CI dep locks
-        ├── scripts/         25 Python scripts — build_ai_bom, run_evidently_report,
-        │                    write_ci_evidence_summary, redact_dataset, detect_model_drift,
+        ├── scripts/         Python scripts — build_ai_bom, run_evidently_report,
+        │                    write_ci_evidence_summary, redact_dataset,
         │                    dependency_track_upload, secure_software_scan, validate_eval_dataset, …
         ├── evals/           datasets + baselines + schema (model-baseline.json,
         │                    dataset-baseline.json, dataset-reference.jsonl,
         │                    gandalf-ignore-instructions-test.jsonl, eval-dataset.schema.json, …)
-        ├── fixtures/        static red-team/eval outputs (garak, giskard, pyrit, inspect-ai)
         ├── guardrails/      llama-guard / prompt-guard / model-armor fixtures
         ├── hugging-face-hub/  HF scan fixture + review guide
         ├── model-signing/   lab-model, tampered-model, signing fixture
@@ -40,24 +40,22 @@ counter-spy/   (GAIPS model pipeline — repo root)
 
 ### Publishing to a Public GitHub Repo (hosting & sharing)
 
-**CI continues to run in GitLab.** GitHub is a public mirror for hosting and sharing the product — not a second CI runner. `.gitlab-ci.yml` and `ci/live-scans.gitlab-ci.yml` ship **as-is**: they document the pipeline and execute in GitLab; GitHub simply displays them. No GitHub Actions port is intended. Before making the repo public:
+**CI continues to run in GitLab.** GitHub is a public mirror for hosting and sharing the product — not a second CI runner. `.gitlab-ci.yml` ships **as-is**: it documents the pipeline and executes in GitLab; GitHub simply displays it. No GitHub Actions port is intended. Before making the repo public:
 
 - **Secret / identity hygiene (do this first).** Confirm nothing sensitive is committed: no PATs or tokens, no real internal hosts or signer identities (the committed examples use placeholders — e.g. the ArgoCD ConfigMap's `MODEL_SIGNING_IDENTITY: ci-signer@example.invalid`; the real value lives only in GitLab protected CI/CD variables, not in the repo), and fixtures/datasets contain only synthetic or sanitized data. The `gitleaks-scan` + `secret-detection` jobs already gate this in CI — confirm they're green before publishing.
 - **Exclude internal working docs** from the public repo: `SESSION_HANDOFF.md`, `PIPELINE_JOB_VALIDATION.md`, `PIPELINE_FIX_PLAN_29-34.md`, `gitlab-pipeline-setup-notes.md` (session/working artifacts, not end-user material).
 - **Add a `LICENSE`** for public distribution, and keep this README as the product entry point.
-- Everything else — `scripts/`, `evals/`, `fixtures/`, `guardrails/`, `model-signing/`, `deployment/`, the `.md` docs, `requirements*.{in,txt}`, `.gitleaks.toml` — is shareable as-is.
+- Everything else — `scripts/`, `evals/`, `guardrails/`, `model-signing/`, `deployment/`, the `.md` docs, `requirements*.{in,txt}`, `.gitleaks.toml` — is shareable as-is.
 
 ## Directory Map
 
 | Directory | Purpose |
 | --- | --- |
 | `model-gateway/` | Reference provider wrapper and model-call evidence logging contract. |
-| `evals/` | Promptfoo, garak, Giskard, Inspect AI, MarkLLM, and PyRIT lab instructions/config. |
-| `evals/markllm.md` | MarkLLM live watermark evaluation lab guidance for CI evidence and model-output provenance review. |
+| `evals/` | MarkLLM lab instructions/config plus eval datasets, baselines, and schema. |
 | `evals/model-baseline.json` | Approved model identity (path + sha256) and the CI variables it implies (`MODEL_FIXTURE_*`, MarkLLM stack); imported by the `model-manifest` job as a dotenv manifest and the reviewed source of truth for the model-integrity baseline. |
 | `evals/dataset-baseline.json` | Approved dataset identity, provenance (HF source + revision), license, and integrity pin (`DATASET_EXPECTED_SHA256`) for the committed eval dataset (`gandalf-ignore-instructions-test.jsonl`); the data-side counterpart to `model-baseline.json`, read by `build_ai_bom.py` to stamp license + provenance onto the AI-BOM `data` component. |
-| `fixtures/` | Static red-team and eval outputs for fixture-mode labs. |
-| `guardrails/` | Prompt Guard, Llama Guard 3, Model Armor, and regression fixtures. |
+| `guardrails/` | Prompt Guard, Llama Guard 3, and Model Armor fixtures. |
 | `mcp/` | Lab-safe Cline MCP configuration. |
 | `agent/` | Lab-safe agent fixture for tool permission and HackAgent review. |
 | `buttercup/` | Automated vulnerability finding and patch-review fixture. |
@@ -72,23 +70,9 @@ counter-spy/   (GAIPS model pipeline — repo root)
 | `scripts/parquet_to_jsonl.py` | Offline Hugging Face Parquet → schema-valid eval JSONL converter (one-time ingest; `pyarrow`-only, never runs in CI). |
 | `scripts/weaviate_ollama_sdk_example.py` | Weaviate Python SDK example that maps a collection to an Ollama-hosted embedding model. |
 
-## Student Copy Pattern
-
-For a standalone lab repository, copy the needed subdirectories into the lab root:
-
-```bash
-mkdir -p gaips-labs
-cp -R docs/gaips-materials/evals gaips-labs/evals
-cp -R docs/gaips-materials/fixtures gaips-labs/fixtures
-cp -R docs/gaips-materials/guardrails gaips-labs/guardrails
-cp .gitlab-ci.yml gaips-labs/.gitlab-ci.yml
-```
-
-Students should still explain each result. Fixture mode replaces unavailable execution, not analysis.
-
 ## CSV To JSONL Dataset Conversion
 
-Use `scripts/csv_to_jsonl.py` when a lab receives a CSV training or eval dataset but the model, eval, or fine-tuning workflow expects JSONL. The script uses only the Python standard library.
+Use `scripts/csv_to_jsonl.py` when you have a CSV training or eval dataset but the model, eval, or fine-tuning workflow expects JSONL. The script uses only the Python standard library.
 
 Default ChatML-style conversion expects `prompt` and `completion` columns:
 
@@ -101,11 +85,11 @@ python docs/gaips-materials/scripts/csv_to_jsonl.py \
 
 Optional developer/system instructions may be supplied with `--system-column system`. For raw row preservation, use `--schema records`. For simple prompt/completion JSONL, use `--schema prompt-completion`.
 
-Before conversion, verify the CSV contains only approved synthetic or sanitized data. After conversion, record row count, schema, source path, output path, and any redaction performed in lab evidence.
+Before conversion, verify the CSV contains only approved synthetic or sanitized data. After conversion, record row count, schema, source path, output path, and any redaction performed in the evidence trail.
 
 ## Parquet To JSONL Dataset Conversion
 
-**Purpose.** Hugging Face datasets ship as Parquet, but the pipeline's dataset chain (`dataset-scan`, `redact_dataset.py`, `validate_eval_dataset.py`, Evidently, Great Expectations, YData) is JSON/JSONL throughout. Rather than teach six jobs to read a columnar binary format, inbound datasets are normalised to JSONL **once, offline, at ingest** — the same pattern as `csv_to_jsonl.py`. JSONL is also diffable and reviewable, which matters because the result becomes a signed, git-committed integrity baseline. `scripts/parquet_to_jsonl.py` is the only tool here that needs `pyarrow`; that dependency is deliberately **not** part of the CI surface (see [`ci/SBOM.md`](ci/SBOM.md)).
+**Purpose.** Hugging Face datasets ship as Parquet, but the pipeline's dataset chain (`dataset-scan`, `redact_dataset.py`, `validate_eval_dataset.py`, Evidently, Great Expectations, YData) is JSON/JSONL throughout. Rather than have six jobs read a columnar binary format, inbound datasets are normalised to JSONL **once, offline, at ingest** — the same pattern as `csv_to_jsonl.py`. JSONL is also diffable and reviewable, which matters because the result becomes a signed, git-committed integrity baseline. `scripts/parquet_to_jsonl.py` is the only tool here that needs `pyarrow`; that dependency is deliberately **not** part of the CI surface (see [`ci/SBOM.md`](ci/SBOM.md)).
 
 **Task.** Each record is made to satisfy `evals/eval-dataset.schema.json`, which requires an `id` (or `case_id`) **and** a prompt-bearing field (`question`/`prompt`). The converter synthesises a deterministic `id`, maps the chosen text column to `prompt`, optionally tags a `category`, and carries through any extra columns named with `--keep`. Source/license/citation provenance lives once in `evals/dataset-baseline.json`, not per record.
 
@@ -153,20 +137,16 @@ python docs/gaips-materials/scripts/parquet_to_jsonl.py \
 
 ## CI Execution Policy
 
-The repo-root `.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, prompt/eval config, and guardrail baselines. A companion [`ci/live-scans.gitlab-ci.yml`](ci/live-scans.gitlab-ci.yml) holds the endpoint-dependent live evals as a separate pipeline for a project with a model endpoint — see [`ci/live-scans.md`](ci/live-scans.md).
+The repo-root `.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, prompt/eval config, and guardrail baselines.
 
 > **Secrets management.** HashiCorp Vault remains the recommended production-grade secrets management option for this pipeline, especially when centralized auditability, short-lived credentials, and policy-based secret access are required. To reduce operating costs for lab, demo, and early validation environments, this repository also supports standard GitLab CI/CD variables as a lower-cost fallback when `VAULT_ADDR` is not configured.
 
 > **Full setup runbook:** [`SETUP.md`](SETUP.md) walks the entire path end to end — GitLab CI/CD variables and the first pipeline run, optional HashiCorp Vault provisioning with Terraform (production), other optional integrations (Dependency-Track, HF/dataset scanning, DVC), and deploy-time Kyverno + Argo CD verification.
 > **CI/CD variable catalog:** [`ci/CI-VARIABLES.md`](ci/CI-VARIABLES.md) lists every variable the pipeline reads, its source (you / Vault / GitLab), masking, default, and what it gates. Terraform inputs: [`deployment/vault/terraform/terraform.tfvars.example`](deployment/vault/terraform/terraform.tfvars.example).
 
-The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, and `deploy-prep`. It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, OSS dependency reputation/malware screening (ReversingLabs Spectra Assure Community), ModelScan, ModelAudit, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, MarkLLM live watermark evaluation, model-drift detection, evidence, a consolidated CycloneDX 1.6 AI BOM artifact (also pushed to Dependency-Track), a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification. It performs **no inference** and needs no model endpoint.
+The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, and `deploy-prep`. It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, OSS dependency reputation/malware screening (ReversingLabs Spectra Assure Community), ModelScan, ModelAudit, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, MarkLLM live watermark evaluation, evidence, a consolidated CycloneDX 1.6 AI BOM artifact (also pushed to Dependency-Track), a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification. It performs **no inference** and needs no model endpoint.
 
-> **Live evals run in a separate pipeline.** The endpoint-dependent evals — `promptfoo-eval`, `garak-scan`, `giskard-scan`, `inspect-ai-eval`, `pyrit-scan`, and `guardrail-regression` — were split out into a standalone config, [`ci/live-scans.gitlab-ci.yml`](ci/live-scans.gitlab-ci.yml), meant to run as the root pipeline of a *separate* project that has a live model endpoint. See [`ci/live-scans.md`](ci/live-scans.md).
-
-Before copying this CI file into a student lab repository, add or adapt `requirements.txt`, `models/`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, `scripts/detect_model_drift.py`, the data-quality collectors (`scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/dependency_track_upload.py`, `scripts/secure_software_scan.py`), `evals/eval-dataset.schema.json`, and (after the first run seeds it) `evals/eval-baseline.json`. Configure signing and Hugging Face variables in GitLab CI/CD settings (no model endpoint is needed — this pipeline does no inference). Fixture files under `docs/gaips-materials/fixtures/` remain offline interpretation aids, not automatic CI pass-throughs.
-
-The endpoint-dependent live-eval materials (`evals/promptfoo.yaml`, `guardrails/baseline.json`, `scripts/pyrit_scan.py`, `scripts/run_guardrail_regression.py`, `scripts/collect_garak_report.py`, `scripts/collect_inspect_report.py`, `scripts/run_giskard_live.py`) belong to the separate live-scan pipeline — see [`ci/live-scans.md`](ci/live-scans.md).
+Before copying this CI file into a project repository, add or adapt `requirements.txt`, `models/`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, the data-quality collectors (`scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/dependency_track_upload.py`, `scripts/secure_software_scan.py`), and `evals/eval-dataset.schema.json`. Configure signing and Hugging Face variables in GitLab CI/CD settings (no model endpoint is needed — this pipeline does no inference).
 
 ## Validation Status & Known Gaps
 
@@ -189,8 +169,6 @@ sign-evidence, and `image-provenance-verify` (cosign-verifies trivy; CI-confirme
 - `evidently-drift` — mechanism is green, but on the single-class gandalf set it
   self-compares → "no drift" forever. Statistically meaningless until a realistically
   sized *normal* reference corpus exists.
-- `model-drift-detection` — dead-by-construction here (its 6 eval inputs live only in
-  the live-scan pipeline) → always skips; relocated to live-scans, unvalidated there.
 - `modelscan` — excludes `.gguf`, so it scans 0 files on the only shipped model; GGUF
   malware coverage rests on `modelaudit` + `clamav`, not modelscan.
 - **30 of 46 jobs are `allow_failure: true`** (advisory) — most "gates" report rather
@@ -211,8 +189,6 @@ sign-evidence, and `image-provenance-verify` (cosign-verifies trivy; CI-confirme
 - **Vault** (`vault-secrets`, Vault-backed tamper durability) — `VAULT_ADDR` unset →
   CI-vars fallback; the Vault auth/fetch path is unvalidated.
 - **`hf-artifact-scan`** — `HF_MODEL_IDS` unset → skips; never scans external HF repos.
-- **Live-scan pipeline** (promptfoo/garak/giskard/inspect-ai/pyrit) — separate
-  pipeline, needs an inference endpoint; see [`ci/live-scans.md`](ci/live-scans.md).
 
 **⏳ Implemented, pending one protected-`main` run to confirm:**
 - `secure-software-scan` full-surface scan (~304 packages) — only runs on a protected
@@ -258,12 +234,11 @@ flowchart TD
     subgraph GUARD [guardrail]
       guard_jobs[evidently-drift<br/>data-drift-baseline-commit]
     end
-    livescan[[separate live-scan pipeline<br/>ci/live-scans.gitlab-ci.yml<br/>promptfoo · garak · giskard · inspect-ai · pyrit<br/>guardrail-regression · model-drift-detection]]
     subgraph EVID [evidence]
       evid_jobs[evidence-summary]
     end
     subgraph AIBOM [ai-bom]
-      assemble[ai-bom-assemble<br/>→ aibom.cyclonedx.json<br/>+ vulnerabilities[] · version · redaction · drift<br/>embeds model/dataset cosign sigs] --> validate[ai-bom-validate<br/>schema 1.6 + XML] --> aibom_sign[ai-bom-sign<br/>cosign keyless sign-blob]
+      assemble[ai-bom-assemble<br/>→ aibom.cyclonedx.json<br/>+ vulnerabilities[] · version · redaction<br/>embeds model/dataset cosign sigs] --> validate[ai-bom-validate<br/>schema 1.6 + XML] --> aibom_sign[ai-bom-sign<br/>cosign keyless sign-blob]
       assemble --> content_gate[ai-bom-content-gate<br/>substance assertions · advisory]
       dtrack[dependency-track-upload<br/>continuous BOM policy gate]
     end
@@ -369,7 +344,7 @@ These three values — plus the MarkLLM stack pins and `MARKLLM_MODEL_ID` — ar
 
 ### Stage 6 — AI Evaluation
 
-After the gate passes, this stage now runs only the **MarkLLM** jobs — a static dependency audit and a local-inference watermark self-test. Both are advisory (`allow_failure: true`) and neither needs a model endpoint. (The endpoint-dependent evals — `promptfoo`, `garak`, `giskard`, `inspect-ai`, `pyrit` — were split into the separate [live-scan pipeline](ci/live-scans.md).)
+After the gate passes, this stage runs the **MarkLLM** jobs — a static dependency audit and a local-inference watermark self-test. Both are advisory (`allow_failure: true`) and neither needs a model endpoint.
 
 | Job | What it does |
 | --- | --- |
@@ -397,12 +372,11 @@ So in this pipeline it is a **demonstrative capability check + evidence artifact
 
 ### Stage 7 — Guardrail / Drift
 
-The `guardrail-regression` job moved to the separate [live-scan pipeline](ci/live-scans.md) (it depends on the live evals). This stage now carries the drift jobs.
+This stage carries the input-side data-drift jobs.
 
 | Job | What it does |
 | --- | --- |
-| `model-drift-detection` | **Relocated to the live-scans pipeline (Fix #24a).** Extracts normalised eval metrics from `reports/` and compares them to the committed baseline `evals/eval-baseline.json`; any metric moving beyond `DRIFT_THRESHOLD` (default ±0.10) flags drift. Its six inputs (inspect-ai/garak/pyrit/giskard/guardrail-regression/promptfoo) are produced only by the live-scan jobs, so it lives there alongside them — in the static pipeline it had no inputs and was dead-by-construction (the former `drift-gate` that consumed it was removed). See `ci/live-scans.gitlab-ci.yml`. |
-| `data-drift-baseline-commit` | **Automates data-drift activation (Fix #24b).** On the default branch, when `evidently-drift` just seeded a reference and none exists in the repo, **sanitizes** the seed (drops null/non-finite values — never a raw `cp`) and commits it `dataset-reference.seed.jsonl` → `evals/dataset-reference.jsonl`, pushing with `[skip ci]` + `-o ci.skip` (no pipeline loop). Requires `GITLAB_PUSH_TOKEN` (PAT, scope `write_repository`); if unset, falls back to the manual artifact. Never overwrites an existing reference. `allow_failure: true`. (Replaces the former `model-baseline-commit`, which seeded the wrong — eval-metric — baseline; that duty moved to live-scans with `model-drift-detection`.) |
+| `data-drift-baseline-commit` | **Automates data-drift activation (Fix #24b).** On the default branch, when `evidently-drift` just seeded a reference and none exists in the repo, **sanitizes** the seed (drops null/non-finite values — never a raw `cp`) and commits it `dataset-reference.seed.jsonl` → `evals/dataset-reference.jsonl`, pushing with `[skip ci]` + `-o ci.skip` (no pipeline loop). Requires `GITLAB_PUSH_TOKEN` (PAT, scope `write_repository`); if unset, falls back to the manual artifact. Never overwrites an existing reference. `allow_failure: true`. |
 | `evidently-drift` | Data/feature drift on the **input** side. Evidently's `DataDriftPreset` (PSI) compares a committed reference snapshot (`evals/dataset-reference.jsonl`) to the current dataset; TextEvals adds LLM-relevant text descriptors over prompt columns. Seeds the reference on first run; `data-drift-baseline-commit` then bootstraps it on the default branch (Fix #24b), so drift detection activates without a manual commit. Soft gate (`allow_failure: true`); skips cleanly when no dataset is present. |
 
 ### Stage 8 — Evidence
@@ -417,7 +391,7 @@ The final stage rolls every prior element into **one CycloneDX 1.6 AI BOM** — 
 
 | Job | What it does |
 | --- | --- |
-| `ai-bom-assemble` | Runs `scripts/build_ai_bom.py`, merging the Syft software SBOM (`library` components), models (`machine-learning-model` components with a `modelCard`, digest, ModelScan/ModelAudit/ClamAV/Hugging Face verdicts, and the embedded `model.sig`), datasets (`data` components with digest, scan verdict, embedded `dataset.sig`, and — from `evals/dataset-baseline.json` via `--dataset-baseline` — a CycloneDX `licenses` entry plus `gaips:dataset.source/.revision/.split/.citation` provenance, closing the gap where datasets carried only a bare digest while models carried full HF provenance), and AI-eval results (root-component properties + external references) into `sbom/aibom.cyclonedx.json`. **Emits a CycloneDX `vulnerabilities[]` array** (Fix #29) built from the run's audit reports — pip-audit (`markllm-deps-audit` + the per-job `pip-audit-*`), grype, and trivy — deduped, each with `affects[].ref` pointing at the offending component's `bom-ref` (so Dependency-Track ingests structured vulns, not just property counts). The **software count is split** into `bom.counts.software.pipeline` vs `…software.markllm` so the two disjoint dependency universes are no longer fused (Fix #30a), and the previously-hollow **`modelCard` is populated** from `markllm-results.json` (`quantitativeAnalysis.performanceMetrics` + `modelParameters`, Fix #30b). Each model component now carries **`gaips:model.verified`** alongside `gaips:signed` (Fix #32b), distinguishing "a signature exists" from "we checked it" — sourced from `signature-verification` #19 (honestly `false`/deferred until #19 runs on a protected ref). The per-component **cosign** signatures for models and datasets are embedded here as base64 `data:`-URI external references; the BOM's own signature is applied downstream by `ai-bom-sign`. It also folds in **Git version provenance** (from `version-info.json`), the **dataset redaction** verdict (redacted SHA + secret/PII counts, so the `data` component hash reflects the redacted bytes), and the **model-drift** verdict. Each input is optional, so the BOM degrades gracefully as stages light up — with the live evals split out, their results are recorded as `eval.*.present: false` here unless the live-scan pipeline's reports are fed into `reports/`. Retained for 90 days. |
+| `ai-bom-assemble` | Runs `scripts/build_ai_bom.py`, merging the Syft software SBOM (`library` components), models (`machine-learning-model` components with a `modelCard`, digest, ModelScan/ModelAudit/ClamAV/Hugging Face verdicts, and the embedded `model.sig`), datasets (`data` components with digest, scan verdict, embedded `dataset.sig`, and — from `evals/dataset-baseline.json` via `--dataset-baseline` — a CycloneDX `licenses` entry plus `gaips:dataset.source/.revision/.split/.citation` provenance, closing the gap where datasets carried only a bare digest while models carried full HF provenance) into `sbom/aibom.cyclonedx.json`. **Emits a CycloneDX `vulnerabilities[]` array** (Fix #29) built from the run's audit reports — pip-audit (`markllm-deps-audit` + the per-job `pip-audit-*`), grype, and trivy — deduped, each with `affects[].ref` pointing at the offending component's `bom-ref` (so Dependency-Track ingests structured vulns, not just property counts). The **software count is split** into `bom.counts.software.pipeline` vs `…software.markllm` so the two disjoint dependency universes are no longer fused (Fix #30a), and the previously-hollow **`modelCard` is populated** from `markllm-results.json` (`quantitativeAnalysis.performanceMetrics` + `modelParameters`, Fix #30b). Each model component now carries **`gaips:model.verified`** alongside `gaips:signed` (Fix #32b), distinguishing "a signature exists" from "we checked it" — sourced from `signature-verification` #19 (honestly `false`/deferred until #19 runs on a protected ref). The per-component **cosign** signatures for models and datasets are embedded here as base64 `data:`-URI external references; the BOM's own signature is applied downstream by `ai-bom-sign`. It also folds in **Git version provenance** (from `version-info.json`) and the **dataset redaction** verdict (redacted SHA + secret/PII counts, so the `data` component hash reflects the redacted bytes). Each input is optional, so the BOM degrades gracefully as stages light up. Retained for 90 days. |
 | `ai-bom-validate` | Validates the BOM against the CycloneDX 1.6 JSON schema with `cyclonedx validate --fail-on-errors`, then converts it to `sbom/aibom.cyclonedx.xml` — the form the next job signs. Hard gate (no `allow_failure`): a schema-invalid BOM fails the pipeline rather than shipping a malformed attestation. **This is a FORM check only** — a well-formed BOM can still be substantively hollow, so the companion `ai-bom-content-gate` (below) asserts content. |
 | `ai-bom-content-gate` | Runs `scripts/assert_ai_bom_content.py` (Fix #31) — the SUBSTANCE counterpart to `ai-bom-validate`'s schema check, in a `python:3.11-slim` image (the cyclonedx-cli image has no Python). Asserts the BOM **says something**: if the run's audit reports found vulns but the BOM's `vulnerabilities[]` is empty it flags a gap (enforces #29), and every `machine-learning-model` component must be `gaips:signed=true` (+ `gaips:model.verified=true`, WARN-only while #19 defers). **Advisory** (`allow_failure: true`) per the teeth-last posture; pass `--enforce` to make the coverage/signing assertions block once the pipeline is otherwise green. |
 | `ai-bom-sign` | Applies the BOM's **own** signature with **cosign keyless** (`cosign sign-blob` over `aibom.cyclonedx.xml`, via the GitLab `SIGSTORE_ID_TOKEN`), emitting a detached `aibom.cyclonedx.sig` + Fulcio `aibom.cyclonedx.pem` recorded in Rekor — the same identity-bound mechanism as `model-sign`/`dataset-sign`/`sign-evidence` (Fix #25, replacing the old ephemeral identity-less RSA enveloped signature). **Hardened to a gate** (`allow_failure: false`): an unsigned AI-BOM is never delivered green; skips only when there is genuinely no BOM. The deploy-time PreSync hook verifies it with `cosign verify-blob` against the CI signer identity — no public-key Secret. Models and datasets keep their own cosign signatures (embedded by `ai-bom-assemble`). |
@@ -1246,7 +1220,7 @@ This job bootstraps input-side drift detection by committing the drift reference
 #### `evidently-drift` — stage: `guardrail` · advisory (allow_failure) · output: `reports/evidently-drift.json`
 
 **What this job is for**
-This is the input-side data/feature drift check, complementing the eval-metric drift control (`model-drift-detection`, now in the live-scans pipeline). It uses Evidently's `DataDriftPreset` (PSI) to compare a committed reference snapshot of the dataset against the current one, adding text descriptors over prompt columns. On the very first run, before any reference is committed, it seeds one for `data-drift-baseline-commit` to commit.
+This is the input-side data/feature drift check. It uses Evidently's `DataDriftPreset` (PSI) to compare a committed reference snapshot of the dataset against the current one, adding text descriptors over prompt columns. On the very first run, before any reference is committed, it seeds one for `data-drift-baseline-commit` to commit.
 
 **Step by step, in plain English**
 1. Skips on `[sigstore-discovery]` commits; otherwise runs after `dataset-redact` and `eval-dataset-validate`.
@@ -1515,16 +1489,14 @@ This is also where the **control-state model** belongs. Job existence does not m
 
 ### 5. Adversarial testing, AI evaluation, and guardrail validation
 
-The main pipeline's `ai-eval` stage provides static MarkLLM watermark evidence; the endpoint-dependent tests live in the separate live-scan pipeline (Promptfoo, Garak, Giskard, Inspect AI, PyRIT, guardrail regression), which requires a live model endpoint — see [`ci/live-scans.md`](ci/live-scans.md).
+The main pipeline's `ai-eval` stage provides static MarkLLM watermark evidence. It performs no inference and needs no model endpoint.
 
 | Pipeline evidence | Relevant controls |
 | --- | --- |
 | MarkLLM watermark generation/detection evidence | NIST AI RMF MEASURE function evidence; ISO/IEC 42001 A.6.2.4 verification and validation |
-| Promptfoo, Garak, Giskard, Inspect AI, PyRIT live scans | CSA AICM MDS-06 and MDS-07 Adversarial Attack; NIST SP 800-53 CA-8 / CA-8(2); SA-11(6) |
-| Guardrail regression | CSA AICM TVM-11 Guardrails; NIST AI RMF MEASURE-2.6 |
 | Prompt injection and input/output checks | CSA AICM AIS-08 Input Validation, AIS-09 Output Validation, AIS-15 Prompt Differentiation, DSP-25 Prompt Injection Defense where adopted |
 
-The static pipeline does not pretend to red-team a nonexistent endpoint: it produces **artifact and evidence assurance**. The live-scan pipeline produces **behavioral assurance** against a deployed endpoint.
+This pipeline does not pretend to red-team a nonexistent endpoint: it produces **artifact and evidence assurance**.
 
 ### 6. Continuous monitoring, drift, audit, and operational metrics
 
@@ -1533,7 +1505,6 @@ The `guardrail`, `evidence`, `deploy-prep`, and `attest` stages support monitori
 | Pipeline evidence | Relevant controls |
 | --- | --- |
 | Evidently input drift | CSA AICM LOG-14 Input Monitoring; MDS-10 Model Monitoring; NIST SP 800-53 SI-4 |
-| Live model-drift detection | NIST AI RMF MEASURE-2.7 continuous testing and monitoring; MANAGE-4.1 post-deployment monitoring |
 | Evidence summary and signed evidence manifest | NIST SP 800-53 AU-6; ISO/IEC 27002 5.33 Protection of Records |
 | Operational metrics dashboard | ISO/IEC 27002 8.15 / 8.16 logging and monitoring activities |
 | Dependency-Track upload | CSA AICM STA-16; NIST SP 800-53 SI-4 continuous monitoring |

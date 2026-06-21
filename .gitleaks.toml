@@ -1,4 +1,4 @@
-title = "Counter-Spy Gitleaks configuration"
+title = "MLSECDEVOPS GitLab Pipeline Gitleaks configuration"
 
 # Load gitleaks' built-in ruleset. WITHOUT this the config has only an allowlist
 # and ZERO rules, so `gitleaks detect` matches nothing and always passes (theater).

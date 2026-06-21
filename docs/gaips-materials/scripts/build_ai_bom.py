@@ -10,8 +10,8 @@ Two modes:
             ModelScan / ModelAudit / ClamAV verdicts + HuggingFace card metadata
       - data components      ← dataset-digest.txt + dataset-download/scan
             reports + dataset.sig (signed training data)
-      - AI evaluation evidence ← garak / giskard / inspect-ai / promptfoo /
-            guardrail-regression results, attached to the root component.
+      - AI evaluation evidence ← the MarkLLM watermark eval results, attached
+            to the root component.
     Model and dataset signatures are embedded as base64 `data:` URIs so the BOM
     is self-describing — those signatures cover the model/dataset bytes, not the
     BOM, so embedding them changes nothing they attest.
@@ -496,49 +496,6 @@ def _data_components(
     return components
 
 
-# ── evaluation evidence (attached to the root component) ─────────────────────
-
-EVAL_REPORTS = {
-    "garak": "garak-results.json",
-    "giskard": "giskard-results.json",
-    "inspect-ai": "inspect-ai-results.json",
-    "promptfoo": "promptfoo-results.json",
-    "guardrail-regression": "guardrail-regression.json",
-    "pyrit": "pyrit-results.json",
-}
-
-
-def _eval_evidence(reports_dir: Path) -> tuple[list[dict], list[dict]]:
-    """Return (properties, externalReferences) summarising AI eval results + drift."""
-    props: list[dict] = []
-    refs: list[dict] = []
-    for label, filename in EVAL_REPORTS.items():
-        path = reports_dir / filename
-        present = path.exists()
-        props.append(_prop(f"eval.{label}.present", "true" if present else "false"))
-        if present:
-            refs.append({
-                "type": "other",
-                "url": f"file://reports/{filename}",
-                "comment": f"AI evaluation report: {label}",
-            })
-
-    # Model-drift verdict (detect_model_drift) — a key behavioural-provenance signal.
-    drift = _load_json(reports_dir / "model-drift.json")
-    if isinstance(drift, dict) and not drift.get("skipped"):
-        if drift.get("seeded"):
-            props.append(_prop("drift.status", "baseline-seeded"))
-        else:
-            props.append(_prop("drift.detected", "true" if drift.get("drift_detected") else "false"))
-            props.append(_prop("drift.metrics_drifted", len(drift.get("drifted", []))))
-        refs.append({
-            "type": "other",
-            "url": "file://reports/model-drift.json",
-            "comment": "Model drift report (eval metrics vs baseline)",
-        })
-    return props, refs
-
-
 def _data_quality_evidence(reports_dir: Path) -> tuple[list[dict], list[dict]]:
     """Fold the data-quality / input-drift verdicts into the BOM root component.
 
@@ -744,7 +701,6 @@ def build_bom(
     software = syft_sw + markllm_sw
     models = _model_components(evidence_dir, reports_dir, model_dir)
     data = _data_components(evidence_dir, reports_dir, _load_dataset_baseline(dataset_baseline))
-    eval_props, eval_refs = _eval_evidence(reports_dir)
     dq_props, dq_refs = _data_quality_evidence(reports_dir)
 
     root_ref = "root:" + os.environ.get("CI_PROJECT_PATH_SLUG", "gaips-application")
@@ -753,8 +709,8 @@ def build_bom(
         "bom-ref": root_ref,
         "name": os.environ.get("CI_PROJECT_NAME", "gaips-application"),
         "version": os.environ.get("CI_COMMIT_SHORT_SHA", "0.0.0"),
-        "properties": eval_props + dq_props,
-        "externalReferences": eval_refs + dq_refs,
+        "properties": dq_props,
+        "externalReferences": dq_refs,
     }
 
     components = models + data + software

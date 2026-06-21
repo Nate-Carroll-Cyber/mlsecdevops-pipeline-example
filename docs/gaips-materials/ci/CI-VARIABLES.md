@@ -1,4 +1,4 @@
-# GAIPS CI Pipeline — CI/CD Variable Reference
+# MLSECDEVOPS GitLab Pipeline — CI/CD Variable Reference
 
 Every variable the repo-root `.gitlab-ci.yml` reads, where it's set, and what it gates. By
 default, set these directly in **GitLab → Settings → CI/CD → Variables**. Secrets can
@@ -46,7 +46,7 @@ the `vault-secrets` job fetches each from the Vault path `secret/data/gaips/ci/<
 
 | Variable | Vault path (`…/ci/…`) | Masked | Seeded by TF? | Purpose / consuming jobs |
 | --- | --- | --- | --- | --- |
-| `MODEL_ENDPOINT` | `model-endpoint` | No | ✅ stub | Model API base URL. **Not used by this pipeline** (it does no inference) — it drives the endpoint-dependent evals in the separate live-scan pipeline ([`ci/live-scans.md`](live-scans.md)). |
+| `MODEL_ENDPOINT` | `model-endpoint` | No | ✅ stub | Model API base URL. **Not used by this pipeline** — it performs no inference. |
 | `MODEL_SIGNING_IDENTITY` | `model-signing-identity` | No | ✅ stub | Fulcio cert identity `signature-verification` checks model sigs against. |
 | `SIGSTORE_OIDC_ISSUER` | `sigstore-oidc-issuer` | No | ✅ stub | OIDC issuer for `signature-verification`. |
 | `HF_TOKEN` | `hf-token` | Yes | ✅ stub | HuggingFace token for gated/private repos (`hf-artifact-scan`). |
@@ -157,16 +157,7 @@ verification identifiers, not secrets; leave variable expansion off.
 
 | Variable | Source | Default | Purpose |
 | --- | --- | --- | --- |
-| `DRIFT_THRESHOLD` | default | `0.10` | Absolute eval-metric movement that flags drift (`model-drift-detection`; the enforcing gate lives in the live-scans pipeline — the static pipeline's `drift-gate` was removed). |
-
-The following tuning variables belong to the separate **live-scan pipeline**
-([`ci/live-scans.md`](live-scans.md)), not this one:
-
-| Variable | Source | Default | Purpose |
-| --- | --- | --- | --- |
-| `INSPECT_PASS_THRESHOLD` | you (env) | `0.60` | Accuracy floor below which an Inspect AI eval counts as a fail. |
-| `GARAK_REST_MODEL` | you (env) | `gaips` | `model` field sent in garak's REST request body. |
-| `REST_API_KEY` | you | _(unset)_ | Bearer token added to garak's REST calls when present. |
+| `DRIFT_THRESHOLD` | default | `0.10` | Absolute eval-metric movement that flags drift. |
 
 ---
 
@@ -180,7 +171,6 @@ match an internal mirror or bump a tool.
 | `COSIGN_VERSION` | `v2.4.1` | cosign release for the **signing** jobs (`model-signing-install`, `dataset-sign`, `sign-evidence`, `image-sign`); checksum-verified at install. |
 | `COSIGN_VERIFY_VERSION` | `v3.1.1` | Separate cosign release for `image-provenance-verify` only. **v3.x is required** to read image signatures stored as OCI-referrers `sigstore.bundle.v0.3` artifacts (e.g. trivy) — cosign 2.4.1 reports "no signatures found" for those. Kept apart from `COSIGN_VERSION` so the signing jobs stay on the validated 2.4.1 (a 2→3 bump there is an unrelated breaking-change risk). |
 | `GITLEAKS_VERSION` | `8.30.1` | gitleaks **binary** for `dataset-redact` (checksum-verified). |
-| `PROMPTFOO_VERSION` | `0.121.15` | `npm install -g promptfoo@…` (used by the separate [live-scan pipeline](live-scans.md), not this one). |
 | `MARKLLM_VERSION` | `0.1.5` | Pinned `markllm` for `markllm-deps-audit` + `markllm-watermark-eval`. |
 | `TORCH_VERSION` | `2.12.0` | Pinned `torch` for the MarkLLM watermark stack. |
 | `TRANSFORMERS_VERSION` | `4.57.6` | Pinned `transformers` for the MarkLLM stack — held on the **4.x** line because markllm 0.1.5 predates the transformers 5.x major release. |

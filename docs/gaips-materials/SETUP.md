@@ -1,4 +1,4 @@
-# GAIPS CI Pipeline — End-to-End Setup Runbook
+# MLSECDEVOPS GitLab Pipeline — End-to-End Setup Runbook
 
 This is the full path from an empty GitLab project to a green run of the
 repo-root `.gitlab-ci.yml` and on to deploy-time signature verification. By default,
@@ -146,13 +146,10 @@ All optional — absent files make their jobs skip — but for a full run, provi
 | --- | --- | --- |
 | `requirements.txt` | `setup`, `pip-audit`, `pkg-integrity`, `conda-pkg-verify` | Your app deps. Absent → install/audit steps skip. |
 | `models/<name>/...` | `model-digest/sign`, `modelscan`, `modelaudit-scan`, `clamav-scan` | One subdir per model; weights in `.pkl/.pt/.safetensors/.gguf/.bin/.h5/.onnx`. ModelScan inspects unsafe serialization formats; ModelAudit adds static coverage for GGUF/GGML, safetensors, ONNX, manifests, archives, and related model artifacts, with broad optional dependencies installed for future formats and remote sources. Absent → signing skips. |
-| `evals/promptfoo.yaml` | `promptfoo-eval` (live-scan pipeline) | Already shipped in materials. See [`ci/live-scans.md`](ci/live-scans.md). |
 | `evals/eval-dataset.schema.json` | `eval-dataset-validate` | Already shipped. |
-| `guardrails/baseline.json` | `guardrail-regression` (live-scan pipeline) | Regression baseline. See [`ci/live-scans.md`](ci/live-scans.md). |
-| `evals/eval-baseline.json` | `model-drift-detection` (eval-metric drift unit; its gate lives in the live-scans pipeline, not here) | **Seeded on first run** — see Part C2. |
 
-The collector/runner scripts (`build_ai_bom.py`, `run_guardrail_regression.py`,
-`write_ci_evidence_summary.py`, `detect_model_drift.py`, etc.) already ship under
+The collector/runner scripts (`build_ai_bom.py`,
+`write_ci_evidence_summary.py`, etc.) already ship under
 `docs/gaips-materials/scripts/`.
 
 ### B3. Set CI/CD variables
@@ -173,8 +170,7 @@ dotenv artifact.
 CI/CD variables (mask the sensitive ones):
 `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`,
 `CI_REGISTRY_TOKEN`, plus `DT_API_URL` and `DT_API_KEY` if you use Dependency-Track.
-(`MODEL_ENDPOINT` is **not** needed by this pipeline — it does no inference. It
-belongs to the separate live-scan pipeline; see [`ci/live-scans.md`](ci/live-scans.md).)
+(`MODEL_ENDPOINT` is **not** needed by this pipeline — it does no inference.)
 
 For GitLab keyless model signing, first discover the exact verification inputs:
 
@@ -219,7 +215,7 @@ you see "id_tokens requires GitLab 15.7+".
 
 ### C1. Push and watch
 ```bash
-git commit -m "ci: add GAIPS AI/ML security pipeline" && git push
+git commit -m "ci: add MLSECDEVOPS GitLab Pipeline AI/ML security pipeline" && git push
 ```
 On a clean repo with no models/datasets, expect:
 - **Always-run hard gates pass:** `secret-detection`, `gitleaks-scan`,
@@ -237,19 +233,7 @@ runner minutes.
 If a hard gate fails, it's a real finding (a committed secret, an infected file, a
 malformed dataset) — fix the input, not the gate.
 
-### C2. Activate drift detection (seed the baseline)
-The first run with eval metrics seeds `eval-baseline.seed.json`. To make
-eval-metric drift detection meaningful on later runs, that seed must become
-`evals/eval-baseline.json`. **Note:** the enforcing eval-metric drift gate lives in
-the **live-scans** pipeline (where the eval metrics are produced) — the static main
-pipeline no longer has a `drift-gate` (it was removed as vacuous; see `README.md`).
-Two options:
-
-> Note: the eval-metric baseline (`evals/eval-baseline.json`) is seeded by
-> `model-drift-detection`, which now lives in the **live-scans** pipeline (Fix
-> #24a) — seed/commit it there, alongside the eval jobs that feed it.
-
-### C3. Seed the input-drift reference (auto on the default branch)
+### C2. Seed the input-drift reference (auto on the default branch)
 - **Automatic:** set masked CI/CD variable **`GITLAB_PUSH_TOKEN`** (Project Access
   Token, scope `write_repository`) and run on the default branch — once
   `evidently-drift` seeds a reference, `data-drift-baseline-commit` **sanitizes
@@ -326,7 +310,6 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
       (with `VAULT_NAMESPACE` exported).
 - [ ] Pipeline is green; `vault-secrets` log shows `N/8 secret(s) written`.
 - [ ] `artifact-signing-gate` passed.
-- [ ] `evals/eval-baseline.json` committed (eval-metric drift detection now active in the live-scans pipeline).
 - [ ] (If signing) `signature-verification` passed against your real
       `MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER`.
 - [ ] (If deploying) `image-sign` + `publish-signed-artifacts` produced artifacts;
@@ -336,5 +319,4 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
 > off `:latest` (see `ci/SBOM.md` remediation), generate
 > `ci/requirements-ci.txt` via `pip-compile --generate-hashes` and switch jobs to
 > it, and flip the staying soft gates (Great Expectations / Evidently data-drift) to
-> `allow_failure: false` once baselines are stable. (The live-eval soft gates
-> `garak`/`giskard` now live in the separate [live-scan pipeline](ci/live-scans.md).)
+> `allow_failure: false` once baselines are stable.

@@ -1,4 +1,4 @@
-# GAIPS CI -- MarkLLM watermark-evaluation group (heavy).
+# MLSECDEVOPS GitLab Pipeline CI -- MarkLLM watermark-evaluation group (heavy).
 # NOTE: this group is intentionally NOT hash-locked by lockfile-audit — its multi-GB
 # closure exhausts the small runner when pip-compile downloads it to hash, and it is
 # already vuln-audited at these exact pins by the dedicated markllm-deps-audit job. This

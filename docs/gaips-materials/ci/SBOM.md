@@ -1,4 +1,4 @@
-# GAIPS CI Pipeline — Software Bill of Materials
+# MLSECDEVOPS GitLab Pipeline — Software Bill of Materials
 
 **Pipeline:** `.gitlab-ci.yml` (repo root)  
 **Date:** 2026-06-08  
@@ -40,7 +40,6 @@ flowchart TD
     subgraph GUARD [guardrail]
       s6[evidently-drift · data-drift-baseline-commit]
     end
-    s_live[[separate live-scan pipeline<br/>ci/live-scans.gitlab-ci.yml<br/>promptfoo · garak · giskard · inspect-ai · pyrit · guardrail-regression]]
     subgraph EVID [evidence]
       s7[evidence-summary]
     end
@@ -72,11 +71,6 @@ flowchart TD
 
 ---
 
-> **Live-scan pipeline dependencies.** Rows marked **(live-scan)** below are pulled
-> only by the endpoint-dependent evals, which now run in the separate
-> [`ci/live-scans.gitlab-ci.yml`](live-scans.gitlab-ci.yml) pipeline — not this one.
-> They are listed here for completeness; this pipeline no longer installs them.
-
 ## Container Images
 
 > **All images below are pinned by immutable `@sha256:` digest** (multi-arch index
@@ -103,7 +97,6 @@ flowchart TD
 | `anchore/grype` | `v0.114.0-debug` | `grype-scan` | ✅ Pinned (`-debug` variant ships a shell) |
 | `aquasec/trivy` | `0.71.1` | `trivy-scan` | ✅ Pinned (no `v` prefix; keep in sync with the trivy-db schema) |
 | `cyclonedx/cyclonedx-cli` | `0.32.0` | `ai-bom-validate`, `ai-bom-sign` | ✅ Pinned |
-| `node` | `20-slim` | `promptfoo-eval` **(live-scan)** | ⚠️ Unpinned minor |
 
 ---
 
@@ -113,7 +106,6 @@ flowchart TD
 | --- | --- | --- | --- | --- |
 | `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `dataset-sign`, `sign-evidence`, `image-sign` (4 install sites) | ✅ Pinned + checksum verified |
 | `gitleaks` | `8.30.1` | `github.com/gitleaks/gitleaks/releases` | `dataset-redact` | ✅ Pinned + checksum verified |
-| `promptfoo` | `0.121.15` | `npm install -g promptfoo` | `promptfoo-eval` **(live-scan)** | ✅ Pinned |
 
 ---
 
@@ -130,16 +122,9 @@ All packages below are installed fresh in each job container. None are pinned in
 | `pip-tools` | — | `pkg-integrity` | ⚠️ Unpinned | `pip-compile` for generating hashed lockfiles |
 | `modelscan` | — | `modelscan`, `hf-artifact-scan` | ⚠️ Unpinned | Detects malicious serialization payloads in model files |
 | `huggingface_hub` | — | `hf-artifact-scan` | ⚠️ Unpinned | Downloads HuggingFace model snapshots for scanning |
-| `garak` | — | `garak-scan` **(live-scan)** | ⚠️ Unpinned | Adversarial LLM probe framework |
-| `giskard` | `[llm]` | `giskard-scan` **(live-scan)** | ⚠️ Unpinned | LLM vulnerability scanner (bias, hallucination, injection) |
-| `requests` | — | `giskard-scan` **(live-scan)** | ⚠️ Unpinned | HTTP client (transitive dep; listed explicitly) |
-| `pandas` | — | `giskard-scan` **(live-scan)** | ⚠️ Unpinned | Data manipulation (required by giskard) |
-| `inspect-ai` | — | `inspect-ai-eval` **(live-scan)** | ⚠️ Unpinned | Structured AI evaluation framework |
-| `inspect-evals` | — | `inspect-ai-eval` **(live-scan)** | ⚠️ Unpinned | Built-in eval tasks (MMLU, TruthfulQA, WMDP, GDM CTF) |
 | `markllm` | `==0.1.5` | `markllm-watermark-eval` | ✅ Pinned (`MARKLLM_VERSION`) | LLM watermark detection |
 | `torch` | `==2.12.0+cpu` | `markllm-watermark-eval` | ✅ Pinned, CPU-only wheel (`TORCH_VERSION`) | PyTorch — installed from the PyTorch CPU index (no `nvidia-*` CUDA deps; ~200 MB vs ~2 GB) to bound runner disk |
 | `transformers` | `==4.57.6` | `markllm-watermark-eval` | ✅ Pinned (`TRANSFORMERS_VERSION`) | Hugging Face Transformers (required by markllm) |
-| `pyrit` | — | `pyrit-scan` **(live-scan)** | ⚠️ Unpinned | Microsoft PyRIT adversarial red-teaming framework |
 | `jsonschema` | — | `eval-dataset-validate` | ⚠️ Unpinned | Draft-07 validation of eval dataset records against `evals/eval-dataset.schema.json` |
 | `presidio-analyzer` | — | `dataset-redact` | ⚠️ Unpinned | Microsoft Presidio PII detection (pulls in `spacy`) |
 | `presidio-anonymizer` | — | `dataset-redact` | ⚠️ Unpinned | Presidio PII redaction/anonymization |
@@ -170,10 +155,9 @@ controls, so a gap reads as a gap instead of being implied-covered by a pin.
 > container images, GitHub-release binaries, and model weights are different
 > artifact types that the free purl catalogue does not index. Those classes are
 > therefore covered by *different* controls (checksum verification, model
-> scanning/signing, image CVE-scan + pinning), tabulated below. Within this static
-> pipeline the only application **package ecosystem** is PyPI — npm (`promptfoo`)
-> belongs to the separate [live-scan pipeline](live-scans.gitlab-ci.yml), out of
-> scope here — so "scan every package" and "scan PyPI" coincide for this pipeline.
+> scanning/signing, image CVE-scan + pinning), tabulated below. Within this
+> pipeline the only application **package ecosystem** is PyPI — so "scan every
+> package" and "scan PyPI" coincide for this pipeline.
 
 | Artifact class | Examples | Version-pinned | CVE-scanned | Malware/reputation-gated | Signature / checksum verified | Controlling job(s) |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -212,12 +196,11 @@ These are **not** in scope for `secure-software-scan` (the purl catalogue can't 
 | --- | --- | --- |
 | No upstream reputation/malware gate on OSS dependencies (pip-audit/grype/trivy catch *known CVEs*, not *malicious packages* — typosquats, account-takeover injections, removed/tampered releases) | ✅ Added | New `secure-software-scan` (sast stage, next to `pip-audit`; `scripts/secure_software_scan.py`) polls the ReversingLabs Spectra Assure **Community** catalogue across the **full accessed-library surface** — the `ci/requirements-ci*.txt` group locks plus the markllm group's `torch`/`transformers`/`markllm` pins (deduped purls, batched 5/request), not the 3-package root manifest — and reads each pinned version's `assessments.malware`/`assessments.tampering` verdict + `incidents`. Enforcement switch `RL_FAIL_ON`: blank = report-only; `malware,tampering` = gate. Skips cleanly when `RL_TOKEN` is unset. **Remaining action:** create a Community PAT, set `RL_TOKEN` (masked+protected), then flip `RL_FAIL_ON` to `malware,tampering` to enforce. |
 | `cosign` binary downloaded with no checksum verification | ✅ Fixed | All four install sites (`model-signing-install`, `dataset-sign`, `sign-evidence`, `image-sign`) download `cosign_checksums.txt` and verify via `sha256sum --check --strict` before installing |
-| `promptfoo` unpinned | ✅ Fixed | Pinned to `0.121.15` via `PROMPTFOO_VERSION` (now in the separate [live-scan pipeline](live-scans.gitlab-ci.yml)) |
 | `torch` + `transformers` unaudited | ✅ Fixed | New `markllm-deps-audit` job runs `pip-audit` against `torch`, `transformers`, and `markllm` before `markllm-watermark-eval` |
 | Current CI blocked by historic secret fixtures | ✅ Scoped | GitLab native `secret-detection` remains a hard gate, but runs against the current HEAD checkout (`GIT_DEPTH: 1`, `SECRET_DETECTION_LOG_OPTIONS="--max-count=1"`). Use one-off historic scans/history cleanup for old fixtures instead of blocking every current pipeline. |
-| Advisory eval failures discarded evidence | ✅ Fixed | `markllm-watermark-eval` uploads artifacts with `when: always`. `promptfoo-eval` (now in the separate [live-scan pipeline](live-scans.gitlab-ci.yml)) does the same and writes a minimal failure JSON when the tool exits before producing its report. |
+| Advisory eval failures discarded evidence | ✅ Fixed | `markllm-watermark-eval` uploads artifacts with `when: always`, and writes a minimal failure JSON when the tool exits before producing its report. |
 | Superseded pipelines consuming runner minutes | ✅ Mitigated | Pipeline jobs are `interruptible: true`. Enable GitLab project auto-cancel redundant pipelines so newer pushes cancel obsolete jobs during debugging. |
-| Container images use `:latest` | ✅ Fixed | All scanner images pinned via `IMAGE_*` variables at top of CI file: `semgrep/semgrep:1.165.0`, `continuumio/miniconda3:26.3.2`, `anchore/syft:v1.45.1-debug`, `anchore/grype:v0.114.0-debug`, `aquasec/trivy:0.71.1`, `cyclonedx/cyclonedx-cli:0.32.0`, **`gitleaks/gitleaks:v8.30.1`** (`IMAGE_GITLEAKS`), and **`clamav/clamav:1.4`** (`IMAGE_CLAMAV`). No job uses `:latest` anymore. `registry.gitlab.com/security-products/secrets:4` is pinned at a major tag; `python:3.11-slim`/`python:3.10-slim`/`node:20-slim` remain unpinned at minor version. **Remaining hardening:** append `@sha256:…` digests for byte-exact reproducibility. |
+| Container images use `:latest` | ✅ Fixed | All scanner images pinned via `IMAGE_*` variables at top of CI file: `semgrep/semgrep:1.165.0`, `continuumio/miniconda3:26.3.2`, `anchore/syft:v1.45.1-debug`, `anchore/grype:v0.114.0-debug`, `aquasec/trivy:0.71.1`, `cyclonedx/cyclonedx-cli:0.32.0`, **`gitleaks/gitleaks:v8.30.1`** (`IMAGE_GITLEAKS`), and **`clamav/clamav:1.4`** (`IMAGE_CLAMAV`). No job uses `:latest` anymore. `registry.gitlab.com/security-products/secrets:4` is pinned at a major tag; `python:3.11-slim`/`python:3.10-slim` remain unpinned at minor version. **Remaining hardening:** append `@sha256:…` digests for byte-exact reproducibility. |
 | Container images tag-pinned but not digest-pinned (mutable tags) | ✅ Fixed (2026-06-20) | All `IMAGE_*` references now pin an immutable `@sha256:` index digest (tag kept for readability). Base `python:3.11-slim`/`python:3.10-slim` and the GitLab secrets image were centralized from inline per-job use into `IMAGE_PYTHON_311`/`IMAGE_PYTHON_310`/`IMAGE_SECRETS` and digest-pinned. See *Container Images* note above for the re-resolve command. |
 | Pulled tool/base images not provenance-verified (no check they came from the genuine publisher) | ✅ Done as far as upstreams allow (2026-06-20) | New advisory `image-provenance-verify` (sast) installs pinned+checksum-verified cosign and `cosign verify`s the images with a publisher-documented keyless identity — **trivy** (`https://github.com/aquasecurity/trivy/.github/workflows/.+`, GitHub Actions OIDC). A referrers-API probe of every image (see residual gap #1) established that trivy is the **only** one with a discoverable cosign signature; anchore syft/grype, semgrep, miniconda, cyclonedx-cli, clamav, gitleaks, and python publish none, so they are logged as digest-pinned-only (no silent gaps). Teeth-last via `IMAGE_VERIFY_REQUIRE`. **cosign version:** the job installs cosign **v3** (`COSIGN_VERIFY_VERSION`), not the signing jobs' 2.4.1 — trivy's signature is the OCI-referrers `sigstore.bundle.v0.3` format with no `.sig` tag, which cosign 2.4.1 reports as "no signatures found" (confirmed locally); cosign v3.1.1 verifies it with the plain command (exit 0, 2 signatures). **Remaining:** confirm green on a CI run, then flip `IMAGE_VERIFY_REQUIRE=true`. (No anchore→ghcr switch — the ghcr.io images are unsigned too.) |
 | All pip packages unpinned | ✅ Structured | `ci/requirements-ci.in` created listing all pipeline packages. **Remaining action:** run `pip-compile --generate-hashes requirements-ci.in` on a Python 3.11-slim Linux container to produce `requirements-ci.txt`, commit it, then switch each CI job from inline `pip install` to `pip install -r ci/requirements-ci.txt` |

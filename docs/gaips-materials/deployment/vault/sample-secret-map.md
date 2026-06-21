@@ -25,9 +25,8 @@ GitLab JWKS endpoint to validate CI OIDC tokens (see `jwt-auth-config.hcl`).
 Fetched once per pipeline run by the `vault-secrets` job and injected as CI
 variables via a `reports: dotenv` artifact.
 
-| Secret Path | CI Variable | Lab Value | Access |
+| Secret Path | CI Variable | Example Value | Access |
 | --- | --- | --- | --- |
-| `secret/data/gaips/ci/model-endpoint` | `MODEL_ENDPOINT` | `http://localhost:8080/v1` | Read by CI role — consumed by the separate [live-scan pipeline](../../ci/live-scans.md), not the static main pipeline |
 | `secret/data/gaips/ci/model-signing-identity` | `MODEL_SIGNING_IDENTITY` | `ci-signer@example.invalid` | Read by CI role |
 | `secret/data/gaips/ci/sigstore-oidc-issuer` | `SIGSTORE_OIDC_ISSUER` | `https://oauth2.sigstore.dev/auth` | Read by CI role |
 | `secret/data/gaips/ci/hf-token` | `HF_TOKEN` | `fixture-hf-token-not-real` | Read by CI role |
@@ -49,7 +48,7 @@ secret. The Argo CD PreSync hook reads the published artifacts; point its
 
 ## Model Provider Tokens — `secret/data/gaips/model-providers/*`
 
-| Secret Path | Purpose | Lab Value | Access |
+| Secret Path | Purpose | Example Value | Access |
 | --- | --- | --- | --- |
 | `secret/data/gaips/model-providers/fixture` | Fake model provider token | `fixture-token-not-real` | Read by app service account |
 
@@ -72,6 +71,6 @@ integration is implemented.
 
 ## Admin — `secret/data/gaips/admin/*`
 
-| Secret Path | Purpose | Lab Value | Access |
+| Secret Path | Purpose | Example Value | Access |
 | --- | --- | --- | --- |
 | `secret/data/gaips/admin/break-glass` | Administrative placeholder | Not provided | Denied to CI role |

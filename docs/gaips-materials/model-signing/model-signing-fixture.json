@@ -3,7 +3,7 @@
   "digest": "sha256:1f5cfixture9e2a0000000000000000000000000000000000000000000000000",
   "signed": {
     "signature": "evidence/day4/model.sig",
-    "signer": "gaips-instructor@example.invalid",
+    "signer": "ci-signer@example.invalid",
     "verified": true
   },
   "unsigned": {

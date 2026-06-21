@@ -1,4 +1,4 @@
-# GAIPS Vault — Terraform variables (example)
+# MLSECDEVOPS GitLab Pipeline Vault — Terraform variables (example)
 #
 # Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored by
 # convention; never commit real cluster URLs or tokens.

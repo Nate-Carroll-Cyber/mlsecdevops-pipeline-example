@@ -1,8 +1,6 @@
-# GAIPS CI Pipeline — Python dependency source (CORE group)
+# MLSECDEVOPS GitLab Pipeline — Python dependency source (CORE group)
 #
-# Scope: this lists the packages THIS (static) .gitlab-ci.yml pipeline installs.
-# The AI red-team / live-eval tools (garak, giskard, inspect-ai, inspect-evals,
-# pyrit) belong to the SEPARATE live-scans pipeline and are intentionally NOT here.
+# Scope: this lists the packages THIS pipeline installs.
 #
 # The pipeline's deps don't reliably co-resolve as one lockfile: the markllm
 # watermark stack pins old huggingface_hub<1.0 / Pillow==9.4.0, and the data

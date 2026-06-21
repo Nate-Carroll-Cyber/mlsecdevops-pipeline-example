@@ -380,66 +380,6 @@ def parse_data(reports: Path, src: Sources, m: Metrics) -> None:
 def parse_ai_eval(reports: Path, src: Sources, m: Metrics) -> None:
     ev: dict[str, Any] = {}
 
-    pf = _load_json(reports / "promptfoo-results.json", src, "promptfoo-results.json")
-    if isinstance(pf, dict):
-        stats = (pf.get("results", {}) or {}).get("stats", {}) if isinstance(pf.get("results"), dict) else {}
-        succ, fail = stats.get("successes"), stats.get("failures")
-        if isinstance(succ, (int, float)) and isinstance(fail, (int, float)) and (succ + fail):
-            rate = round(succ / (succ + fail), 4)
-            ev["promptfoo"] = {"successes": succ, "failures": fail, "pass_rate": rate}
-            m.metric("ai_eval.promptfoo.pass_rate", rate)
-            m.gate("promptfoo-eval", fail == 0, f"{succ}/{succ + fail} passed")
-
-    garak = _load_json(reports / "garak-results.json", src, "garak-results.json")
-    if isinstance(garak, dict):
-        s = garak.get("summary", {}) or {}
-        total = s.get("total")
-        if isinstance(total, (int, float)) and total:
-            rate = round(float(s.get("passed", 0)) / total, 4)
-            ev["garak"] = {"total": total, "passed": s.get("passed"), "pass_rate": rate}
-            m.metric("ai_eval.garak.pass_rate", rate)
-
-    insp_sum = _load_json(reports / "inspect-summary.json", src, "inspect-summary.json")
-    insp = _load_json(reports / "inspect-ai-results.json", src, "inspect-ai-results.json")
-    insp_block: dict[str, Any] = {}
-    if isinstance(insp_sum, dict):
-        insp_block.update({
-            "evals": insp_sum.get("evals", insp_sum.get("count")),
-            "passed": insp_sum.get("passed"),
-            "failed": insp_sum.get("failed"),
-        })
-    if isinstance(insp, dict):
-        if isinstance(insp.get("score"), (int, float)):
-            insp_block["score"] = round(float(insp["score"]), 4)
-            m.metric("ai_eval.inspect.score", insp["score"])
-        r = _rate(insp.get("cases", []), "pass")
-        if r is not None:
-            insp_block["pass_rate"] = r
-            m.metric("ai_eval.inspect.pass_rate", r)
-    if insp_block:
-        ev["inspect"] = insp_block
-
-    pyrit = _load_json(reports / "pyrit-results.json", src, "pyrit-results.json")
-    if isinstance(pyrit, dict):
-        r = _rate(pyrit.get("conversations", []), "decision")
-        if r is not None:
-            ev["pyrit"] = {"pass_rate": r}
-            m.metric("ai_eval.pyrit.pass_rate", r)
-
-    guard = _load_json(reports / "guardrail-regression.json", src, "guardrail-regression.json")
-    if isinstance(guard, dict):
-        r = None
-        for k in ("results", "checks"):
-            r = _rate(guard.get(k, []), "pass")
-            if r is not None:
-                break
-        if r is None and isinstance(guard.get("passed"), bool):
-            r = 1.0 if guard["passed"] else 0.0
-        if r is not None:
-            ev["guardrail_regression"] = {"pass_rate": r}
-            m.metric("ai_eval.guardrail.pass_rate", r)
-            m.gate("guardrail-regression", r >= 1.0, f"pass_rate={r}")
-
     markllm = _load_json(reports / "markllm-results.json", src, "markllm-results.json")
     if isinstance(markllm, dict):
         # Fix #27a — run_markllm_watermark_eval.py emits status + metrics, NOT the
@@ -470,24 +410,6 @@ def parse_ai_eval(reports: Path, src: Sources, m: Metrics) -> None:
             # an unrecognised shape) — flag it as present-but-unparsed so the
             # dashboard shows that, not a false "present" with empty fields.
             src.mark("markllm-results.json", "present-but-unparsed")
-
-    giskard = _load_json(reports / "giskard-results.json", src, "giskard-results.json")
-    if isinstance(giskard, dict):
-        findings = giskard.get("findings", []) or []
-        high = sum(1 for f in findings if isinstance(f, dict) and f.get("severity") == "high")
-        ev["giskard"] = {"findings": len(findings), "high_findings": high}
-        m.metric("ai_eval.giskard.high_findings", high)
-
-    drift = _load_json(reports / "model-drift.json", src, "model-drift.json")
-    if isinstance(drift, dict) and not drift.get("skipped"):
-        ev["model_drift"] = {
-            "drift_detected": drift.get("drift_detected"),
-            "drifted": [d.get("metric") for d in drift.get("drifted", []) or []],
-            "threshold": drift.get("threshold"),
-            "seeded": drift.get("seeded"),
-        }
-        m.gate("model-drift-detection", not drift.get("drift_detected"),
-               f"{len(drift.get('drifted', []) or [])} metric(s) drifted")
 
     m.section("ai_evaluation", ev)
 

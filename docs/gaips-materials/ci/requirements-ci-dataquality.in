@@ -1,4 +1,4 @@
-# GAIPS CI -- data quality / drift group.
+# MLSECDEVOPS GitLab Pipeline CI -- data quality / drift group.
 # Each of these installs in its own per-job venv (great-expectations-validate,
 # evidently-drift, ydata-profile, dvc-verify); ydata-profiling in particular pins
 # narrow numpy/pandas/matplotlib ranges. If this group cannot resolve as one lock,

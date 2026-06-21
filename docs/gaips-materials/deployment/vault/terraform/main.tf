@@ -23,7 +23,7 @@ resource "vault_mount" "kv" {
   path        = "secret"
   type        = "kv"
   options     = { version = "2" }
-  description = "GAIPS KV v2 secret store"
+  description = "MLSECDEVOPS GitLab Pipeline KV v2 secret store"
 }
 
 # ── JWT auth backend ─────────────────────────────────────────────────────────

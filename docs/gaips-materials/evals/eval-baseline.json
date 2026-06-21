@@ -1,7 +1,4 @@
 {
   "schema_version": "1.0",
-  "metrics": {
-    "giskard.high_findings": 0.0,
-    "guardrail.pass_rate": 1.0
-  }
+  "metrics": {}
 }

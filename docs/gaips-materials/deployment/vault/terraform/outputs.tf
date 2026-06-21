@@ -14,7 +14,7 @@ output "policy_name" {
 }
 
 output "kv_mount" {
-  description = "KV v2 mount path for all GAIPS secrets"
+  description = "KV v2 mount path for all MLSECDEVOPS GitLab Pipeline secrets"
   value       = vault_mount.kv.path
 }
 

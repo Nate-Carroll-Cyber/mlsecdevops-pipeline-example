@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://gaips.local/schemas/eval-dataset.schema.json",
-  "title": "GAIPS eval dataset record",
-  "description": "Contract for one record of an evaluation dataset loaded by the AI-eval stage. A record must carry an identifier and at least one prompt-bearing field (question or prompt). Mirrors the shapes used by inspect_eval.py and promptfoo.yaml. Unknown extra fields are allowed.",
+  "title": "MLSECDEVOPS GitLab Pipeline eval dataset record",
+  "description": "Contract for one record of an evaluation dataset loaded by the AI-eval stage. A record must carry an identifier and at least one prompt-bearing field (question or prompt). Mirrors the shapes used by the eval datasets. Unknown extra fields are allowed.",
   "type": "object",
   "properties": {
     "id": {"type": "string", "minLength": 1},

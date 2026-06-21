@@ -96,7 +96,6 @@ variables:
   # blank → report-only (cosign-verify the signed images, never block); "true" → fail the
   # pipeline when a SIGNED image fails to verify. Unsigned/digest-only images never gate.
   IMAGE_VERIFY_REQUIRE: ""
-  PROMPTFOO_VERSION: "0.121.15"
   # MarkLLM watermark stack — pinned to current, markllm-compatible versions and
   # shared by markllm-deps-audit and markllm-watermark-eval. transformers stays on
   # the 4.x line because markllm 0.1.5 predates the transformers 5.x major release.
@@ -788,9 +787,7 @@ image-provenance-verify:
 # compiles EACH group into a fully pinned, hash-generated lockfile and audits THEM
 # — covering this (static) pipeline's stack: model-signing, sigstore, modelscan,
 # huggingface_hub, presidio, evidently, ydata-profiling, great-expectations, the
-# markllm watermark stack… against OSV/PyPI/GitHub advisory DBs. (The AI red-team
-# tools — garak/giskard/pyrit/inspect-ai/inspect-evals — live in the separate
-# live-scans pipeline, NOT here.) The per-group locks are published as artifacts;
+# markllm watermark stack… against OSV/PyPI/GitHub advisory DBs. The per-group locks are published as artifacts;
 # the CORE group's lock can be committed as ci/requirements-ci.txt to enable
 # --require-hashes installs (the "teeth" half of #0). Advisory for now; flip
 # allow_failure:false once that lockfile is committed and the core group resolves
@@ -1731,7 +1728,6 @@ modelaudit-scan:
   needs: ["modelscan", "model-fixture-download"]
   variables:
     DO_NOT_TRACK: "1"
-    PROMPTFOO_DISABLE_TELEMETRY: "1"
   script:
     - python3 -c "import sys; assert sys.version_info >= (3, 10), 'modelaudit requires Python >=3.10'"
     # --no-cache-dir: don't keep a second copy of the wheels in pip's cache. modelaudit[all]
@@ -2741,22 +2737,17 @@ markllm-watermark-eval:
       - "${REPORTS_DIR}/markllm-results.json"
     expire_in: 7 days
 
-# NOTE: `model-drift-detection` was RELOCATED to the live-scans pipeline (Fix #24a).
-# It compares this run's eval METRICS to evals/eval-baseline.json, but its six
-# inputs (inspect-ai, garak, pyrit, giskard, guardrail-regression, promptfoo) are
-# produced only by the live-scan jobs — in the static pipeline they never exist,
-# so the unit (and the drift-gate that consumed it) was dead-by-construction. It
-# now lives in ci/live-scans.gitlab-ci.yml alongside those inputs. The remaining
-# drift control HERE is data/INPUT drift via evidently-drift (#38), bootstrapped
-# by data-drift-baseline-commit below.
+# NOTE: eval-METRIC drift detection is not part of this pipeline. This pipeline
+# performs no inference and produces no eval metrics, so there is nothing to
+# compare against a metric baseline. The drift control HERE is data/INPUT drift
+# via evidently-drift (#38), bootstrapped by data-drift-baseline-commit below.
 
 # Fix #24b — data-drift baseline bootstrap. Auto-commit the seeded DATA-drift
 # reference (evals/dataset-reference.jsonl) on the FIRST run, so evidently-drift
 # (#38) leaves seed-mode and starts gating without a manual commit. This replaces
 # the former eval-baseline auto-commit, which seeded the WRONG control: the
-# eval-metric baseline and its drift unit moved to the live-scans pipeline (Fix
-# #24a), leaving the dataset reference as the real drift control the static
-# pipeline was starving. The reference is SANITIZED before commit — never a raw
+# dataset reference is the real drift control the static pipeline needs (Fix
+# #24a). The reference is SANITIZED before commit — never a raw
 # cp — because the raw evidently seed can carry NaN-filled columns from
 # heterogeneous records. Default branch only; never overwrites an existing
 # reference; skips cleanly with no push token. Requires GITLAB_PUSH_TOKEN
@@ -2816,7 +2807,7 @@ data-drift-baseline-commit:
       print(f"Sanitized {len(out)} record(s) → {dst}")
       PYEOF
       git config user.email "gaips-ci@${CI_SERVER_HOST}"
-      git config user.name "GAIPS CI"
+      git config user.name "MLSECDEVOPS GitLab Pipeline CI"
       git add "${DEST}"
       git commit -m "ci: seed data-drift reference [skip ci]"
       # ci.skip + [skip ci] both prevent this push from triggering a new pipeline.
@@ -2830,8 +2821,7 @@ data-drift-baseline-commit:
       echo "Committed dataset-reference.jsonl → ${CI_DEFAULT_BRANCH}."
       echo "data-drift detection activates on the NEXT default-branch pipeline (this commit is [skip ci])."
 
-# Data/feature drift on the INPUT side — complements model-drift-detection (which
-# watches eval METRICS). Evidently's DataDriftPreset (PSI) compares a committed
+# Data/feature drift on the INPUT side. Evidently's DataDriftPreset (PSI) compares a committed
 # reference snapshot of the dataset (evals/dataset-reference.jsonl) to the current
 # one; TextEvals adds LLM-relevant text descriptors over the prompt columns. On
 # first run it seeds the reference for the maintainer to commit.
@@ -3377,11 +3367,10 @@ ai-bom-sign:
     expire_in: 90 days
 
 # NOTE: `drift-gate` was REMOVED (Fix #24a). In the static pipeline it was vacuous
-# theater — its only input, model-drift-detection, is dead-by-construction here
-# (its six live-scan eval inputs moved to the live-scans pipeline), so the hard gate
-# could only ever pass. The eval-metric drift unit + its gate belong in live-scans
-# alongside the inputs. If DATA-drift enforcement is wanted here, add a small gate
-# over evidently-drift (#38) once it has a committed reference baseline (Fix #24b).
+# theater — it gated on eval-metric drift, but this pipeline performs no inference
+# and produces no eval metrics, so the hard gate could only ever pass. If DATA-drift
+# enforcement is wanted here, add a small gate over evidently-drift (#38) once it
+# has a committed reference baseline (Fix #24b).
 
 # Ingest the signed BOMs into Dependency-Track for CONTINUOUS analysis — the SBOM
 # and the AI BOM (nested under the app project) are re-scanned against new CVEs +
@@ -3434,8 +3423,8 @@ image-sign:
     - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
       when: never
     - when: on_success
-  # drift-gate removed (was vacuous theater in the static pipeline — its only input,
-  # model-drift-detection, is dead-by-construction here; see Fix #24a). Anchored instead
+  # drift-gate removed (it gated on eval-metric drift, but this pipeline performs no
+  # inference and produces no eval metrics; see Fix #24a). Anchored instead
   # to the ai-bom stage's remaining hard gate so image signing still follows it.
   needs: ["dependency-track-upload"]
   # Fulcio requires an OIDC token with aud "sigstore" for keyless signing — same

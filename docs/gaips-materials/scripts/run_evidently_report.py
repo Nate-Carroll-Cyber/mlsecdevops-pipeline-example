@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Evidently data/feature drift + LLM text descriptors for the eval dataset.
 
-`model-drift-detection` compares this run's *eval metrics* to a baseline. This is
-the complementary input-side check: has the DATA itself drifted? Evidently's
+This is the input-side drift check: has the DATA itself drifted? Evidently's
 DataDriftPreset (PSI) compares a committed reference snapshot of the dataset to
 the current one, and TextEvals computes LLM-relevant descriptors (text length,
 etc.) over the prompt-bearing columns — directly relevant to an LLM gateway. The

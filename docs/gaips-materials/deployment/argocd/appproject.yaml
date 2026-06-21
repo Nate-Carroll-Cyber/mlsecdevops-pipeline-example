@@ -1,4 +1,4 @@
-# Argo CD AppProject — scopes what the GAIPS application may deploy and where.
+# Argo CD AppProject — scopes what the MLSECDEVOPS GitLab Pipeline application may deploy and where.
 # Apply once into the argocd namespace: kubectl apply -f appproject.yaml
 apiVersion: argoproj.io/v1alpha1
 kind: AppProject
@@ -8,7 +8,7 @@ metadata:
   finalizers:
     - resources-finalizer.argocd.argoproj.io
 spec:
-  description: GAIPS AI security gateway — signature-verified GitOps delivery
+  description: MLSECDEVOPS GitLab Pipeline AI security gateway — signature-verified GitOps delivery
 
   # Restrict to this repo. Replace with your GitLab project URL.
   sourceRepos:

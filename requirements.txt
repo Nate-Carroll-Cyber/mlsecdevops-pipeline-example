@@ -1,5 +1,5 @@
-# Python dependencies for GAIPS materials evaluation pipeline.
-# Keep this file present — CI setup, pip-audit, and guardrail-regression
+# Python dependencies for MLSECDEVOPS GitLab Pipeline materials evaluation pipeline.
+# Keep this file present — CI setup and pip-audit
 # require it to exist even when scripts themselves use only the standard library.
 #
 # Pinned to exact versions (not >= ranges) so the supply chain is reproducible

@@ -1,4 +1,4 @@
-# Argo CD Application — GitOps delivery of the GAIPS k8s manifests. Argo CD
+# Argo CD Application — GitOps delivery of the MLSECDEVOPS GitLab Pipeline k8s manifests. Argo CD
 # continuously reconciles the cluster to the manifests in Git (drift detection +
 # self-heal for free), and the PreSync hook (verify-signatures-presync-hook.yaml,
 # applied from the same path) verifies the model/dataset/AI-BOM signatures this

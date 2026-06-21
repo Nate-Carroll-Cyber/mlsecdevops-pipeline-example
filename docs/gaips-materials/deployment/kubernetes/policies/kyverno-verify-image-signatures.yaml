@@ -1,4 +1,4 @@
-# Kyverno ClusterPolicy — admission-time verification that the GAIPS workload
+# Kyverno ClusterPolicy — admission-time verification that the MLSECDEVOPS GitLab Pipeline workload
 # image is cosign-signed by the expected identity. This complements the Argo CD
 # PreSync hook (which verifies the model/dataset/AI-BOM BLOB signatures): Kyverno
 # enforces the CONTAINER IMAGE signature on every Pod create/update, so even an
@@ -18,12 +18,12 @@ kind: ClusterPolicy
 metadata:
   name: gaips-verify-image-signatures
   annotations:
-    policies.kyverno.io/title: Verify GAIPS Image Signatures (Keyless)
+    policies.kyverno.io/title: Verify MLSECDEVOPS GitLab Pipeline Image Signatures (Keyless)
     policies.kyverno.io/category: Software Supply Chain Security
     policies.kyverno.io/severity: high
     policies.kyverno.io/subject: Pod
     policies.kyverno.io/description: >-
-      Verifies that GAIPS workload images are signed with Cosign keyless by the
+      Verifies that MLSECDEVOPS GitLab Pipeline workload images are signed with Cosign keyless by the
       expected signer identity and OIDC issuer, with Rekor transparency-log
       inclusion. Mirrors the CI signer (MODEL_SIGNING_IDENTITY / SIGSTORE_OIDC_ISSUER).
 spec:

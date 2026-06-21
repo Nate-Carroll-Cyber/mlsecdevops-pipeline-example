@@ -48,7 +48,7 @@ def main() -> None:
 
     # minimal=True keeps CI fast and avoids expensive correlations/interactions
     # on large text columns; flip off for the full report when investigating.
-    profile = ProfileReport(df, title="GAIPS eval dataset profile", minimal=True)
+    profile = ProfileReport(df, title="MLSECDEVOPS GitLab Pipeline eval dataset profile", minimal=True)
 
     html_path, json_path = Path(args.html), Path(args.json)
     html_path.parent.mkdir(parents=True, exist_ok=True)

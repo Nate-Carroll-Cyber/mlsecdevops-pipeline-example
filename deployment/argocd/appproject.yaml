@@ -1,0 +1,44 @@
+# Argo CD AppProject — scopes what the MLSECDEVOPS GitLab Pipeline application may deploy and where.
+# Apply once into the argocd namespace: kubectl apply -f appproject.yaml
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: gaips
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  description: MLSECDEVOPS GitLab Pipeline AI security gateway — signature-verified GitOps delivery
+
+  # Restrict to this repo. Replace with your GitLab project URL.
+  sourceRepos:
+    - https://gitlab.example.com/your-group/gaips.git
+
+  # Only the gaips namespace in the local cluster.
+  destinations:
+    - namespace: gaips
+      server: https://kubernetes.default.svc
+      name: in-cluster
+
+  # Allow Namespace creation; deny everything else cluster-scoped by default.
+  clusterResourceWhitelist:
+    - group: ''
+      kind: Namespace
+
+  # Namespaced resources this app is permitted to manage.
+  namespaceResourceWhitelist:
+    - group: 'apps'
+      kind: Deployment
+    - group: ''
+      kind: Service
+    - group: ''
+      kind: ServiceAccount
+    - group: ''
+      kind: ConfigMap
+    - group: 'networking.k8s.io'
+      kind: NetworkPolicy
+    - group: 'batch'
+      kind: Job
+
+  orphanedResources:
+    warn: true

@@ -1,0 +1,16 @@
+# OS / editor cruft
+.DS_Store
+
+# Secrets / local env — never commit
+.env.local
+.env*.local
+
+# Python / pip (PIP_CACHE_DIR points here in CI)
+.pip-cache/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Internal session handoff (local paths + working notes) — keep out of repo
+SESSION_HANDOFF.md

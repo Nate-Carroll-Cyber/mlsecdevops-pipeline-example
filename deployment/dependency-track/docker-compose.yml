@@ -1,0 +1,43 @@
+# Dependency-Track — turnkey instance for Fix #34 (wire the AI-BOM policy gate).
+#
+# The pipeline's dependency-track-upload job + dependency_track_upload.py are already
+# complete; they skip cleanly until DT_API_URL / DT_API_KEY are set. This stands up the
+# instance they point at. Bring it up, mint an API key, set the two CI vars, define a
+# policy, then re-run the pipeline (see README.md in this dir).
+#
+# Pin the image tags to the Dependency-Track release you validate against (the official
+# compose tracks `:snapshot`; pin a concrete version for CI reproducibility).
+services:
+  dtrack-apiserver:
+    image: dependencytrack/apiserver:4.11.7
+    deploy:
+      resources:
+        limits:
+          memory: 12288m
+        reservations:
+          memory: 8192m
+    environment:
+      # See https://docs.dependencytrack.org/getting-started/configuration/ for the full set.
+      # Turnkey default: embedded H2 so `docker compose up -d` boots all-in-one with no
+      # external DB. For production, set ALPINE_DATABASE_MODE=external and add a postgres
+      # service + ALPINE_DATABASE_URL/USERNAME/PASSWORD vars (H2 is single-node/demo only).
+      ALPINE_DATABASE_MODE: "embedded"
+    ports:
+      - "8081:8080"
+    volumes:
+      - "dtrack-data:/data"
+    restart: unless-stopped
+
+  dtrack-frontend:
+    image: dependencytrack/frontend:4.11.7
+    environment:
+      # Point the SPA at the apiserver reachable from the browser.
+      API_BASE_URL: "http://localhost:8081"
+    ports:
+      - "8082:8080"
+    depends_on:
+      - dtrack-apiserver
+    restart: unless-stopped
+
+volumes:
+  dtrack-data: {}

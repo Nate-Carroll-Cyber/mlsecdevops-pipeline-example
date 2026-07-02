@@ -1,0 +1,19 @@
+# MLSECDEVOPS GitLab Pipeline CI -- MarkLLM watermark-evaluation group (heavy).
+# NOTE: this group is intentionally NOT hash-locked by lockfile-audit — its multi-GB
+# closure exhausts the small runner when pip-compile downloads it to hash, and it is
+# already vuln-audited at these exact pins by the dedicated markllm-deps-audit job. This
+# file remains the single source of the markllm/torch/transformers pins for that audit.
+# Pins mirror MARKLLM_VERSION / TORCH_VERSION / TRANSFORMERS_VERSION in
+# .gitlab-ci.yml and are also audited by the markllm-deps-audit job. transformers
+# stays on 4.x -- markllm 0.1.5 predates the 5.x major and pins huggingface_hub<1.0
+# / Pillow==9.4.0, which is why this heavy stack is locked on its own rather than
+# folded into the core group. See requirements-ci.in for the grouping rationale.
+# torch is pinned to the CPU-only wheel: the default PyPI build pulls the ~2 GB CUDA
+# stack (nvidia-* deps) onto CPU-only CI runners, which exhausted the small runner's
+# disk ([Errno 28]) when `lockfile-audit` hash-compiled this group. The +cpu wheel
+# (~200 MB, no nvidia deps) is served from the PyTorch CPU index below, and the +cpu
+# local-version forces resolution there. Mirrors the markllm-watermark-eval install.
+--extra-index-url https://download.pytorch.org/whl/cpu
+markllm==0.1.5
+torch==2.12.0+cpu
+transformers==4.57.6

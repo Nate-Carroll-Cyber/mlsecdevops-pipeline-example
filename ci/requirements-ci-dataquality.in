@@ -1,0 +1,21 @@
+# MLSECDEVOPS GitLab Pipeline CI -- data quality / drift group.
+# Each of these installs in its own per-job venv (great-expectations-validate,
+# evidently-drift, ydata-profile, dvc-verify); ydata-profiling in particular pins
+# narrow numpy/pandas/matplotlib ranges. If this group cannot resolve as one lock,
+# the lockfile-audit job reports a WARNING and these stay covered by the per-job
+# .audit-env. See requirements-ci.in for the grouping rationale.
+great-expectations
+evidently
+ydata-profiling
+# ydata-profiling breaks on setuptools>=81 (removed pkg_resources APIs it imports at
+# runtime); the ydata-profile job pinned this ad-hoc, now folded into the group lock so
+# the compiled set matches what the job actually runs. Forces a setuptools downgrade from
+# the previously-resolved 82.0.1 — expected on the next recompile.
+setuptools<81
+# dvc (not dvc[all]): the [all] extra pulls every cloud backend, dragging in
+# pydrive2 -> pyOpenSSL 24 (which caps cryptography <44) and oss2/aliyun. The DVC
+# job is inert (no remote configured), so the backends are unused weight + the
+# pyopenssl/cryptography CVEs. Bare dvc drops that chain with no upgrade risk; add a
+# specific backend (e.g. dvc[s3]) only if/when a remote is actually used. diskcache
+# (dvc-data, core) has no fixed release and remains — accepted (local-pickle, CI-only).
+dvc

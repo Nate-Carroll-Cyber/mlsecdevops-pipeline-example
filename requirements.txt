@@ -1,0 +1,16 @@
+# Python dependencies for MLSECDEVOPS GitLab Pipeline materials evaluation pipeline.
+# Keep this file present — CI setup and pip-audit
+# require it to exist even when scripts themselves use only the standard library.
+#
+# Pinned to exact versions (not >= ranges) so the supply chain is reproducible
+# and the syft CycloneDX SBOM actually catalogs these components — syft's
+# python-package-cataloger skips unpinned requirements, which previously left
+# sbom.cyclonedx.json empty and made the grype scan vacuous. pandas is held on
+# the 2.x line (3.0 is a breaking major) to match what the scripts were built
+# against. Bump deliberately; verify the new version exists on PyPI first.
+# (Transitive deps are not pinned here — that's the ci/requirements-ci.in →
+#  `pip-compile --generate-hashes` lockfile path if a full SBOM is wanted.)
+
+pandas==2.3.3
+requests==2.34.2
+jinja2==3.1.6

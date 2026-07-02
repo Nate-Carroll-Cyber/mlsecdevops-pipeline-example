@@ -1,0 +1,76 @@
+# MLSECDEVOPS GitLab Pipeline — Python dependency source (CORE group)
+#
+# Scope: this lists the packages THIS pipeline installs.
+#
+# The pipeline's deps don't reliably co-resolve as one lockfile: the markllm
+# watermark stack pins old huggingface_hub<1.0 / Pillow==9.4.0, and the data
+# quality group (evidently + ydata-profiling) pins narrow numpy/pandas ranges.
+# Those packages also run in ISOLATED per-job venvs, so they never actually share
+# one environment.
+#
+# Therefore the source list is split into independently-resolvable GROUPS, one
+# file each, all matching the glob `requirements-ci*.in`:
+#
+#   requirements-ci.in              <- this file (core foundational tools)
+#   requirements-ci-markllm.in      <- markllm watermark stack (also markllm-deps-audit)
+#   requirements-ci-dataquality.in  <- great-expectations / evidently / ydata / dvc
+#
+# The `lockfile-audit` job compiles + pip-audits EACH group on its own and merges
+# the per-group results into one lockfile-audit.json. A group that still cannot be
+# resolved into a single lockfile is reported as a WARNING (not a failure) -- its
+# packages remain covered at runtime by the per-job `.audit-env` after_script.
+#
+# Regenerate a group lock locally on a Python 3.11-slim Linux container:
+#   pip install pip-tools
+#   pip-compile --generate-hashes --output-file requirements-ci.txt requirements-ci.in
+#
+# This CORE group's hash-pinned lock IS committed beside this file as requirements-ci.txt
+# (generated on the Linux CI runner by lockfile-audit; runner paths sanitized). It serves
+# as the reproducibility/vuln-audit reference AND the install source: every core-group job
+# installs the freshly-compiled lock with `pip install --require-hashes -r
+# ${REPORTS_DIR}/requirements-ci.txt`, consuming lockfile-audit's artifact via `needs:`
+# (so the installed set == the SBOM-cataloged set, no committed-vs-fresh drift). The two
+# setup-stage jobs that run before lockfile-audit (setup, vault-secrets) install the
+# COMMITTED lock instead. Coarse-group by design: a job needing one tool installs the whole
+# group closure — the accepted trade for hash-pinning every job from a single source.
+
+# -- Vault / secrets ----------------------------------------------------------
+hvac
+
+# -- Package auditing ---------------------------------------------------------
+pip-audit
+pip-tools
+
+# -- Model signing / integrity ------------------------------------------------
+# Pinned to match MODEL_SIGNING_VERSION / SIGSTORE_PY_VERSION in .gitlab-ci.yml so the
+# lock == the intended versions the signing jobs were built against. Bump in lockstep.
+model-signing==1.1.1
+sigstore==4.3.0
+# Installed explicitly by sigstore-identity-discover (else only transitive); pin-free so
+# it resolves to the patched line under the presidio cap below.
+cryptography
+
+# -- Model scanning -----------------------------------------------------------
+modelscan
+huggingface_hub
+
+# -- HTTP / data (shared) -----------------------------------------------------
+requests
+pandas
+
+# -- Eval-dataset contract validation (eval-dataset-validate) -----------------
+jsonschema
+
+# -- Data redaction -- PII (dataset-redact); secrets handled by gitleaks binary
+# Pin < 2.2.363: presidio-anonymizer 2.2.363 caps cryptography < 47.0.0, which forces
+# cryptography down to 46.0.7 (High CVE GHSA-537c-gmf6-5ccf). 2.2.362 has no such cap,
+# so cryptography stays on the patched 48.0.1.
+presidio-analyzer<2.2.363
+presidio-anonymizer<2.2.363
+# CLI parsing for dataset-redact's redaction script (installed explicitly by the job).
+click
+# NOTE: dataset-redact also runs `python -m spacy download en_core_web_sm`
+# (spaCy is pulled in transitively by presidio-analyzer).
+
+# -- Evidence reporting -------------------------------------------------------
+jinja2

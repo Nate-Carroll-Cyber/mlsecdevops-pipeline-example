@@ -1,0 +1,77 @@
+# MLSECDEVOPS GitLab Pipeline Weaviate Helm values review fixture.
+# This file is for configuration review. Adapt exact keys to the Weaviate Helm
+# chart version in use, then verify rendered manifests before live use.
+
+authentication:
+  anonymous_access:
+    enabled: false
+  apikey:
+    enabled: true
+    allowed_keys:
+      - admin-lab-key
+      - readonly-lab-key
+    users:
+      - admin-user
+      - readonly-user
+
+authorization:
+  admin_list:
+    enabled: true
+    users:
+      - admin-user
+    read_only_users:
+      - readonly-user
+
+modules:
+  text2vec-transformers:
+    enabled: true
+    serviceName: text2vec-transformers
+  qna-transformers:
+    enabled: true
+    serviceName: qna-transformers
+
+ollama:
+  enabled: true
+  embeddingModel: nomic-embed-text
+  apiEndpoint: http://ollama:11434
+  networkPolicy:
+    allowFrom:
+      - weaviate
+      - gaips-rag-app
+
+tls:
+  enabled: true
+  secretName: weaviate-tls
+  mode: terminate-at-load-balancer-or-ingress
+
+grpcService:
+  enabled: true
+  type: LoadBalancer
+  port: 50051
+  tls:
+    enabled: true
+    certificateSecretName: weaviate-grpc-tls
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert: arn:aws:acm:region:account:certificate/example
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol: ssl
+  loadBalancerSourceRanges:
+    - 203.0.113.0/24
+
+persistence:
+  enabled: true
+  storageClassName: encrypted-efs
+  size: 100Gi
+  accessModes:
+    - ReadWriteOnce
+
+storageClass:
+  name: encrypted-efs
+  encrypted: true
+  reclaimPolicy: Retain
+  volumeBindingMode: WaitForFirstConsumer
+
+efs:
+  enabled: true
+  encryptionAtRest: true
+  encryptionInTransit: true
+  distinctAccessPointPerReplica: true

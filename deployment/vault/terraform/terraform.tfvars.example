@@ -1,0 +1,36 @@
+# MLSECDEVOPS GitLab Pipeline Vault — Terraform variables (example)
+#
+# Copy to terraform.tfvars and fill in. terraform.tfvars is git-ignored by
+# convention; never commit real cluster URLs or tokens.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# The Vault token itself is NOT set here — export it (and the namespace) in the
+# environment so it never lands on disk:
+#
+#   export VAULT_ADDR="https://<cluster>.vault.<region>.hashicorp.cloud:8200"
+#   export VAULT_TOKEN="<hcp-admin-token>"      # from the HCP portal
+#   export VAULT_NAMESPACE="admin/gaips"        # must match vault_namespace below
+#   terraform init && terraform apply
+
+# ── Vault target ──────────────────────────────────────────────────────────────
+# HCP Vault Dedicated cluster URL, or your self-managed Vault address.
+vault_addr = "https://example-cluster.vault.us-east-1.hashicorp.cloud:8200"
+
+# HCP Vault / Vault Enterprise: the namespace the mount + auth backend live in.
+# Use "admin", or a child you created first (`vault namespace create gaips` from
+# the admin namespace) → "admin/gaips". Leave "" for self-managed OSS Vault.
+vault_namespace = "admin/gaips"
+
+# ── GitLab OIDC (JWT auth backend) ───────────────────────────────────────────
+# JWKS endpoint Vault uses to validate CI id_tokens. HCP Vault must be able to
+# reach this URL. For GitLab.com use https://gitlab.com/-/jwks.
+gitlab_jwks_url = "https://gitlab.example.com/-/jwks"
+
+# JWT issuer — must equal the `iss` claim in GitLab CI JWTs (your GitLab base URL).
+gitlab_issuer = "https://gitlab.example.com"
+
+# bound_claims scope — restricts which GitLab group/project can mint gaips-ci
+# tokens. Tighten these to the exact project in production.
+gitlab_namespace    = "your-group"
+gitlab_project_path = "your-group/your-project"

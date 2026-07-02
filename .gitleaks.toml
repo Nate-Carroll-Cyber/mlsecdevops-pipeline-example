@@ -1,0 +1,22 @@
+title = "MLSECDEVOPS GitLab Pipeline Gitleaks configuration"
+
+# Load gitleaks' built-in ruleset. WITHOUT this the config has only an allowlist
+# and ZERO rules, so `gitleaks detect` matches nothing and always passes (theater).
+# useDefault pulls in the maintained default rules; the allowlist below still
+# suppresses the known test fixtures.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Known fake secret fixtures used by sanitizer tests"
+condition = "AND"
+paths = [
+  '''(^|/)backend/test/(localInspection|phase0Hardening|sanitizer)\.test\.ts$''',
+  '''(^|/)services/gateway/test/(localInspection|phase0Hardening|sanitizer)\.test\.ts$''',
+  '''(^|/)services/sam-spade/test/localInspection\.test\.ts$''',
+  '''(^|/)src/lib/sanitizer\.test\.ts$''',
+]
+regexes = [
+  '''AKIA[0-9A-Z]{16}''',
+  '''sk-[A-Za-z0-9]{20,}''',
+]

@@ -233,7 +233,7 @@ flowchart TD
       evid_jobs[evidence-summary]
     end
     subgraph AIBOM [ai-bom]
-      assemble[ai-bom-assemble<br/>→ aibom.cyclonedx.json<br/>+ vulnerabilities[] · version · redaction<br/>embeds model/dataset cosign sigs] --> validate[ai-bom-validate<br/>schema 1.6 + XML] --> aibom_sign[ai-bom-sign<br/>cosign keyless sign-blob]
+      assemble["ai-bom-assemble<br/>→ aibom.cyclonedx.json<br/>+ vulnerabilities[] · version · redaction<br/>embeds model/dataset cosign sigs"] --> validate["ai-bom-validate<br/>schema 1.6 + XML"] --> aibom_sign["ai-bom-sign<br/>cosign keyless sign-blob"]
       assemble --> content_gate[ai-bom-content-gate<br/>substance assertions · advisory]
     end
     subgraph DEPLOY [deploy-prep]

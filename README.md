@@ -1,6 +1,6 @@
 # MLSECDEVOPS GitLab Pipeline
 
-Note: Vulnerable software libaries are intentional with additional security risks planned for example reporting and demonstrations.
+Note: Vulnerable software libraries are intentional, with additional security risks planned for example reporting and demonstrations.
 
 This repository contains the concrete artifacts and fixtures for the MLSECDEVOPS GitLab Pipeline. It is intentionally self-contained so it can run without production accounts, private credentials, gated models, or undefined assets.
 
@@ -154,7 +154,7 @@ not exist in this lab setup). A job that *runs* is not the same as a control tha
 *proven it works*. This pipeline's **build / scan / sign** half is validated; its
 **deploy-time-verify** half and **external-integration** gates are not.
 
-**✅ Validated (executed green on a real run):** Git provenance, semgrep, gitleaks,
+**✅ Validated (green end-to-end on the pre-migration GitLab project running this pipeline; this standalone repo has not yet run CI on the new project — its first run is pending):** Git provenance, semgrep, gitleaks,
 pip-audit, `lockfile-audit` (core + dataquality locks), syft/grype/trivy, model
 digest/sign/**verify** (real keyless verify on the protected `main` run; the
 zero-signature vacuous-pass hole is closed — it now fails if models exist with no

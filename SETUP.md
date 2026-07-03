@@ -87,8 +87,9 @@ This creates, **inside your namespace**:
 - Role **`gaips-ci`** (15-min tokens, bound to your group/project claims)
 - Policy **`gaips-ci`** (read `…/ci/*` + `…/model-providers/*`, read/write
   `…/tamper-baseline/*`, deny `…/admin/*`)
-- **Six stub CI secrets** (fixture values, `ignore_changes` so future applies
-  won't clobber real ones).
+- **Five stub CI secrets** (fixture values, `ignore_changes` so future applies
+  won't clobber real ones). The 6th path the CI reads, `secure-software-token`
+  (`RL_TOKEN`), is **not** seeded by Terraform — add it in A5 only if you use ReversingLabs.
 
 ### A5. Replace the stub secrets with real values
 Terraform seeds fixtures; overwrite them (the CI reads the **`value`** field):
@@ -99,6 +100,7 @@ vault kv put secret/gaips/ci/model-signing-identity value="<fulcio-cert-SAN>"   
 vault kv put secret/gaips/ci/sigstore-oidc-issuer  value="https://<gitlab-host>"     # see note
 vault kv put secret/gaips/ci/hf-token              value="<hf_token_or_blank>"
 vault kv put secret/gaips/ci/registry-token        value="<registry_token_or_blank>"
+vault kv put secret/gaips/ci/secure-software-token value="<reversinglabs_token_or_blank>"  # RL_TOKEN; optional, not TF-seeded
 ```
 > **`model-signing-identity` / `sigstore-oidc-issuer`** are what
 > `signature-verification` checks model signatures against. For GitLab keyless
@@ -122,7 +124,7 @@ This is a standalone pipeline repo: the materials (`scripts/`, `evals/`, `ci/`, 
 sit at the repo root and the pipeline is the root `.gitlab-ci.yml`. `GAIPS_MATERIALS_DIR`
 at the top of the CI file is set to `${CI_PROJECT_DIR}` to match:
 ```bash
-git add .gitlab-ci.yml scripts evals ci model-signing guardrails hugging-face-hub deployment
+git add .gitlab-ci.yml scripts evals ci model-signing hugging-face-hub deployment
 ```
 (If you instead nest these dirs under a subfolder, update `GAIPS_MATERIALS_DIR` at the
 top of the CI file to wherever the `scripts/`, `evals/` dirs land.)
@@ -240,8 +242,8 @@ Each is independent; set the variable(s) and the corresponding job activates.
 | --- | --- | --- | --- |
 | D1 | **Dataset scan/redact/sign** | Optional: `DATASET_PACKAGE_NAME`, `DATASET_FILENAME` (+ `DATASET_EXPECTED_SHA256`) | Downloads from the Generic Package Registry when configured; otherwise uses the committed CI dataset fixture. Then AV+structural scan → secret/PII redaction → schema validate → cosign sign. |
 | D2 | **HF provenance gate** | `HF_MODEL_IDS="org/model-a,org/model-b"` (+ `HF_TOKEN` for gated) | `model_info` provenance/policy check per HF repo (disabled/author/SHA-pin). |
-| D4 | **AI-BOM signing** | _none_ — keyless via GitLab `SIGSTORE_ID_TOKEN` (Fix #25) | `ai-bom-sign` signs the AI-BOM with cosign keyless (Fulcio + Rekor), like the model/dataset. No signing-key variable to set. |
-| D5 | **DVC lineage** | `DVC_REMOTE_URL` (+ `.dvc/` in repo); optional `DVC_REQUIRE` | Verifies workspace vs pinned dataset/model versions. Teeth-last: blank `DVC_REQUIRE` → drift is reported/warned but does not block; `DVC_REQUIRE=true` → a drift (or a non-verifiable run) **fails the pipeline** (same pattern as `RL_FAIL_ON`/`IMAGE_VERIFY_REQUIRE`). No effect until `.dvc/` exists. |
+| D3 | **AI-BOM signing** | _none_ — keyless via GitLab `SIGSTORE_ID_TOKEN` (Fix #25) | `ai-bom-sign` signs the AI-BOM with cosign keyless (Fulcio + Rekor), like the model/dataset. No signing-key variable to set. |
+| D4 | **DVC lineage** | `DVC_REMOTE_URL` (+ `.dvc/` in repo); optional `DVC_REQUIRE` | Verifies workspace vs pinned dataset/model versions. Teeth-last: blank `DVC_REQUIRE` → drift is reported/warned but does not block; `DVC_REQUIRE=true` → a drift (or a non-verifiable run) **fails the pipeline** (same pattern as `RL_FAIL_ON`/`IMAGE_VERIFY_REQUIRE`). No effect until `.dvc/` exists. |
 
 ---
 
@@ -295,7 +297,7 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
       `secret/` mount in your namespace.
 - [ ] `vault kv get -mount=secret gaips/ci/model-endpoint` returns your real value
       (with `VAULT_NAMESPACE` exported).
-- [ ] Pipeline is green; `vault-secrets` log shows `N/8 secret(s) written`.
+- [ ] Pipeline is green; `vault-secrets` log shows `N/6 secret(s) written`.
 - [ ] `artifact-signing-gate` passed.
 - [ ] (If signing) `signature-verification` passed against your real
       `MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER`.

@@ -103,14 +103,14 @@ flowchart TD
 
 | Tool | Version | Source | Used by | Pin status |
 | --- | --- | --- | --- | --- |
-| `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `dataset-sign`, `sign-evidence`, `image-sign` (4 install sites) | ✅ Pinned + checksum verified |
+| `cosign` | `v2.4.1` | `github.com/sigstore/cosign/releases` | `model-signing-install`, `dataset-sign`, `ai-bom-sign`, `sign-evidence`, `image-sign` (5 install sites) | ✅ Pinned + checksum verified |
 | `gitleaks` | `8.30.1` | `github.com/gitleaks/gitleaks/releases` | `dataset-redact` | ✅ Pinned + checksum verified |
 
 ---
 
 ## Python Packages (pip install)
 
-All packages below are installed fresh in each job container. None are pinned in the CI file — each installs the latest available version at pipeline runtime.
+Most packages below are installed from **hash-pinned group locks** (`ci/requirements-ci.txt`, `ci/requirements-ci-dataquality.txt`) via `pip install --require-hashes`, so a tampered or substituted wheel fails the install. A few tools are version-pinned via CI variables (e.g. `MODEL_SIGNING_VERSION`, `SIGSTORE_PY_VERSION`), and the markllm group is version-pinned in `ci/requirements-ci-markllm.in`. The per-row **Pin status** column reflects each package's actual state; anything marked ⚠️ Unpinned still resolves to the latest version at runtime.
 
 | Package | Extras | Used by | Pin status | Notes |
 | --- | --- | --- | --- | --- |
@@ -163,7 +163,7 @@ controls, so a gap reads as a gap instead of being implied-covered by a pin.
 | **PyPI packages** (full stack) | torch, transformers, presidio, evidently, model-signing, … | ✅ group locks (`requirements-ci*.txt`); ⚠️ root manifest is 3 deps | ✅ `pip-audit` + `lockfile-audit` + per-job `.audit-env` + `markllm-deps-audit` | ✅ **`secure-software-scan`** — full accessed-library surface (this fix) | ⚠️ hashes available via `pkg-integrity --require-hashes`; not yet wired pipeline-wide | `secure-software-scan`, `lockfile-audit`, `pip-audit`, `markllm-deps-audit` |
 | **Container images — tools / base** | semgrep, syft, grype, trivy, gitleaks, clamav, cyclonedx-cli, miniconda, python, gitlab-secrets | ✅ **digest-pinned** (`@sha256` via `IMAGE_*`) | ❌ the tool images themselves are not scanned (trivy/grype scan the *workload* image + filesystem, not the scanner images) | ❌ not coverable via the Community purl API | ⚠️ **partial** — `image-provenance-verify` cosign-verifies the images with a documented keyless identity (**trivy**); the rest are digest-pinned only (logged explicitly) | `image-provenance-verify` |
 | **Container image — workload** | `ghcr.io/…/gaips-rag-app` (built by the separate app pipeline) | ✅ by digest at deploy | ✅ `trivy-scan` (image), `grype-scan` | ❌ N/A | ✅ `image-sign` (cosign keyless) → **Kyverno** verifies at admission | `image-sign`, `trivy-scan`, `grype-scan` |
-| **GitHub-release binaries** | `cosign` v2.4.1, `gitleaks` 8.30.1 | ✅ version-pinned | ❌ | ❌ not in the purl catalogue | ✅ **`sha256sum --check --strict`** against the published checksums file before install | `model-signing-install`, `dataset-redact`, `dataset-sign`, `sign-evidence`, `image-sign` |
+| **GitHub-release binaries** | `cosign` v2.4.1, `gitleaks` 8.30.1 | ✅ version-pinned | ❌ | ❌ not in the purl catalogue | ✅ **`sha256sum --check --strict`** against the published checksums file before install | `model-signing-install`, `dataset-sign`, `ai-bom-sign`, `sign-evidence`, `image-sign` (cosign); `dataset-redact` (gitleaks) |
 | **Model weights** | Qwen GGUF fixture; markllm transformers model | ✅ SHA-pinned (`*_EXPECTED_SHA256`) | n/a (not CVE-bearing) | ✅ **malware-scanned**: `modelscan` + `modelaudit-scan` + `clamav-scan` (≠ reputation, but the equivalent control for weights) | ✅ `model-sign` (cosign keyless) + `signature-verification` | `modelscan`, `modelaudit-scan`, `clamav-scan`, `model-sign`, `signature-verification` |
 | **HF dataset** | Lakera `gandalf_ignore_instructions` (112 rows) | ✅ `DATASET_EXPECTED_SHA256` on raw pre-redaction bytes | n/a | ✅ secret + PII scan (`dataset-scan`, `redact_dataset.py`) | ✅ `dataset-sign` (cosign over redacted bytes) | `dataset-download`, `dataset-scan`, `dataset-redact`, `dataset-sign` |
 | **apt / OS packages** | curl, git, ca-certificates, clamav | ❌ unpinned (distro repo `latest`) | ❌ not individually scanned | ❌ | ⚠️ implicit (distro signing on official base images) | (base-image trust) |
@@ -194,7 +194,7 @@ These are **not** in scope for `secure-software-scan` (the purl catalogue can't 
 | Risk | Status | Notes |
 | --- | --- | --- |
 | No upstream reputation/malware gate on OSS dependencies (pip-audit/grype/trivy catch *known CVEs*, not *malicious packages* — typosquats, account-takeover injections, removed/tampered releases) | ✅ Added | New `secure-software-scan` (sast stage, next to `pip-audit`; `scripts/secure_software_scan.py`) polls the ReversingLabs Spectra Assure **Community** catalogue across the **full accessed-library surface** — the `ci/requirements-ci*.txt` group locks plus the markllm group's `torch`/`transformers`/`markllm` pins (deduped purls, batched 5/request), not the 3-package root manifest — and reads each pinned version's `assessments.malware`/`assessments.tampering` verdict + `incidents`. Enforcement switch `RL_FAIL_ON`: blank = report-only; `malware,tampering` = gate. Skips cleanly when `RL_TOKEN` is unset. **Remaining action:** create a Community PAT, set `RL_TOKEN` (masked+protected), then flip `RL_FAIL_ON` to `malware,tampering` to enforce. |
-| `cosign` binary downloaded with no checksum verification | ✅ Fixed | All four install sites (`model-signing-install`, `dataset-sign`, `sign-evidence`, `image-sign`) download `cosign_checksums.txt` and verify via `sha256sum --check --strict` before installing |
+| `cosign` binary downloaded with no checksum verification | ✅ Fixed | All five install sites (`model-signing-install`, `dataset-sign`, `ai-bom-sign`, `sign-evidence`, `image-sign`) download `cosign_checksums.txt` and verify via `sha256sum --check --strict` before installing |
 | `torch` + `transformers` unaudited | ✅ Fixed | New `markllm-deps-audit` job runs `pip-audit` against `torch`, `transformers`, and `markllm` before `markllm-watermark-eval` |
 | Current CI blocked by historic secret fixtures | ✅ Scoped | GitLab native `secret-detection` remains a hard gate, but runs against the current HEAD checkout (`GIT_DEPTH: 1`, `SECRET_DETECTION_LOG_OPTIONS="--max-count=1"`). Use one-off historic scans/history cleanup for old fixtures instead of blocking every current pipeline. |
 | Advisory eval failures discarded evidence | ✅ Fixed | `markllm-watermark-eval` uploads artifacts with `when: always`, and writes a minimal failure JSON when the tool exits before producing its report. |

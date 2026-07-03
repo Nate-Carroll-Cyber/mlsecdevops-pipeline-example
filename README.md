@@ -1,5 +1,7 @@
 # MLSECDEVOPS GitLab Pipeline
 
+Note: Vulnerable software libaries are intentional with additional security risks planned for example reporting and demonstrations.
+
 This directory contains the concrete artifacts and fixtures for the MLSECDEVOPS GitLab Pipeline. It is intentionally self-contained so it can run without production accounts, private credentials, gated models, or undefined assets.
 
 **Approximate GitLab credit cost: 95 credits**

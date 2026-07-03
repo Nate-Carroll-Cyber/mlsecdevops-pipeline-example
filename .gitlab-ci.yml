@@ -23,9 +23,9 @@ variables:
   VAULT_NAMESPACE: ""               # e.g. "admin" or "admin/gaips" on HCP Vault
   # Override in project CI/CD settings (or fetch from Vault via vault-secrets job):
   # MODEL_ENDPOINT, MODEL_SIGNING_IDENTITY, SIGSTORE_OIDC_ISSUER
-  # AI BOM signing (ai-bom-sign) is cosign KEYLESS (Fulcio + Rekor, Fix #25) — it
+  # AI BOM signing (ai-bom-sign) is cosign KEYLESS (Fulcio + Rekor) — it
   # uses the same GitLab OIDC id_token as model-sign/dataset-sign, so no signing
-  # key variable is needed (the old CYCLONEDX_SIGNING_KEY/PUB are gone).
+  # key variable is needed.
   # Data-drift baseline auto-commit (data-drift-baseline-commit): set GITLAB_PUSH_TOKEN
   # to a masked Project Access Token (scope: write_repository) to let the first run
   # commit evals/dataset-reference.jsonl back to the default branch. If unset, the

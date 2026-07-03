@@ -30,15 +30,13 @@ Flow (mirrors the Community API's batched search usage):
      REPORT-ONLY (always exit 0).
 
 Enforcement switch: --fail-on is driven by the RL_FAIL_ON CI variable. Blank =
-report-only scan; e.g. "malware,tampering" = gate. This mirrors the
-DT_FAIL_ON / dependency_track_upload.py pattern already used in this pipeline.
+report-only scan; e.g. "malware,tampering" = gate.
 
 Token resolution: set RL_TOKEN (or alias RL_TOKEN_FILE) as a GitLab CI/CD variable
 of EITHER type — a normal Variable (holds the token) or a File variable (holds a
 path GitLab wrote the token to); _token() handles both. Vault injection sets
 RL_TOKEN directly. Skips cleanly (exit 0) when no token is configured, so the
-pipeline runs unchanged until one is wired in — same convention as
-dependency-track-upload skipping on DT_API_KEY.
+pipeline runs unchanged until one is wired in.
 
 Honest scope: the gate uses the Community *search* endpoint because it is the
 only multi-package (batchable) one and it already returns the per-version

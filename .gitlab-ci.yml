@@ -131,15 +131,6 @@ variables:
   # the gate jobs treat it as expected-but-missing and FAIL. Set this flag to "true"
   # ONLY to deliberately run the pipeline with the dataset chain disabled (skip green).
   DATASETS_DISABLED: ""             # "true" = intentionally disable the dataset chain (skip, exit 0)
-  # ── Dependency-Track — continuous BOM analysis backend ────────────────────────
-  # The pipeline already emits CycloneDX SBOMs + a CycloneDX 1.6 AI BOM; DT ingests
-  # them and re-analyses against new CVEs + policy conditions over time. Set both
-  # in CI/CD Variables (or fetch from Vault). Blank = dependency-track-upload skips
-  # cleanly, so the pipeline runs unchanged until an instance is wired in.
-  # DT_API_KEY MUST be a masked variable.
-  DT_API_URL: ""                    # e.g. https://dtrack.example.com (no trailing /api)
-  DT_API_KEY: ""                    # masked; needs BOM_UPLOAD + VIEW perms
-  DT_FAIL_ON: "FAIL"                # violationState(s) that fail the gate (comma list)
   # ── ReversingLabs Spectra Assure Community — OSS dep reputation/malware gate ───
   # secure-software-scan polls the free Community catalogue for each pinned
   # dependency and gates on a recent malware/tampering verdict. RL_TOKEN is a
@@ -150,7 +141,7 @@ variables:
   # RL_TOKEN silently never reaches the job (the empty default below wins and the
   # scan skips). Blank → the job skips cleanly. Or fetch from Vault once configured.
   # RL_FAIL_ON is the enforcement switch: blank = report-only scan;
-  # "malware,tampering" = gate the pipeline on a hit (mirrors DT_FAIL_ON).
+  # "malware,tampering" = gate the pipeline on a hit.
   # RL_WARN_AS_FAIL promotes a "warning" verdict (the middle of pass/warning/fail)
   # to a blocking hit for the named categories. Blank (default) = warnings are
   # surfaced in the report/summary but never block; set "tampering" / "malware,tampering"
@@ -467,8 +458,6 @@ vault-secrets:
           "gaips/ci/sigstore-oidc-issuer": "SIGSTORE_OIDC_ISSUER",
           "gaips/ci/hf-token":             "HF_TOKEN",
           "gaips/ci/registry-token":       "CI_REGISTRY_TOKEN",
-          "gaips/ci/dt-api-url":           "DT_API_URL",
-          "gaips/ci/dt-api-key":           "DT_API_KEY",
           "gaips/ci/secure-software-token": "RL_TOKEN",
       }
 
@@ -739,15 +728,14 @@ pip-audit:
 # deliberately does NOT scan the 3-package root requirements.txt, which shadowed
 # the real stack (the same blind spot lockfile-audit was created to fix).
 #
-# Enforcement switch — RL_FAIL_ON (mirrors DT_FAIL_ON):
+# Enforcement switch — RL_FAIL_ON:
 #   ""                  → report-only scan (always exit 0; just publishes the report)
 #   "malware,tampering" → gate (fail the pipeline on a hit)
 # allow_failure:false is correct for BOTH modes: secure_software_scan.py returns 0
 # in report-only/skip and exits 1 only when an enforced category trips — so the
 # switch lives in the script's exit code, not in this YAML.
 #
-# Skips cleanly when RL_TOKEN is unset (same convention as dependency-track-upload
-# skipping on an unset DT_API_KEY), so the pipeline runs unchanged until a token
+# Skips cleanly when RL_TOKEN is unset, so the pipeline runs unchanged until a token
 # is wired in. needs vault-secrets so a Vault-sourced RL_TOKEN is available once
 # Vault is configured; today vault-secrets skips and RL_TOKEN comes straight from
 # the masked CI/CD variable.
@@ -3380,8 +3368,6 @@ sign-evidence:
     - ai-bom-assemble
     - ai-bom-validate
     - ai-bom-sign
-    - job: dependency-track-upload
-      optional: true      # opt-in (DT_API_URL); absent when DT unconfigured
     # deploy-prep stage — captures the publish manifest, image-sign, metrics, pages
     - image-sign
     - publish-signed-artifacts
@@ -3772,47 +3758,6 @@ ai-bom-sign:
 # enforcement is wanted here, add a small gate over evidently-drift (#38) once it
 # has a committed reference baseline (Fix #24b).
 
-# Ingest the signed BOMs into Dependency-Track for CONTINUOUS analysis — the SBOM
-# and the AI BOM (nested under the app project) are re-scanned against new CVEs +
-# policy conditions over time, turning the point-in-time grype/trivy scan into
-# ongoing monitoring. Hard policy gate (fails on a blocking violationState), but
-# skips cleanly when DT_API_URL/DT_API_KEY are unset — same pattern as dataset-scan.
-# NOTE: DT's vuln matching targets software components; the AI BOM's model/data
-# components ride along as inventory + POLICY targets (which DO gate), not CVE matches.
-dependency-track-upload:
-  stage: ai-bom
-  rules:
-    - if: '$CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/'
-      when: never
-    # Opt-in: only created when Dependency-Track is actually configured. DT_API_URL is a
-    # top-level CI variable (default ""), visible at pipeline-creation time. Unconfigured =
-    # the job never exists — no hard gate, no wasted install, no vault-dotenv dependency to
-    # expire. Set DT_API_URL (a real instance) to activate the reviewed integration.
-    - if: '$DT_API_URL == ""'
-      when: never
-    - when: on_success
-  needs: ["syft-cyclonedx", "ai-bom-assemble", "vault-secrets", "lockfile-audit"]
-  allow_failure: false   # hard gate on blocking policy violations (only runs when DT is configured)
-  variables:
-    DT_PROJECT_NAME: "${CI_PROJECT_NAME}"
-  script:
-    - pip install --require-hashes -r "${REPORTS_DIR}/requirements-ci.txt"   # core group lock (uses requests)
-    - mkdir -p "${REPORTS_DIR}"
-    - |
-      python3 "${GAIPS_MATERIALS_DIR}/scripts/dependency_track_upload.py" \
-        --bom "${SBOM_DIR}/sbom.cyclonedx.json" \
-        --aibom "${SBOM_DIR}/aibom.cyclonedx.json" \
-        --project-name "${DT_PROJECT_NAME}" \
-        --project-version "${CI_COMMIT_REF_NAME}" \
-        --aibom-name "${DT_PROJECT_NAME}-aibom" \
-        --report "${REPORTS_DIR}/dependency-track.json" \
-        --fail-on "${DT_FAIL_ON}"
-  artifacts:
-    paths:
-      - "${REPORTS_DIR}/pip-audit-env-*.json"
-      - "${REPORTS_DIR}/dependency-track.json"
-    expire_in: 30 days
-
 # ─── DEPLOY PREP ───────────────────────────────────────────────────────────────
 # The two halves of the sign→verify-at-deploy loop are produced here:
 #   • image-sign               → Cosign signature on the workload image (Kyverno verifies it at admission)
@@ -3833,7 +3778,7 @@ image-sign:
   # drift-gate removed (it gated on eval-metric drift, but this pipeline performs no
   # inference and produces no eval metrics; see Fix #24a). Anchored instead to
   # ai-bom-sign (the ai-bom stage's hard gate) so image signing still follows the AI-BOM
-  # stage — dependency-track-upload is now opt-in (DT_API_URL) and may not exist.
+  # stage.
   needs: ["ai-bom-sign"]
   # Fulcio requires an OIDC token with aud "sigstore" for keyless signing — same
   # mechanism model-sign / dataset-sign use. The resulting cert's identity is this
@@ -4023,7 +3968,7 @@ metrics-normalize:
   # needs, GitLab's default "download every prior stage's artifacts" tried to
   # fetch that already-expired secret artifact on any >30-min run, so this job
   # failed to start and `pages` rendered an empty dashboard. optional:true
-  # tolerates jobs a given run doesn't create (e.g. dependency-track-upload is opt-in).
+  # tolerates jobs a given run doesn't create (e.g. hf-artifact-scan is opt-in).
   needs:
     - {job: setup, artifacts: true, optional: true}
     - {job: semgrep-sast, artifacts: true, optional: true}
@@ -4051,7 +3996,6 @@ metrics-normalize:
     - {job: markllm-watermark-eval, artifacts: true, optional: true}
     - {job: evidently-drift, artifacts: true, optional: true}
     - {job: ai-bom-assemble, artifacts: true, optional: true}
-    - {job: dependency-track-upload, artifacts: true, optional: true}
   allow_failure: true   # reporting only — never fail the pipeline on the dashboard
   before_script: []
   script:

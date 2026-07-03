@@ -23,7 +23,7 @@ mlsecdevops-pipeline/   (MLSECDEVOPS GitLab Pipeline — repo root)
 │   └── requirements-ci{,-markllm,-dataquality}.{in,txt}  ← grouped CI dep locks
 ├── scripts/         Python scripts — build_ai_bom, run_evidently_report,
 │                    write_ci_evidence_summary, redact_dataset,
-│                    dependency_track_upload, secure_software_scan, validate_eval_dataset, …
+│                    secure_software_scan, validate_eval_dataset, …
 ├── evals/           datasets + baselines + schema (model-baseline.json,
 │                    dataset-baseline.json, dataset-reference.jsonl,
 │                    gandalf-ignore-instructions-test.jsonl, eval-dataset.schema.json, …)
@@ -33,7 +33,6 @@ mlsecdevops-pipeline/   (MLSECDEVOPS GitLab Pipeline — repo root)
 └── deployment/
     ├── argocd/       application, appproject, verify-signatures PreSync hook
     ├── kubernetes/   rag-app, weaviate, network-policy, kyverno image-verify policy
-    ├── dependency-track/  docker-compose + README
     └── vault/        terraform/, gaips-policy.hcl, jwt-auth-config.hcl
 ```
 
@@ -139,18 +138,18 @@ The repo-root `.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intend
 
 > **Secrets management.** HashiCorp Vault remains the recommended production-grade secrets management option for this pipeline, especially when centralized auditability, short-lived credentials, and policy-based secret access are required. To reduce operating costs for lab, demo, and early validation environments, this repository also supports standard GitLab CI/CD variables as a lower-cost fallback when `VAULT_ADDR` is not configured.
 
-> **Full setup runbook:** [`SETUP.md`](SETUP.md) walks the entire path end to end — GitLab CI/CD variables and the first pipeline run, optional HashiCorp Vault provisioning with Terraform (production), other optional integrations (Dependency-Track, HF/dataset scanning, DVC), and deploy-time Kyverno + Argo CD verification.
+> **Full setup runbook:** [`SETUP.md`](SETUP.md) walks the entire path end to end — GitLab CI/CD variables and the first pipeline run, optional HashiCorp Vault provisioning with Terraform (production), other optional integrations (HF/dataset scanning, DVC), and deploy-time Kyverno + Argo CD verification.
 > **CI/CD variable catalog:** [`ci/CI-VARIABLES.md`](ci/CI-VARIABLES.md) lists every variable the pipeline reads, its source (you / Vault / GitLab), masking, default, and what it gates. Terraform inputs: [`deployment/vault/terraform/terraform.tfvars.example`](deployment/vault/terraform/terraform.tfvars.example).
 
-The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, `deploy-prep`, and `attest` (the terminal seal stage that runs dead-last so `sign-evidence` can hash + sign the entire run's evidence set). It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, OSS dependency reputation/malware screening (ReversingLabs Spectra Assure Community), ModelScan, ModelAudit, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, MarkLLM live watermark evaluation, evidence, a consolidated CycloneDX 1.6 AI BOM artifact (also pushed to Dependency-Track), a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification. It needs **no model endpoint / deployed inference service** — but note `markllm-watermark-eval` does run real in-process `transformers` generation on CPU, so the pipeline is not literally inference-free.
+The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, `deploy-prep`, and `attest` (the terminal seal stage that runs dead-last so `sign-evidence` can hash + sign the entire run's evidence set). It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, OSS dependency reputation/malware screening (ReversingLabs Spectra Assure Community), ModelScan, ModelAudit, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, MarkLLM live watermark evaluation, evidence, a consolidated CycloneDX 1.6 AI BOM artifact, a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification. It needs **no model endpoint / deployed inference service** — but note `markllm-watermark-eval` does run real in-process `transformers` generation on CPU, so the pipeline is not literally inference-free.
 
-Before copying this CI file into a project repository, add or adapt `requirements.txt`, `models/`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, the data-quality collectors (`scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/dependency_track_upload.py`, `scripts/secure_software_scan.py`), and `evals/eval-dataset.schema.json`. Configure signing and Hugging Face variables in GitLab CI/CD settings (no model endpoint is needed — the only inference is `markllm-watermark-eval`'s local in-process `transformers` generation, which runs in-pipeline on CPU rather than against any deployed service).
+Before copying this CI file into a project repository, add or adapt `requirements.txt`, `models/`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, the data-quality collectors (`scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/secure_software_scan.py`), and `evals/eval-dataset.schema.json`. Configure signing and Hugging Face variables in GitLab CI/CD settings (no model endpoint is needed — the only inference is `markllm-watermark-eval`'s local in-process `transformers` generation, which runs in-pipeline on CPU rather than against any deployed service).
 
 ## Validation Status & Known Gaps
 
 Honest status of what has actually executed and proven itself versus what is wired
 but **never run** (because the consuming infrastructure — a built workload image, a
-Kubernetes cluster with Kyverno/Argo CD, a Dependency-Track instance, a Vault — does
+Kubernetes cluster with Kyverno/Argo CD, a Vault — does
 not exist in this lab setup). A job that *runs* is not the same as a control that has
 *proven it works*. This pipeline's **build / scan / sign** half is validated; its
 **deploy-time-verify** half and **external-integration** gates are not.
@@ -182,9 +181,6 @@ sign-evidence, and `image-provenance-verify` (cosign-verifies trivy; CI-confirme
   are Kubernetes manifests that only run in a cluster — never in CI — and carry
   example identities (`ghcr.io/example/*`, `ci-signer@example.invalid`,
   `gitlab.example.com`).
-- **`dependency-track-upload`** — `DT_API_URL`/`DT_API_KEY` unset → skips; the only
-  CVE-policy *blocking* gate has never evaluated. When wired, it gates on authored DT
-  **policies**, so a DT with none passes green even with criticals.
 - **Vault** (`vault-secrets`, Vault-backed tamper durability) — `VAULT_ADDR` unset →
   CI-vars fallback; the Vault auth/fetch path is unvalidated.
 - **`hf-artifact-scan`** — `HF_MODEL_IDS` unset → skips; never scans external HF repos.
@@ -199,7 +195,7 @@ sign-evidence, and `image-provenance-verify` (cosign-verifies trivy; CI-confirme
 
 **To close the biggest unknowns** you need infrastructure this repo can't self-test:
 a built+pushed workload image, a Kubernetes cluster running Kyverno + Argo CD (the
-deploy-verify chain), a Dependency-Track instance, and a Vault.
+deploy-verify chain), and a Vault.
 
 ## Pipeline Walkthrough
 
@@ -239,7 +235,6 @@ flowchart TD
     subgraph AIBOM [ai-bom]
       assemble[ai-bom-assemble<br/>→ aibom.cyclonedx.json<br/>+ vulnerabilities[] · version · redaction<br/>embeds model/dataset cosign sigs] --> validate[ai-bom-validate<br/>schema 1.6 + XML] --> aibom_sign[ai-bom-sign<br/>cosign keyless sign-blob]
       assemble --> content_gate[ai-bom-content-gate<br/>substance assertions · advisory]
-      dtrack[dependency-track-upload<br/>continuous BOM policy gate]
     end
     subgraph DEPLOY [deploy-prep]
       imgsign[image-sign<br/>cosign keyless → workload image]
@@ -270,7 +265,7 @@ flowchart TD
 | --- | --- |
 | `setup` | Installs Python dependencies, creates `evidence/`, `sbom/`, and `reports/` directories, stamps pipeline ID and commit SHA into `evidence/pipeline.env`, and records Git/CI version provenance (commit, `git describe`, tag, branch, dirty state) to `evidence/version-info.json` for traceability of every downstream artifact. |
 | `model-manifest` | Validates `evals/model-baseline.json` (the approved model source of truth) with `scripts/build_model_baseline.py` and emits its `variables` map as a GitLab **dotenv report**, so `model-fixture-download`, `markllm-deps-audit`, and `markllm-watermark-eval` inherit `MODEL_FIXTURE_*` / `MARKLLM_*` from one reviewed file. Per GitLab variable precedence, the dotenv **overrides** the inline `variables:` defaults but is itself overridable by a Project/manual CI variable. Not `allow_failure`: a malformed or internally-inconsistent baseline fails fast at this cheap stage rather than after the expensive scans. |
-| `vault-secrets` | Authenticates to Vault using a GitLab OIDC JWT and fetches the CI secrets (`MODEL_ENDPOINT`, `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `CI_REGISTRY_TOKEN`, `DT_API_URL`, `DT_API_KEY`) into a dotenv artifact injected as environment variables into all downstream jobs. Falls back to GitLab CI/CD variables if `VAULT_ADDR` is not set. Works against self-managed Vault or **HCP Vault Dedicated** — for HCP, set `VAULT_NAMESPACE` (`admin` or a child); see `deployment/vault/sample-secret-map.md`. |
+| `vault-secrets` | Authenticates to Vault using a GitLab OIDC JWT and fetches the CI secrets (`MODEL_ENDPOINT`, `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `CI_REGISTRY_TOKEN`) into a dotenv artifact injected as environment variables into all downstream jobs. Falls back to GitLab CI/CD variables if `VAULT_ADDR` is not set. Works against self-managed Vault or **HCP Vault Dedicated** — for HCP, set `VAULT_NAMESPACE` (`admin` or a child); see `deployment/vault/sample-secret-map.md`. |
 
 ### Stage 2 — SAST
 
@@ -391,11 +386,10 @@ The final stage rolls every prior element into **one CycloneDX 1.6 AI BOM** — 
 
 | Job | What it does |
 | --- | --- |
-| `ai-bom-assemble` | Runs `scripts/build_ai_bom.py`, merging the Syft software SBOM (`library` components), models (`machine-learning-model` components with a `modelCard`, digest, ModelScan/ModelAudit/ClamAV/Hugging Face verdicts, and the embedded `model.sig`), datasets (`data` components with digest, scan verdict, embedded `dataset.sig`, and — from `evals/dataset-baseline.json` via `--dataset-baseline` — a CycloneDX `licenses` entry plus `gaips:dataset.source/.revision/.split/.citation` provenance, closing the gap where datasets carried only a bare digest while models carried full HF provenance) into `sbom/aibom.cyclonedx.json`. **Emits a CycloneDX `vulnerabilities[]` array** (Fix #29) built from the run's audit reports — pip-audit (`markllm-deps-audit` + the per-job `pip-audit-*`), grype, and trivy — deduped, each with `affects[].ref` pointing at the offending component's `bom-ref` (so Dependency-Track ingests structured vulns, not just property counts). The **software count is split** into `bom.counts.software.pipeline` vs `…software.markllm` so the two disjoint dependency universes are no longer fused (Fix #30a), and the previously-hollow **`modelCard` is populated** from `markllm-results.json` (`quantitativeAnalysis.performanceMetrics` + `modelParameters`, Fix #30b). Each model component now carries **`gaips:model.verified`** alongside `gaips:signed` (Fix #32b), distinguishing "a signature exists" from "we checked it" — sourced from `signature-verification` #19 (honestly `false`/deferred until #19 runs on a protected ref). The per-component **cosign** signatures for models and datasets are embedded here as base64 `data:`-URI external references; the BOM's own signature is applied downstream by `ai-bom-sign`. It also folds in **Git version provenance** (from `version-info.json`) and the **dataset redaction** verdict (redacted SHA + secret/PII counts, so the `data` component hash reflects the redacted bytes). Each input is optional, so the BOM degrades gracefully as stages light up. Retained for 90 days. |
+| `ai-bom-assemble` | Runs `scripts/build_ai_bom.py`, merging the Syft software SBOM (`library` components), models (`machine-learning-model` components with a `modelCard`, digest, ModelScan/ModelAudit/ClamAV/Hugging Face verdicts, and the embedded `model.sig`), datasets (`data` components with digest, scan verdict, embedded `dataset.sig`, and — from `evals/dataset-baseline.json` via `--dataset-baseline` — a CycloneDX `licenses` entry plus `gaips:dataset.source/.revision/.split/.citation` provenance, closing the gap where datasets carried only a bare digest while models carried full HF provenance) into `sbom/aibom.cyclonedx.json`. **Emits a CycloneDX `vulnerabilities[]` array** (Fix #29) built from the run's audit reports — pip-audit (`markllm-deps-audit` + the per-job `pip-audit-*`), grype, and trivy — deduped, each with `affects[].ref` pointing at the offending component's `bom-ref` (so an auditor ingesting the BOM gets structured vulns, not just property counts). The **software count is split** into `bom.counts.software.pipeline` vs `…software.markllm` so the two disjoint dependency universes are no longer fused (Fix #30a), and the previously-hollow **`modelCard` is populated** from `markllm-results.json` (`quantitativeAnalysis.performanceMetrics` + `modelParameters`, Fix #30b). Each model component now carries **`gaips:model.verified`** alongside `gaips:signed` (Fix #32b), distinguishing "a signature exists" from "we checked it" — sourced from `signature-verification` #19 (honestly `false`/deferred until #19 runs on a protected ref). The per-component **cosign** signatures for models and datasets are embedded here as base64 `data:`-URI external references; the BOM's own signature is applied downstream by `ai-bom-sign`. It also folds in **Git version provenance** (from `version-info.json`) and the **dataset redaction** verdict (redacted SHA + secret/PII counts, so the `data` component hash reflects the redacted bytes). Each input is optional, so the BOM degrades gracefully as stages light up. Retained for 90 days. |
 | `ai-bom-validate` | Validates the BOM against the CycloneDX 1.6 JSON schema with `cyclonedx validate --fail-on-errors`, then converts it to `sbom/aibom.cyclonedx.xml` — the form the next job signs. Hard gate (no `allow_failure`): a schema-invalid BOM fails the pipeline rather than shipping a malformed attestation. **This is a FORM check only** — a well-formed BOM can still be substantively hollow, so the companion `ai-bom-content-gate` (below) asserts content. |
 | `ai-bom-content-gate` | Runs `scripts/assert_ai_bom_content.py` (Fix #31) — the SUBSTANCE counterpart to `ai-bom-validate`'s schema check, in a `python:3.11-slim` image (the cyclonedx-cli image has no Python). Asserts the BOM **says something**: if the run's audit reports found vulns but the BOM's `vulnerabilities[]` is empty it flags a gap (enforces #29), and every `machine-learning-model` component must be `gaips:signed=true` (+ `gaips:model.verified=true`, WARN-only while #19 defers). **Advisory** (`allow_failure: true`) per the teeth-last posture; pass `--enforce` to make the coverage/signing assertions block once the pipeline is otherwise green. |
 | `ai-bom-sign` | Applies the BOM's **own** signature with **cosign keyless** (`cosign sign-blob` over `aibom.cyclonedx.xml`, via the GitLab `SIGSTORE_ID_TOKEN`), emitting a detached `aibom.cyclonedx.sig` + Fulcio `aibom.cyclonedx.pem` recorded in Rekor — the same identity-bound mechanism as `model-sign`/`dataset-sign`/`sign-evidence` (Fix #25, replacing the old ephemeral identity-less RSA enveloped signature). **Hardened to a gate** (`allow_failure: false`): an unsigned AI-BOM is never delivered green; skips only when there is genuinely no BOM. The deploy-time PreSync hook verifies it with `cosign verify-blob` against the CI signer identity — no public-key Secret. Models and datasets keep their own cosign signatures (embedded by `ai-bom-assemble`). |
-| `dependency-track-upload` | Ingests the Syft SBOM and the AI BOM (nested under it via `parentName`/`parentVersion`) into **Dependency-Track** for *continuous* analysis — re-scanning against new CVEs and policy conditions over time, and ingesting the structured `vulnerabilities[]` that `ai-bom-assemble` now emits (Fix #29). Hard policy gate **when configured**: fails on any non-suppressed violation whose `violationState` is in `DT_FAIL_ON` (default `FAIL`). Skips cleanly when `DT_API_URL`/`DT_API_KEY` are unset — so in a default run with no Dependency-Track credentials, nothing is uploaded and the gate is inert (the "also pushed to Dependency-Track" behaviour applies only once DT is wired). **To wire it** (Fix #34): a turnkey instance + step-by-step runbook live in [`deployment/dependency-track/`](deployment/dependency-track/) (docker-compose + API-key permissions + the CI vars + a gating policy). This is what gives #29 teeth. |
 
 The pipeline default is `interruptible: true` so superseded jobs can be canceled by GitLab when a newer pipeline replaces them. Enable GitLab's project-level auto-cancel redundant pipelines setting to turn that into runner-minute savings during CI debugging.
 
@@ -525,7 +519,6 @@ The authoritative map of **what each job emits** — every GitLab `artifacts:` p
 | `ai-bom-assemble` | `sbom/aibom.cyclonedx.json` (.json — CycloneDX 1.6 AI BOM) | 90 days |
 | `ai-bom-validate` | `sbom/aibom.cyclonedx.xml` (.xml — schema-validated, the form `ai-bom-sign` signs) | 90 days |
 | `ai-bom-sign` | `sbom/aibom.cyclonedx.xml` (.xml), `sbom/aibom.cyclonedx.sig` (.sig — detached cosign), `sbom/aibom.cyclonedx.pem` (.pem — Fulcio cert) | 90 days |
-| `dependency-track-upload` | `reports/dependency-track.json` (.json — findings/violations + dashboard URLs for the SBOM **and** AI-BOM child) | 30 days |
 
 ### Stage 10 — Deploy Prep
 
@@ -582,7 +575,7 @@ This job turns the reviewed `evals/model-baseline.json` into the single source o
 #### `vault-secrets` — stage: `setup` · advisory (allow_failure) · output: dotenv report (`.vault-env`)
 
 **What this job is for**
-This job centrally brokers secrets from HashiCorp Vault into the pipeline as CI variables (model endpoint, signing identity, Sigstore issuer, HF token, registry token, Dependency-Track creds, etc.) so later jobs don't each need their own Vault wiring. It runs in setup alongside `setup` and `model-manifest` and is a named dependency of jobs such as `trivy-scan`. It is advisory and degrades gracefully: if `VAULT_ADDR` is unset it skips cleanly and the pipeline falls back to GitLab CI/CD variables.
+This job centrally brokers secrets from HashiCorp Vault into the pipeline as CI variables (model endpoint, signing identity, Sigstore issuer, HF token, registry token, etc.) so later jobs don't each need their own Vault wiring. It runs in setup alongside `setup` and `model-manifest` and is a named dependency of jobs such as `trivy-scan`. It is advisory and degrades gracefully: if `VAULT_ADDR` is unset it skips cleanly and the pipeline falls back to GitLab CI/CD variables.
 
 **Step by step, in plain English**
 1. Requests a per-job OIDC JWT (`VAULT_ID_TOKEN`) via `id_tokens`, with `CI_JOB_JWT_V2` as the legacy fallback.
@@ -1275,7 +1268,7 @@ This is the pipeline's consolidating gate: it gathers reports from across the ru
 1. Skips on `[sigstore-discovery]` commits; otherwise installs `jinja2` and creates the evidence directory.
 2. Runs `write_ci_evidence_summary.py` against the reports directory — invoked WITHOUT `--enforce-verdicts`, so it runs in advisory-verdict mode (teeth deferred).
 3. For the required artifact (`semgrep.json`) it reads a 3-state VERDICT — pass / fail / inert (present but no pass/fail signal) — and treats a missing file as `absent`. A missing required artifact is the only thing that hard-fails the gate.
-4. For advisory artifacts (`markllm-results.json`, `evidently-drift.json`, `modelaudit-summary.json`, `great-expectations.json`, `dependency-track.json`, etc.) it records the same 3-state verdict but never gates on them — so a markllm disk/OOM hiccup that prevents the file being written can no longer cascade into a blocking `evidence-summary` failure.
+4. For advisory artifacts (`markllm-results.json`, `evidently-drift.json`, `modelaudit-summary.json`, `great-expectations.json`, etc.) it records the same 3-state verdict but never gates on them — so a markllm disk/OOM hiccup that prevents the file being written can no longer cascade into a blocking `evidence-summary` failure.
 5. Builds the `evidence-summary.md` tables (Artifact / Present / Verdict / Detail) plus a Gate section, and emits warnings to the log for failing verdicts.
 6. Hard-fails (exit 1) only when a REQUIRED artifact is MISSING; a present-but-failing required verdict merely warns and would only block under `--enforce-verdicts`.
 7. Bundles `dataset-reference.seed.jsonl` into the evidence dir if a drift reference was seeded this run (commit it to `evals/dataset-reference.jsonl` to activate drift detection).
@@ -1348,28 +1341,12 @@ This seals the AI BOM with a cosign keyless signature, making the auditor's keys
 
 **Output file(s):** `sbom/aibom.cyclonedx.xml` (the signed bytes), `sbom/aibom.cyclonedx.sig` (detached keyless signature), `sbom/aibom.cyclonedx.pem` (Fulcio cert for offline `verify-blob`) — the trio `publish-signed-artifacts` ships for the Argo PreSync hook.
 
-#### `dependency-track-upload` — stage: `ai-bom` · hard gate when configured · output: `reports/dependency-track.json`
-
-**What this job is for**
-This pushes the BOMs into Dependency-Track for continuous analysis, turning the point-in-time grype/trivy scan into ongoing monitoring against new CVEs and policy conditions over time. It uploads the syft SBOM as the parent project and the AI BOM nested beneath it. It is a hard gate on blocking policy violations, but skips cleanly when `DT_API_URL`/`DT_API_KEY` are unset, so the pipeline runs unchanged until a DT instance is wired in. Backing script: `scripts/dependency_track_upload.py`.
-
-**Step by step, in plain English**
-1. Installs `requests` and runs `scripts/dependency_track_upload.py`.
-2. If `DT_API_URL`/`DT_API_KEY` are unset, writes a `skipped` report and exits 0.
-3. POSTs the app SBOM with `autoCreate=true` to get a processing token, then POSTs the AI BOM nested under the app project (`parentName`/`parentVersion`).
-4. Polls each BOM's processing token until DT finishes ingesting.
-5. Resolves each uploaded project's UUID and pulls its findings and policy violations.
-6. Evaluates the gate for every uploaded project — including the nested AI BOM, whose model/data components get no CVE match but ARE policy targets.
-7. Writes the report and fails (exit 1) if any project could not be resolved, or if any non-suppressed violation matches `DT_FAIL_ON` (default `FAIL`); VEX-suppressed violations never gate.
-
-**Output file(s):** `reports/dependency-track.json` — per-project findings, policy violations, the gate fail-states, and the skip reason when DT is unconfigured.
-
 ### Stage 10 — Deploy Prep
 
 #### `image-sign` — stage: `deploy-prep` · advisory (allow_failure) · output: none
 
 **What this job is for**
-This is the image half of the sign→verify-at-deploy loop: it applies a cosign keyless signature to the already-built workload image so the `kyverno-verify-image-signatures` policy can admit a Pod only when its image carries a signature from this CI identity. Advisory because Kyverno is the real deploy-time gate. It skips cleanly when `IMAGE_REF` is unset, and `needs` `dependency-track-upload`.
+This is the image half of the sign→verify-at-deploy loop: it applies a cosign keyless signature to the already-built workload image so the `kyverno-verify-image-signatures` policy can admit a Pod only when its image carries a signature from this CI identity. Advisory because Kyverno is the real deploy-time gate. It skips cleanly when `IMAGE_REF` is unset, and `needs` `ai-bom-sign`.
 
 **Step by step, in plain English**
 1. If `IMAGE_REF` is empty, prints a skip notice and exits 0.
@@ -1460,7 +1437,7 @@ That distinction matters. The pipeline **supports control objectives**; governan
 
 A useful way to describe the pipeline is as a control-evidence system mapped across six themes: vulnerability and code security, supply-chain integrity, environment isolation, access and secret management, adversarial testing, and continuous monitoring.
 
-> **Read this section alongside [Validation Status & Known Gaps](#validation-status--known-gaps).** A mapping below means the pipeline is *designed* to produce that evidence — not that the control has executed. Several deploy-time mappings (Kyverno, Argo CD PreSync) and integration mappings (Dependency-Track, Vault) are **wired but never run** in the lab CI; they support the listed objectives only once the consuming infrastructure exists.
+> **Read this section alongside [Validation Status & Known Gaps](#validation-status--known-gaps).** A mapping below means the pipeline is *designed* to produce that evidence — not that the control has executed. Several deploy-time mappings (Kyverno, Argo CD PreSync) and integration mappings (Vault) are **wired but never run** in the lab CI; they support the listed objectives only once the consuming infrastructure exists.
 
 ### 1. Vulnerability scanning and secure code evidence
 
@@ -1470,7 +1447,7 @@ The `sast`, `sbom`, and `vuln-scan` stages support the classic secure-developmen
 | --- | --- |
 | Semgrep SAST, secure coding findings | ISO/IEC 27002:2022 8.28 Secure Coding |
 | Secret Detection, Gitleaks | NIST SP 800-53 SI-7; ISO/IEC 27002 5.17, 8.2 |
-| `pip-audit`, Grype, Trivy | CSA AICM MDS-02 Artifact Scanning; NIST SP 800-53 SI-7 |
+| `pip-audit`, Grype, Trivy | CSA AICM MDS-02 Artifact Scanning; ISO/IEC 27002 8.8 Management of Technical Vulnerabilities; NIST SP 800-53 RA-5 Vulnerability Monitoring and Scanning |
 | Syft CycloneDX/SPDX SBOMs | CSA AICM STA-16 Service Bill of Materials; ISO/IEC 27002 5.9 Inventory |
 | ReversingLabs `secure-software-scan` | CSA AICM MDS-02; NIST SP 800-53 SI-7 |
 
@@ -1493,7 +1470,7 @@ The AI-BOM is not just an inventory artifact. It is the object that binds softwa
 
 ### 3. Infrastructure as code, separation of environments, and blast-radius reduction
 
-The deployment materials support the deployment-control side of the story: Kyverno admission policy, Argo CD PreSync verification, Kubernetes manifests, Vault configuration, and Dependency-Track deployment materials. These are wired as deployment manifests and external integrations but, per [Validation Status & Known Gaps](#validation-status--known-gaps), are **not proven in the lab CI run** without a real cluster, Vault, Dependency-Track instance, and built workload image.
+The deployment materials support the deployment-control side of the story: Kyverno admission policy, Argo CD PreSync verification, Kubernetes manifests, and Vault configuration. These are wired as deployment manifests and external integrations but, per [Validation Status & Known Gaps](#validation-status--known-gaps), are **not proven in the lab CI run** without a real cluster, Vault, and built workload image.
 
 | Pipeline / deployment evidence | Relevant controls |
 | --- | --- |
@@ -1530,14 +1507,15 @@ This pipeline does not pretend to red-team a nonexistent endpoint: it produces *
 
 ### 6. Continuous monitoring, drift, audit, and operational metrics
 
-The `guardrail`, `evidence`, `deploy-prep`, and `attest` stages support monitoring and audit controls. Evidently checks input-side drift when a meaningful reference exists; `evidence-summary` reads verdicts rather than just file presence; `metrics-normalize` folds CI signals into a normalized operational-metrics document (marking derived gates enforcing vs advisory when the GitLab Jobs API is available); `pages` renders a dashboard; `dependency-track-upload`, when configured, turns a point-in-time SBOM/AI-BOM into continuous dependency analysis; `sign-evidence` seals the run.
+The `guardrail`, `evidence`, `deploy-prep`, and `attest` stages support monitoring and audit controls. Evidently checks input-side drift when a meaningful reference exists; `evidence-summary` reads verdicts rather than just file presence; `metrics-normalize` folds CI signals into a normalized operational-metrics document (marking derived gates enforcing vs advisory when the GitLab Jobs API is available); `pages` renders a dashboard; `sign-evidence` seals the run.
 
 | Pipeline evidence | Relevant controls |
 | --- | --- |
 | Evidently input drift | CSA AICM LOG-14 Input Monitoring; MDS-10 Model Monitoring; NIST SP 800-53 SI-4 |
 | Evidence summary and signed evidence manifest | NIST SP 800-53 AU-6; ISO/IEC 27002 5.33 Protection of Records |
 | Operational metrics dashboard | ISO/IEC 27002 8.15 / 8.16 logging and monitoring activities |
-| Dependency-Track upload | CSA AICM STA-16; NIST SP 800-53 SI-4 continuous monitoring |
+
+Scope caveat: this monitoring is **point-in-time, per pipeline run** — every job scans the state as of that commit. Dependency vulnerability scanning (`pip-audit`/Grype/Trivy) is therefore *recurring*, not *continuous*: it re-evaluates only when a pipeline runs, so a CVE disclosed against an already-shipped component is not caught until the next run touches it. **Continuous** re-analysis of a published BOM against newly-disclosed CVEs (a persistent SBOM-analysis backend) is deliberately **out of scope** — that role was filled by a Dependency-Track integration that has since been removed as redundant with the per-run scanners and operationally heavier than the rest of the pipeline. Nothing here maps to a standing SI-4(5)-style continuous-indicator posture for dependencies.
 
 Caveat: drift is weak when the reference is just the same static fixture reused every run (the current gandalf case). There, dataset hash pinning and dataset signing provide stronger integrity evidence than a vacuous drift result — see [Validation Status & Known Gaps](#validation-status--known-gaps).
 

@@ -54,7 +54,7 @@ def main() -> None:
     if audit_vulns and not bom_vulns:
         errors.append(
             f"audit reports found {len(audit_vulns)} vuln(s) but the BOM emits no "
-            f"vulnerabilities[] — Dependency-Track would ingest nothing structured (#29)"
+            f"vulnerabilities[] — an auditor would ingest nothing structured (#29)"
         )
 
     # 2) Signing + verification per model component.

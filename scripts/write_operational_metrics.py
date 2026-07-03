@@ -16,7 +16,7 @@ Design (mirrors the rest of scripts/):
       metrics   — a flat {dotted.key: number} map for charting/trend diffing
       gates     — derived pass/fail/skip per signal, for an at-a-glance banner
   - The GitLab-native block calls the Pipelines/Jobs API when a token is set;
-    it skips cleanly (like dependency_track_upload.py) when it is not.
+    it skips cleanly when it is not.
 """
 
 from __future__ import annotations
@@ -244,20 +244,6 @@ def parse_supply_chain(reports: Path, sbom: Path, src: Sources, m: Metrics) -> N
             for sev, n in by_sev.items():
                 m.metric(f"supply_chain.{key}.{sev.lower()}", n)
 
-    dt = _load_json(reports / "dependency-track.json", src, "dependency-track.json")
-    if isinstance(dt, dict) and not dt.get("skipped"):
-        sc["dependency_track"] = {
-            "findings_total": dt.get("findings_total"),
-            "findings_by_severity": dt.get("findings_by_severity", {}),
-            "violations_total": dt.get("violations_total"),
-            "failing_violations": len(dt.get("failing_violations", []) or []),
-            "dashboard_url": dt.get("dashboard_url"),
-        }
-        m.metric("supply_chain.dependency_track.findings", dt.get("findings_total"))
-        m.metric("supply_chain.dependency_track.violations", dt.get("violations_total"))
-        failing = len(dt.get("failing_violations", []) or [])
-        m.gate("dependency-track", failing == 0, f"{failing} failing violation(s)")
-
     m.section("supply_chain", sc)
 
 
@@ -464,8 +450,8 @@ def parse_provenance(evidence: Path, src: Sources, m: Metrics) -> dict:
 def fetch_gitlab_operational(token_env: str, timeout: int, m: Metrics) -> dict:
     """Pull pipeline + per-job operational health from the GitLab API.
 
-    Skips cleanly (like dependency_track_upload.py) when the token or the
-    pipeline/project context is not configured, or when `requests` is missing.
+    Skips cleanly when the token or the pipeline/project context is not
+    configured, or when `requests` is missing.
     """
     api = (os.environ.get("CI_API_V4_URL") or "").rstrip("/")
     project = os.environ.get("CI_PROJECT_ID")
@@ -581,7 +567,6 @@ def main() -> None:
     # (allow_failure:true), so the dashboard can distinguish a real blocking gate
     # from a soft one. Derived from the GitLab job API; None ("unknown") when that
     # block was skipped or the gate's job name isn't found.
-    GATE_JOB_ALIASES = {"dependency-track": "dependency-track-upload"}
     allow_map: dict[str, bool] = {}
     if isinstance(operational, dict) and not operational.get("skipped"):
         for jr in operational.get("jobs", []) or []:
@@ -589,7 +574,7 @@ def main() -> None:
                 allow_map[jr["name"]] = bool(jr.get("allow_failure"))
     for bucket in m.gates.values():
         for entry in bucket:
-            job = GATE_JOB_ALIASES.get(entry.get("signal"), entry.get("signal"))
+            job = entry.get("signal")
             entry["enforcing"] = (not allow_map[job]) if job in allow_map else None
 
     # Fix #27c — this is the pipeline's CREATION time, not when this document was

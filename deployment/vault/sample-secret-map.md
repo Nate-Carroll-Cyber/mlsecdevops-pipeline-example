@@ -31,8 +31,6 @@ variables via a `reports: dotenv` artifact.
 | `secret/data/gaips/ci/sigstore-oidc-issuer` | `SIGSTORE_OIDC_ISSUER` | `https://oauth2.sigstore.dev/auth` | Read by CI role |
 | `secret/data/gaips/ci/hf-token` | `HF_TOKEN` | `fixture-hf-token-not-real` | Read by CI role |
 | `secret/data/gaips/ci/registry-token` | `CI_REGISTRY_TOKEN` | `fixture-registry-token-not-real` | Read by CI role |
-| `secret/data/gaips/ci/dt-api-url` | `DT_API_URL` | `https://dtrack.example.invalid` | Read by CI role |
-| `secret/data/gaips/ci/dt-api-key` | `DT_API_KEY` | `fixture-dt-key-not-real` | Read by CI role |
 
 ### Deploy-prep jobs — no Vault secret required
 

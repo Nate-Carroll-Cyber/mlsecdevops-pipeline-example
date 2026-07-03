@@ -500,8 +500,6 @@ def _data_quality_evidence(reports_dir: Path) -> tuple[list[dict], list[dict]]:
 
     These run before the ai-bom stage: Great Expectations (content gate),
     Evidently (input-side data drift), YData (profile), DVC (version lineage).
-    Dependency-Track is intentionally absent — it INGESTS this BOM downstream,
-    so its verdict cannot be part of the document it analyses.
     """
     props: list[dict] = []
     refs: list[dict] = []
@@ -678,7 +676,7 @@ def _vulnerabilities(reports_dir: Path, components: list[dict]) -> list[dict]:
     """Emit a CycloneDX 1.6 `vulnerabilities[]` from the pipeline's audit reports.
 
     Previously the BOM recorded known vulns only as scalar property *counts*, so
-    Dependency-Track (and any auditor) ingested nothing structured. Sources:
+    an auditor ingesting the BOM got nothing structured. Sources:
     pip-audit JSON (`markllm-deps-audit.json` + the Fix #0 per-job `pip-audit-*.json`),
     grype (`grype.json`), trivy (`trivy-fs.json` / `trivy-image.json`). Each entry's
     `affects[].ref` points at the offending component's bom-ref. Deduped by (id, ref)."""

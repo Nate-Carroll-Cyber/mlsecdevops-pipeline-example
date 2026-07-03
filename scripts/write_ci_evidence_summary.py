@@ -27,7 +27,6 @@ ADVISORY = [
     "ydata-profile.json",
     "evidently-drift.json",
     "dvc-status.json",
-    "dependency-track.json",
 ]
 
 
@@ -70,9 +69,6 @@ def verdict(name: str, path: Path) -> tuple[str, str]:
             return "inert", "reference seeded (no comparison yet)"
         # polarity-aware (per Fix #28): drift detected is the BAD state.
         return ("fail", "data drift detected") if doc.get("drift_detected") else ("pass", "no data drift")
-    if name == "dependency-track.json":
-        failing = doc.get("failing_violations") or []
-        return ("fail", f"{len(failing)} blocking policy violation(s)") if failing else ("pass", "no blocking violations")
     if name == "dvc-status.json":
         # skipped (DVC not initialized) already returned inert above. Otherwise the
         # dvc-verify helper normalizes the run: in_sync → pass, drift → fail, and an

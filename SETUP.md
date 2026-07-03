@@ -113,17 +113,6 @@ vault kv put secret/gaips/ci/registry-token        value="<registry_token_or_bla
 > passes that short-lived token to `model_signing` with `--identity_token`; if the
 > log prints a browser OAuth URL, the token was not used.
 
-### A6. (Optional) add the secrets Terraform does NOT seed
-`dt-api-url` and `dt-api-key` are read by `vault-secrets` but not created by
-Terraform (the job just logs a WARN and continues). Add them only if you use the
-Dependency-Track integration (Part D3) — to stand up the instance these point at,
-see the runbook in [`deployment/dependency-track/`](deployment/dependency-track/)
-(docker-compose + the exact API-key permissions + a gating policy):
-```bash
-vault kv put secret/gaips/ci/dt-api-url value="https://dtrack.<your-host>"
-vault kv put secret/gaips/ci/dt-api-key value="<dt-api-key>"
-```
-
 ---
 
 # Part B — GitLab project setup
@@ -168,7 +157,7 @@ dotenv artifact.
 **If NOT using Vault:** leave `VAULT_ADDR` unset and set the secrets directly as
 CI/CD variables (mask the sensitive ones):
 `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`,
-`CI_REGISTRY_TOKEN`, plus `DT_API_URL` and `DT_API_KEY` if you use Dependency-Track.
+`CI_REGISTRY_TOKEN`.
 (`MODEL_ENDPOINT` is **not** needed by this pipeline — it does no inference.)
 
 For GitLab keyless model signing, first discover the exact verification inputs:
@@ -251,7 +240,6 @@ Each is independent; set the variable(s) and the corresponding job activates.
 | --- | --- | --- | --- |
 | D1 | **Dataset scan/redact/sign** | Optional: `DATASET_PACKAGE_NAME`, `DATASET_FILENAME` (+ `DATASET_EXPECTED_SHA256`) | Downloads from the Generic Package Registry when configured; otherwise uses the committed CI dataset fixture. Then AV+structural scan → secret/PII redaction → schema validate → cosign sign. |
 | D2 | **HF provenance gate** | `HF_MODEL_IDS="org/model-a,org/model-b"` (+ `HF_TOKEN` for gated) | `model_info` provenance/policy check per HF repo (disabled/author/SHA-pin). |
-| D3 | **Dependency-Track** | `DT_API_URL`, masked `DT_API_KEY` (+ `DT_FAIL_ON`, default `FAIL`) | Uploads SBOM + AI-BOM for continuous CVE/policy analysis; **hard policy gate**. Turnkey instance + step-by-step wiring runbook: [`deployment/dependency-track/`](deployment/dependency-track/) (Fix #34). Ingests the structured `vulnerabilities[]` the AI-BOM now emits (Fix #29). |
 | D4 | **AI-BOM signing** | _none_ — keyless via GitLab `SIGSTORE_ID_TOKEN` (Fix #25) | `ai-bom-sign` signs the AI-BOM with cosign keyless (Fulcio + Rekor), like the model/dataset. No signing-key variable to set. |
 | D5 | **DVC lineage** | `DVC_REMOTE_URL` (+ `.dvc/` in repo); optional `DVC_REQUIRE` | Verifies workspace vs pinned dataset/model versions. Teeth-last: blank `DVC_REQUIRE` → drift is reported/warned but does not block; `DVC_REQUIRE=true` → a drift (or a non-verifiable run) **fails the pipeline** (same pattern as `RL_FAIL_ON`/`IMAGE_VERIFY_REQUIRE`). No effect until `.dvc/` exists. |
 

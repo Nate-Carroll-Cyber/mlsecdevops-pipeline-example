@@ -51,8 +51,6 @@ the `vault-secrets` job fetches each from the Vault path `secret/data/gaips/ci/<
 | `SIGSTORE_OIDC_ISSUER` | `sigstore-oidc-issuer` | No | ✅ stub | OIDC issuer for `signature-verification`. |
 | `HF_TOKEN` | `hf-token` | Yes | ✅ stub | HuggingFace token for gated/private repos (`hf-artifact-scan`). |
 | `CI_REGISTRY_TOKEN` | `registry-token` | Yes | ✅ stub | Registry token (provisioned for app/registry use). |
-| `DT_API_URL` | `dt-api-url` | No | ❌ add manually | Dependency-Track base URL (see §4). |
-| `DT_API_KEY` | `dt-api-key` | Yes | ❌ add manually | Dependency-Track API key (needs BOM_UPLOAD + VIEW). |
 | `RL_TOKEN` | `secure-software-token` | Yes | ❌ add manually | Spectra Assure **Community** Personal Access Token for `secure-software-scan` (OSS dependency reputation/malware gate, see §4). Blank → the job skips. |
 
 For projects not using Vault yet, set `MODEL_SIGNING_IDENTITY` and
@@ -63,8 +61,8 @@ verification identifiers, not secrets; leave variable expansion off.
 
 > **"Seeded by TF?"** Terraform (`deployment/vault/terraform/`) creates the first
 > five as fixture stubs (`ignore_changes`, so real values you `vault kv put` later
-> survive applies). The last three are **not** seeded — add them only if you use
-> those integrations; `vault-secrets` logs a WARN and continues without them.
+> survive applies). `RL_TOKEN` is **not** seeded — add it only if you use that
+> integration; `vault-secrets` logs a WARN and continues without it.
 
 ---
 
@@ -91,12 +89,9 @@ verification identifiers, not secrets; leave variable expansion off.
 
 | Variable | Source | Masked | Default | Purpose |
 | --- | --- | --- | --- | --- |
-| `DT_API_URL` | vault/you | No | `""` | Dependency-Track URL (no trailing `/api`). Blank → `dependency-track-upload` skips. Wiring runbook + turnkey instance: [`deployment/dependency-track/`](../deployment/dependency-track/) (Fix #34). |
-| `DT_API_KEY` | vault/you | Yes | `""` | Dependency-Track API key. |
-| `DT_FAIL_ON` | default | No | `FAIL` | `violationState`(s) that fail the DT policy gate (comma list). |
 | `RL_TOKEN` | vault/you | Yes | `""` | Spectra Assure **Community** PAT. Set it as a GitLab CI/CD variable of **either type** — a normal *Variable* (holds the token) or a *File* variable (holds a path GitLab writes the token to); the script handles both. Mark it **Masked and hidden** + **Protected**. Vault injects it via path `secure-software-token`. Blank → the job skips. |
 | `RL_TOKEN_FILE` | you | n/a | `""` | Optional alias for `RL_TOKEN`, same value-or-path handling. Only needed if you want a second, explicitly file-named variable. |
-| `RL_FAIL_ON` | default | No | `""` | **Enforcement switch** for `secure-software-scan`. Blank → report-only scan (always green; publishes `reports/secure-software.json`). `malware,tampering` → gate the pipeline on a recent malware/tampering verdict. Same pattern as `DT_FAIL_ON`. |
+| `RL_FAIL_ON` | default | No | `""` | **Enforcement switch** for `secure-software-scan`. Blank → report-only scan (always green; publishes `reports/secure-software.json`). `malware,tampering` → gate the pipeline on a recent malware/tampering verdict. |
 | `RL_WARN_AS_FAIL` | default | No | `""` | Promotes a **`warning`** verdict (the middle of RL's `pass`/`warning`/`fail` scale) to a **blocking** hit for the named categories. Blank (default) → warnings are **surfaced** in `reports/secure-software.json` (`warnings[]`) and the job summary but do **not** block; `tampering` / `malware,tampering` → also fail the gate on a warning. A category named here turns the gate on even if `RL_FAIL_ON` is blank. |
 | `RL_API_URL` | default | No | `""` → `https://data.reversinglabs.com/api/oss/community/v2/free` | API base. Default is the **free Community** API. **Portal** accounts override with their portal base *ending in* `/community`, e.g. `https://<org>.secure.software/api/public/v1/community`. Endpoint paths (`/user/account`, `/find/packages`, `/report/...`) are appended to whichever base is set. |
 | `IMAGE_VERIFY_REQUIRE` | default | No | `""` | **Enforcement switch** for `image-provenance-verify`. The job **always** cosign-verifies the signed tool images and writes `reports/image-provenance.json` regardless of this var — it does **not** turn verification on/off. Blank → report-only (a verify failure logs but the job stays green). `true` → the job **fails the pipeline** if a *signed* image fails to verify (unsigned/digest-only images never gate). Set it (e.g. as a GitLab CI/CD variable) only once you want the gate to bite. Same teeth-last pattern as `RL_FAIL_ON` / `EVIDENCE_SIGNING_REQUIRED`. |

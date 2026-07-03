@@ -250,7 +250,7 @@ Each is independent; set the variable(s) and the corresponding job activates.
 | # | Integration | Set | Effect |
 | --- | --- | --- | --- |
 | D1 | **Dataset scan/redact/sign** | Optional: `DATASET_PACKAGE_NAME`, `DATASET_FILENAME` (+ `DATASET_EXPECTED_SHA256`) | Downloads from the Generic Package Registry when configured; otherwise uses the committed CI dataset fixture. Then AV+structural scan → secret/PII redaction → schema validate → cosign sign. |
-| D2 | **HF model scan** | `HF_MODEL_IDS="org/model-a,org/model-b"` (+ `HF_TOKEN` for gated) | ClamAV + ModelScan each HF repo. |
+| D2 | **HF provenance gate** | `HF_MODEL_IDS="org/model-a,org/model-b"` (+ `HF_TOKEN` for gated) | `model_info` provenance/policy check per HF repo (disabled/author/SHA-pin). |
 | D3 | **Dependency-Track** | `DT_API_URL`, masked `DT_API_KEY` (+ `DT_FAIL_ON`, default `FAIL`) | Uploads SBOM + AI-BOM for continuous CVE/policy analysis; **hard policy gate**. Turnkey instance + step-by-step wiring runbook: [`deployment/dependency-track/`](deployment/dependency-track/) (Fix #34). Ingests the structured `vulnerabilities[]` the AI-BOM now emits (Fix #29). |
 | D4 | **AI-BOM signing** | _none_ — keyless via GitLab `SIGSTORE_ID_TOKEN` (Fix #25) | `ai-bom-sign` signs the AI-BOM with cosign keyless (Fulcio + Rekor), like the model/dataset. No signing-key variable to set. |
 | D5 | **DVC lineage** | `DVC_REMOTE_URL` (+ `.dvc/` in repo); optional `DVC_REQUIRE` | Verifies workspace vs pinned dataset/model versions. Teeth-last: blank `DVC_REQUIRE` → drift is reported/warned but does not block; `DVC_REQUIRE=true` → a drift (or a non-verifiable run) **fails the pipeline** (same pattern as `RL_FAIL_ON`/`IMAGE_VERIFY_REQUIRE`). No effect until `.dvc/` exists. |

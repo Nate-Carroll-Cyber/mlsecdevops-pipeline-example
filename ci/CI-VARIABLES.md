@@ -154,11 +154,11 @@ verification identifiers, not secrets; leave variable expansion off.
 
 ---
 
-## 7. Tuning thresholds (override only if needed)
+## 7. Tuning thresholds
 
-| Variable | Source | Default | Purpose |
-| --- | --- | --- | --- |
-| `DRIFT_THRESHOLD` | default | `0.10` | Absolute eval-metric movement that flags drift. |
+No user-tunable threshold variables are currently wired. The data-drift verdict
+(`evidently-drift`) uses Evidently's built-in `drift_share` threshold (0.5, fixed
+in `scripts/run_evidently_report.py`), not a pipeline variable.
 
 ---
 

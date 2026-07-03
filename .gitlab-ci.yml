@@ -166,7 +166,7 @@ variables:
   # Set it as a PROTECTED UI variable = "true" so it scopes to protected branches
   # (main) only — non-protected runs then skip cleanly.
   RL_REQUIRE_TOKEN: ""              # "" = skip-if-no-token · set "true" as a PROTECTED UI var to hard-fail on main
-  RL_API_URL: ""                    # blank → https://my.secure.software/api/public/v1 (swap `my`→`us`/`ca` by region)
+  RL_API_URL: ""                    # blank → https://data.reversinglabs.com/api/oss/community/v2/free (free Community API); Portal accounts override with a base ending in /community
   # ── DVC — data/model version lineage (optional) ───────────────────────────────
   # Set DVC_REMOTE_URL (s3://, gs://, azure://, ssh://…) to enable `dvc pull` in
   # dvc-verify. Without it, the job verifies tracked-vs-workspace status only; with

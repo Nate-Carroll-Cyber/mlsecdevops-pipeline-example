@@ -2,7 +2,7 @@
 
 Note: Vulnerable software libaries are intentional with additional security risks planned for example reporting and demonstrations.
 
-This directory contains the concrete artifacts and fixtures for the MLSECDEVOPS GitLab Pipeline. It is intentionally self-contained so it can run without production accounts, private credentials, gated models, or undefined assets.
+This repository contains the concrete artifacts and fixtures for the MLSECDEVOPS GitLab Pipeline. It is intentionally self-contained so it can run without production accounts, private credentials, gated models, or undefined assets.
 
 **Approximate GitLab credit cost: 95 credits**
 
@@ -29,7 +29,6 @@ mlsecdevops-pipeline/   (MLSECDEVOPS GitLab Pipeline — repo root)
 ├── evals/           datasets + baselines + schema (model-baseline.json,
 │                    dataset-baseline.json, dataset-reference.jsonl,
 │                    gandalf-ignore-instructions-test.jsonl, eval-dataset.schema.json, …)
-├── guardrails/      llama-guard / prompt-guard / model-armor fixtures
 ├── hugging-face-hub/  HF scan fixture + review guide
 ├── model-signing/   lab-model, tampered-model, signing fixture
 └── deployment/
@@ -45,7 +44,7 @@ mlsecdevops-pipeline/   (MLSECDEVOPS GitLab Pipeline — repo root)
 - **Secret / identity hygiene (do this first).** Confirm nothing sensitive is committed: no PATs or tokens, no real internal hosts or signer identities (the committed examples use placeholders — e.g. the ArgoCD ConfigMap's `MODEL_SIGNING_IDENTITY: ci-signer@example.invalid`; the real value lives only in GitLab protected CI/CD variables, not in the repo), and fixtures/datasets contain only synthetic or sanitized data. The `gitleaks-scan` + `secret-detection` jobs already gate this in CI — confirm they're green before publishing.
 - **Exclude internal working docs** from the public repo: `SESSION_HANDOFF.md`, `PIPELINE_JOB_VALIDATION.md`, `PIPELINE_FIX_PLAN_29-34.md`, `gitlab-pipeline-setup-notes.md` (session/working artifacts, not end-user material).
 - **Add a `LICENSE`** for public distribution, and keep this README as the product entry point.
-- Everything else — `scripts/`, `evals/`, `guardrails/`, `model-signing/`, `deployment/`, the `.md` docs, `requirements*.{in,txt}`, `.gitleaks.toml` — is shareable as-is.
+- Everything else — `scripts/`, `evals/`, `model-signing/`, `deployment/`, the `.md` docs, `requirements*.{in,txt}`, `.gitleaks.toml` — is shareable as-is.
 
 ## Directory Map
 
@@ -54,7 +53,6 @@ mlsecdevops-pipeline/   (MLSECDEVOPS GitLab Pipeline — repo root)
 | `evals/` | MarkLLM lab instructions/config plus eval datasets, baselines, and schema. |
 | `evals/model-baseline.json` | Approved model identity (path + sha256) and the CI variables it implies (`MODEL_FIXTURE_*`, MarkLLM stack); imported by the `model-manifest` job as a dotenv manifest and the reviewed source of truth for the model-integrity baseline. |
 | `evals/dataset-baseline.json` | Approved dataset identity, provenance (HF source + revision), license, and integrity pin (`DATASET_EXPECTED_SHA256`) for the committed eval dataset (`gandalf-ignore-instructions-test.jsonl`); the data-side counterpart to `model-baseline.json`, read by `build_ai_bom.py` to stamp license + provenance onto the AI-BOM `data` component. |
-| `guardrails/` | Prompt Guard, Llama Guard 3, and Model Armor fixtures. |
 | `ci/` | GitLab AI/ML security pipeline requiring project-level scripts, model artifacts, SBOM/vulnerability tooling, model-integrity checks, AI evals, and evidence outputs. See `ci/SBOM.md` for the pipeline's own dependency bill of materials. |
 | `hugging-face-hub/` | Hub scanner and repository-settings review fixture. |
 | `deployment/` | Kubernetes, Weaviate components, Weaviate `values.yaml` TLS/encryption review, gRPC LoadBalancer, and Vault review fixtures. |
@@ -136,7 +134,7 @@ python scripts/parquet_to_jsonl.py \
 
 ## CI Execution Policy
 
-The repo-root `.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, prompt/eval config, and guardrail baselines.
+The repo-root `.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intended for a lab repository that contains project-level dependencies, scripts, model artifacts, and prompt/eval config.
 
 > **Secrets management.** HashiCorp Vault remains the recommended production-grade secrets management option for this pipeline, especially when centralized auditability, short-lived credentials, and policy-based secret access are required. To reduce operating costs for lab, demo, and early validation environments, this repository also supports standard GitLab CI/CD variables as a lower-cost fallback when `VAULT_ADDR` is not configured.
 
@@ -1437,7 +1435,7 @@ That distinction matters. The pipeline **supports control objectives**; governan
 
 > The pipeline produces evidence that supports specific AI security, software supply-chain, model-integrity, data-integrity, monitoring, and deployment-control objectives across CSA AICM/CCM, NIST SP 800-53, NIST AI RMF, ISO/IEC 42001, and ISO/IEC 27002. It does **not** make the organization "compliant" with any of them.
 
-A useful way to describe the pipeline is as a control-evidence system mapped across six themes: vulnerability and code security, supply-chain integrity, environment isolation, access and secret management, adversarial testing, and continuous monitoring.
+A useful way to describe the pipeline is as a control-evidence system mapped across six themes: vulnerability and code security, supply-chain integrity, environment isolation, access and secret management, AI evaluation evidence, and continuous monitoring.
 
 > **Read this section alongside [Validation Status & Known Gaps](#validation-status--known-gaps).** A mapping below means the pipeline is *designed* to produce that evidence — not that the control has executed. Several deploy-time mappings (Kyverno, Argo CD PreSync) and integration mappings (Vault) are **wired but never run** in the lab CI; they support the listed objectives only once the consuming infrastructure exists.
 
@@ -1496,16 +1494,15 @@ The `vault-secrets` job and GitLab protected-variable fallback support access-co
 
 This is also where the **control-state model** belongs. Job existence does not mean active control; active control does not mean enforced control; a control is enforced only when a bad result can block release. If Vault is not configured, the job exists but the Vault control is inactive. If ReversingLabs has no token, the malware dependency scan is inactive. If a job is `allow_failure: true`, it may produce evidence but does not block release.
 
-### 5. Adversarial testing, AI evaluation, and guardrail validation
+### 5. AI evaluation (watermark evidence)
 
 The main pipeline's `ai-eval` stage provides MarkLLM watermark evidence. It needs no model endpoint — but `markllm-watermark-eval` does perform real in-process `transformers` generation on CPU (see Stage 6), so it is not inference-free; the inference is local and in-pipeline, not against a deployed service.
 
 | Pipeline evidence | Relevant controls |
 | --- | --- |
 | MarkLLM watermark generation/detection evidence | NIST AI RMF MEASURE function evidence; ISO/IEC 42001 A.6.2.4 verification and validation |
-| Prompt injection and input/output checks | CSA AICM AIS-08 Input Validation, AIS-09 Output Validation, AIS-15 Prompt Differentiation, DSP-25 Prompt Injection Defense where adopted |
 
-This pipeline does not pretend to red-team a nonexistent endpoint: it produces **artifact and evidence assurance**.
+This pipeline performs **no** dynamic adversarial testing, guardrail scanning, or prompt-injection / input-output validation: it does not red-team a live endpoint and runs no inference-time guardrail (Llama Guard, Prompt Guard, Model Armor, or similar). What this stage delivers is **artifact and evidence assurance**, not runtime AI-defense evidence.
 
 ### 6. Continuous monitoring, drift, audit, and operational metrics
 

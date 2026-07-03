@@ -74,7 +74,6 @@ locals {
     "model-signing-identity" = "ci-signer@example.invalid"
     "sigstore-oidc-issuer" = "https://oauth2.sigstore.dev/auth"
     "hf-token"             = "fixture-hf-token-not-real"
-    "gemini-api-key"       = "fixture-gemini-key-not-real"
     "registry-token"       = "fixture-registry-token-not-real"
   }
 }

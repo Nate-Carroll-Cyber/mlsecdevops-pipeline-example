@@ -98,7 +98,6 @@ vault kv put secret/gaips/ci/model-endpoint        value="https://<your-model-ap
 vault kv put secret/gaips/ci/model-signing-identity value="<fulcio-cert-SAN>"        # see note
 vault kv put secret/gaips/ci/sigstore-oidc-issuer  value="https://<gitlab-host>"     # see note
 vault kv put secret/gaips/ci/hf-token              value="<hf_token_or_blank>"
-vault kv put secret/gaips/ci/gemini-api-key        value="<gemini_key_or_blank>"
 vault kv put secret/gaips/ci/registry-token        value="<registry_token_or_blank>"
 ```
 > **`model-signing-identity` / `sigstore-oidc-issuer`** are what
@@ -168,7 +167,7 @@ dotenv artifact.
 
 **If NOT using Vault:** leave `VAULT_ADDR` unset and set the secrets directly as
 CI/CD variables (mask the sensitive ones):
-`MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`, `GEMINI_API_KEY`,
+`MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER`, `HF_TOKEN`,
 `CI_REGISTRY_TOKEN`, plus `DT_API_URL` and `DT_API_KEY` if you use Dependency-Track.
 (`MODEL_ENDPOINT` is **not** needed by this pipeline — it does no inference.)
 

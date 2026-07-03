@@ -50,7 +50,6 @@ the `vault-secrets` job fetches each from the Vault path `secret/data/gaips/ci/<
 | `MODEL_SIGNING_IDENTITY` | `model-signing-identity` | No | ✅ stub | Fulcio cert identity `signature-verification` checks model sigs against. |
 | `SIGSTORE_OIDC_ISSUER` | `sigstore-oidc-issuer` | No | ✅ stub | OIDC issuer for `signature-verification`. |
 | `HF_TOKEN` | `hf-token` | Yes | ✅ stub | HuggingFace token for gated/private repos (`hf-artifact-scan`). |
-| `GEMINI_API_KEY` | `gemini-api-key` | Yes | ✅ stub | Model-provider key (available to eval jobs that need it). |
 | `CI_REGISTRY_TOKEN` | `registry-token` | Yes | ✅ stub | Registry token (provisioned for app/registry use). |
 | `DT_API_URL` | `dt-api-url` | No | ❌ add manually | Dependency-Track base URL (see §4). |
 | `DT_API_KEY` | `dt-api-key` | Yes | ❌ add manually | Dependency-Track API key (needs BOM_UPLOAD + VIEW). |
@@ -63,7 +62,7 @@ printed by that job. Keep masking and hiding off because these are public
 verification identifiers, not secrets; leave variable expansion off.
 
 > **"Seeded by TF?"** Terraform (`deployment/vault/terraform/`) creates the first
-> six as fixture stubs (`ignore_changes`, so real values you `vault kv put` later
+> five as fixture stubs (`ignore_changes`, so real values you `vault kv put` later
 > survive applies). The last three are **not** seeded — add them only if you use
 > those integrations; `vault-secrets` logs a WARN and continues without them.
 

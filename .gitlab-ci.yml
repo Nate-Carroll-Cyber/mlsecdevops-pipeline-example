@@ -466,7 +466,6 @@ vault-secrets:
           "gaips/ci/model-signing-identity": "MODEL_SIGNING_IDENTITY",
           "gaips/ci/sigstore-oidc-issuer": "SIGSTORE_OIDC_ISSUER",
           "gaips/ci/hf-token":             "HF_TOKEN",
-          "gaips/ci/gemini-api-key":       "GEMINI_API_KEY",
           "gaips/ci/registry-token":       "CI_REGISTRY_TOKEN",
           "gaips/ci/dt-api-url":           "DT_API_URL",
           "gaips/ci/dt-api-key":           "DT_API_KEY",

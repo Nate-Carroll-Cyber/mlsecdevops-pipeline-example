@@ -1521,5 +1521,3 @@ Caveat: drift is weak when the reference is just the same static fixture reused 
 ### ISO/IEC 42001 — a management-system layer, not a single job
 
 ISO/IEC 42001 fits at the management-system layer rather than as one pipeline job. The strongest mappings are A.6 (AI system life cycle), A.7 (data for AI systems), A.6.2.4 (verification and validation), A.7.5 (data provenance), A.6.2.5 (deployment), A.6.2.6 (operation and monitoring), and A.6.2.8 (event logging). The pipeline supports those objectives by recording provenance, validating model and dataset baselines, producing signed AI-BOMs, preserving evidence summaries, and separating static artifact assurance from live endpoint testing.
-
-> Use "**produces evidence supporting** ISO/IEC 42001 Annex A life-cycle, data, deployment, monitoring, and logging controls," **not** "mapped to ISO 42001 compliance." The former is defensible; the latter overstates what a CI pipeline can establish.

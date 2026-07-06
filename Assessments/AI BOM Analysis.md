@@ -1,5 +1,3 @@
----
-
 ## AI Bill of Materials (AI-BOM) — `mlsecdevops-pipeline-example`
 
 **BOM Version:** 1.0

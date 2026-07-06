@@ -11,11 +11,8 @@ useDefault = true
 description = "Known fake secret fixtures used by sanitizer tests"
 condition = "AND"
 paths = [
-  '''(^|/)backend/test/(localInspection|phase0Hardening|sanitizer)\.test\.ts$''',
-  '''(^|/)services/gateway/test/(localInspection|phase0Hardening|sanitizer)\.test\.ts$''',
-  '''(^|/)services/sam-spade/test/localInspection\.test\.ts$''',
-  '''(^|/)src/lib/sanitizer\.test\.ts$''',
 ]
+
 regexes = [
   '''AKIA[0-9A-Z]{16}''',
   '''sk-[A-Za-z0-9]{20,}''',

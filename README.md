@@ -35,6 +35,9 @@ mlsecdevops-pipeline/   (MLSECDEVOPS GitLab Pipeline — repo root)
     ├── argocd/       application, appproject, verify-signatures PreSync hook
     ├── kubernetes/   rag-app, weaviate, network-policy, kyverno image-verify policy
     └── vault/        terraform/, gaips-policy.hcl, jwt-auth-config.hcl
+└── assessments/
+    ├── AI BOM Analysis.md
+    ├── Threat Model.md
 ```
 
 ### Publishing to a Public GitHub Repo (hosting & sharing)

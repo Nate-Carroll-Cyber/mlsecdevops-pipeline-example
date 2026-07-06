@@ -14,4 +14,3 @@ venv/
 
 # Internal working notes — keep out of the repo (local only)
 SESSION_HANDOFF.md
-ci/RECOMMENDED_FIXES.md

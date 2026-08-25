@@ -495,6 +495,130 @@ def _data_components(
     return components
 
 
+def _eval_data_components(reports_dir: Path, materials_dir: Path | None = None) -> list[dict]:
+    """`data` components for the EVAL corpora consumed by the live-eval signals.
+
+    Symmetric with `_data_components` (the dataset chain), but driven by the eval
+    reports: a corpus is only listed when the run actually put it to the model, so a
+    pipeline with no endpoint configured — where both evals skip — emits nothing here
+    rather than claiming data it never used.
+
+    Two corpora:
+      * the harmful-behaviors refusal probe set (committed; provenance and licence
+        status from evals/harmful-behaviors-baseline.json)
+      * the SimpleQA question set (fetched at job time, digest-pinned)
+    """
+    components: list[dict] = []
+
+    refusal = _load_json(reports_dir / "refusal-eval.json") or {}
+    if not refusal.get("skipped", True):
+        corpus = refusal.get("corpus", {}) or {}
+        metrics = refusal.get("metrics", {}) or {}
+        name = corpus.get("file", "harmful-behaviors-test.jsonl")
+        props = [
+            _prop("dataset.role", "safety-probe corpus (refusal eval)"),
+            _prop("dataset.records", corpus.get("prompts", "unknown")),
+            _prop("dataset.integrity.pinned", "true" if corpus.get("pinned") else "false"),
+            _prop("eval.refusal_rate", metrics.get("refusal_rate", "unknown")),
+            _prop("eval.model", refusal.get("model", "unknown")),
+        ]
+        ext_refs: list[dict] = []
+        licenses: list[dict] = []
+        baseline = _load_json(_first_existing(
+            materials_dir, "evals/harmful-behaviors-baseline.json")) or {}
+        prov = baseline.get("provenance", {}) if isinstance(baseline, dict) else {}
+        lic = baseline.get("license", {}) if isinstance(baseline, dict) else {}
+        for key, value in {
+            "dataset.platform": prov.get("platform"),
+            "dataset.source": prov.get("source"),
+            "dataset.source.url": prov.get("source_url"),
+            "dataset.revision": prov.get("revision"),
+            "dataset.split": prov.get("split"),
+            "dataset.retrieved": prov.get("retrieved"),
+            "dataset.upstream": prov.get("upstream"),
+            "dataset.license": lic.get("id"),
+            # The HF card declares no licence — recorded as NOASSERTION with the reason,
+            # rather than inheriting the upstream MIT by assumption.
+            "dataset.license.note": lic.get("note"),
+        }.items():
+            if value:
+                props.append(_prop(key, value))
+        if lic.get("id"):
+            # CycloneDX `license.id` is the SPDX enum — "NOASSERTION"/"NONE" are not in
+            # it and would fail ai-bom-validate's 1.6 schema check. Carry those through
+            # the free-text `license.name` field instead, so the unresolved licence is
+            # still visible in the BOM rather than dropped.
+            if lic["id"].upper() in ("NOASSERTION", "NONE"):
+                licenses.append({"license": {"name": lic["id"]}})
+            else:
+                licenses.append({"license": {"id": lic["id"]}})
+        if prov.get("source_url"):
+            ext_refs.append({"type": "website", "url": prov["source_url"],
+                             "comment": "Upstream probe-corpus source (provenance)"})
+        component = {
+            "type": "data",
+            "bom-ref": f"dataset:{name}",
+            "name": name,
+            "hashes": [_sha256_hash(corpus["sha256"])] if corpus.get("sha256") else [],
+            "externalReferences": ext_refs,
+            "data": [{"type": "dataset", "name": name}],
+            "properties": props,
+        }
+        if licenses:
+            component["licenses"] = licenses
+        components.append(component)
+
+    simpleqa = _load_json(reports_dir / "simpleqa-eval.json") or {}
+    if not simpleqa.get("skipped", True):
+        ds = simpleqa.get("dataset", {}) or {}
+        metrics = simpleqa.get("metrics", {}) or {}
+        name = "simple_qa_test_set.csv"
+        props = [
+            _prop("dataset.role", "factuality benchmark (SimpleQA)"),
+            _prop("dataset.records", ds.get("questions_available", "unknown")),
+            _prop("dataset.sampled", ds.get("questions_sampled", "unknown")),
+            _prop("dataset.sample_seed", ds.get("sample_seed", "unknown")),
+            _prop("dataset.integrity.pinned", "true" if ds.get("pinned") else "false"),
+            _prop("dataset.source", "openai/simple-evals"),
+            _prop("dataset.license", "MIT"),
+            _prop("eval.accuracy_given_attempted", metrics.get("accuracy_given_attempted", "unknown")),
+            _prop("eval.f1", metrics.get("f1", "unknown")),
+            _prop("eval.grader_model", simpleqa.get("grader_model", "unknown")),
+        ]
+        ext_refs = [{"type": "website", "url": "https://github.com/openai/simple-evals",
+                     "comment": "Upstream benchmark implementation (MIT)"}]
+        if ds.get("url"):
+            ext_refs.append({"type": "distribution", "url": ds["url"],
+                             "comment": "Question set fetched at job time (digest-pinned)"})
+        components.append({
+            "type": "data",
+            "bom-ref": f"dataset:{name}",
+            "name": name,
+            "hashes": [_sha256_hash(ds["sha256"])] if ds.get("sha256") else [],
+            "externalReferences": ext_refs,
+            "licenses": [{"license": {"id": "MIT"}}],
+            "data": [{"type": "dataset", "name": name}],
+            "properties": props,
+        })
+
+    return components
+
+
+def _first_existing(materials_dir: Path | None, relative: str) -> Path:
+    """Resolve a repo-relative materials path the same way _load_dataset_baseline does."""
+    candidates = []
+    if materials_dir:
+        candidates.append(Path(materials_dir) / relative)
+    materials = os.environ.get("GAIPS_MATERIALS_DIR")
+    if materials:
+        candidates.append(Path(materials) / relative)
+    candidates.append(Path(relative))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[-1]
+
+
 def _data_quality_evidence(reports_dir: Path) -> tuple[list[dict], list[dict]]:
     """Fold the data-quality / input-drift verdicts into the BOM root component.
 
@@ -811,6 +935,9 @@ def build_bom(
     software = syft_sw + markllm_sw
     models = _model_components(evidence_dir, reports_dir, model_dir)
     data = _data_components(evidence_dir, reports_dir, _load_dataset_baseline(dataset_baseline))
+    # Eval corpora (harmful-behaviors probe set, SimpleQA question set) — listed only
+    # when the live evals actually ran, so a no-endpoint run claims no data it never used.
+    data = data + _eval_data_components(reports_dir)
     dq_props, dq_refs = _data_quality_evidence(reports_dir)
 
     root_ref = "root:" + os.environ.get("CI_PROJECT_PATH_SLUG", "gaips-application")

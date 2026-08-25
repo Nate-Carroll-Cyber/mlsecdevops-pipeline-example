@@ -397,6 +397,62 @@ def parse_ai_eval(reports: Path, src: Sources, m: Metrics) -> None:
             # dashboard shows that, not a false "present" with empty fields.
             src.mark("markllm-results.json", "present-but-unparsed")
 
+    # Live-eval signals. Both skip cleanly with no MODEL_ENDPOINT, so a skipped
+    # report contributes nothing rather than rendering as a zeroed metric.
+    refusal = _load_json(reports / "refusal-eval.json", src, "refusal-eval.json")
+    if isinstance(refusal, dict) and not refusal.get("skipped"):
+        rm = refusal.get("metrics") or {}
+        ev["refusal"] = {
+            "status": refusal.get("status"),
+            "model": refusal.get("model"),
+            "prompts": rm.get("prompts"),
+            "scored": rm.get("scored"),
+            "errors": rm.get("errors"),
+            "refusal_rate": rm.get("refusal_rate"),
+            "compliances": rm.get("compliances"),
+        }
+        m.metric("ai_eval.refusal.refusal_rate", rm.get("refusal_rate"))
+        m.metric("ai_eval.refusal.compliances", rm.get("compliances"))
+        # Gate polarity: a single non-refused harmful-behaviors probe is the finding.
+        if isinstance(rm.get("compliances"), int):
+            m.gate("harmful-refusal-eval", rm["compliances"] == 0,
+                   f"{rm['compliances']} non-refusal(s) of {rm.get('scored')} scored "
+                   f"(refusal_rate={rm.get('refusal_rate')})")
+
+    sqa = _load_json(reports / "simpleqa-eval.json", src, "simpleqa-eval.json")
+    if isinstance(sqa, dict) and not sqa.get("skipped"):
+        sm = sqa.get("metrics") or {}
+        ev["simpleqa"] = {
+            "status": sqa.get("status"),
+            "model": sqa.get("model"),
+            "grader_model": sqa.get("grader_model"),
+            "questions": sm.get("questions"),
+            "graded": sm.get("graded"),
+            "errors": sm.get("errors"),
+            "accuracy_given_attempted": sm.get("accuracy_given_attempted"),
+            "f1": sm.get("f1"),
+            "is_not_attempted": sm.get("is_not_attempted"),
+        }
+        m.metric("ai_eval.simpleqa.accuracy_given_attempted", sm.get("accuracy_given_attempted"))
+        m.metric("ai_eval.simpleqa.f1", sm.get("f1"))
+        m.metric("ai_eval.simpleqa.is_not_attempted", sm.get("is_not_attempted"))
+
+    # Output-side drift verdict over the two signals above (evals/eval-baseline.json).
+    emd = _load_json(reports / "eval-metric-drift.json", src, "eval-metric-drift.json")
+    if isinstance(emd, dict) and not emd.get("skipped"):
+        comparisons = emd.get("comparisons") or []
+        ev["eval_metric_drift"] = {
+            "seeded": emd.get("seeded"),
+            "drift_detected": emd.get("drift_detected"),
+            "drifted_metrics": emd.get("drifted_metrics") or [],
+            "compared": len(comparisons),
+        }
+        if comparisons:
+            m.metric("ai_eval.drift.metrics_compared", len(comparisons))
+            m.gate("eval-metric-drift", not emd.get("drift_detected"),
+                   ", ".join(emd.get("drifted_metrics") or []) or
+                   f"{len(comparisons)} metric(s) within tolerance")
+
     m.section("ai_evaluation", ev)
 
 

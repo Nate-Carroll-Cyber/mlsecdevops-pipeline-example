@@ -46,12 +46,13 @@ the `vault-secrets` job fetches each from the Vault path `secret/data/gaips/ci/<
 
 | Variable | Vault path (`…/ci/…`) | Masked | Seeded by TF? | Purpose / consuming jobs |
 | --- | --- | --- | --- | --- |
-| `MODEL_ENDPOINT` | `model-endpoint` | No | ✅ stub | Model API base URL. **Not used by this pipeline** — it performs no inference. |
+| `MODEL_ENDPOINT` | `model-endpoint` | No | ✅ stub | Model API base URL (OpenAI-compatible). Consumed by the **opt-in live-eval signals** `harmful-refusal-eval` and `simpleqa-eval` (§7a). Blank → both skip cleanly and the pipeline does no inference, as before. Accepts a bare host, a `…/v1` base, or a full `…/chat/completions` URL. |
+| `MODEL_API_KEY` | **not via Vault** | Yes | n/a | Bearer token for `MODEL_ENDPOINT`, sent by both live-eval jobs. Set it as a **masked project CI/CD variable**, *not* through `vault-secrets`: that job publishes its values as a dotenv **artifact**, which is unencrypted, readable by anyone with job/artifact access, and unmasked in logs — acceptable for the public identifiers above, not for a live credential. For production, prefer GitLab-native `secrets:` + Vault per-job. Blank → calls go out unauthenticated (fine for an in-cluster endpoint). |
 | `MODEL_SIGNING_IDENTITY` | `model-signing-identity` | No | ✅ stub | Fulcio cert identity `signature-verification` checks model sigs against. |
 | `SIGSTORE_OIDC_ISSUER` | `sigstore-oidc-issuer` | No | ✅ stub | OIDC issuer for `signature-verification`. |
-| `HF_TOKEN` | `hf-token` | Yes | ✅ stub | HuggingFace token for gated/private repos (`hf-artifact-scan`). |
-| `CI_REGISTRY_TOKEN` | `registry-token` | Yes | ✅ stub | Registry token (provisioned for app/registry use). |
-| `RL_TOKEN` | `secure-software-token` | Yes | ❌ add manually | Spectra Assure **Community** Personal Access Token for `secure-software-scan` (OSS dependency reputation/malware gate, see §4). Blank → the job skips. |
+| `HF_TOKEN` | **not via Vault** | Yes | n/a | HuggingFace token for gated/private repos (`hf-artifact-scan`). Set as a **masked project CI/CD variable** — it overrides the empty default in the CI file. No longer read by `vault-secrets`: that job's dotenv output is a readable artifact (see the note below). |
+| `CI_REGISTRY_TOKEN` | **not via Vault** | Yes | n/a | Registry token. **No job in this pipeline consumes it** — it was fetched into the dotenv artifact and never read, so it is no longer brokered at all. Set it as a masked project variable if your own jobs need it. |
+| `RL_TOKEN` | **not via Vault** | Yes | n/a | Spectra Assure **Community** Personal Access Token for `secure-software-scan` (OSS dependency reputation/malware gate, see §4). Set as a **masked project CI/CD variable**; blank → the job skips. No longer read by `vault-secrets` (see the note below). |
 
 For projects not using Vault yet, set `MODEL_SIGNING_IDENTITY` and
 `SIGSTORE_OIDC_ISSUER` directly as GitLab project CI/CD variables after running
@@ -59,10 +60,25 @@ the one-shot `sigstore-identity-discover` job on `main`. Use the exact values
 printed by that job. Keep masking and hiding off because these are public
 verification identifiers, not secrets; leave variable expansion off.
 
-> **"Seeded by TF?"** Terraform (`deployment/vault/terraform/`) creates the first
-> five as fixture stubs (`ignore_changes`, so real values you `vault kv put` later
-> survive applies). `RL_TOKEN` is **not** seeded — add it only if you use that
-> integration; `vault-secrets` logs a WARN and continues without it.
+> **Only three values are brokered through Vault**, and all three are public
+> verification identifiers: `MODEL_ENDPOINT`, `MODEL_SIGNING_IDENTITY`,
+> `SIGSTORE_OIDC_ISSUER`. Every actual **credential** — `MODEL_API_KEY`, `HF_TOKEN`,
+> `CI_REGISTRY_TOKEN`, `RL_TOKEN` — is set as a masked project CI/CD variable instead.
+> The reason is in the `vault-secrets` job itself: it publishes what it fetches as a
+> **dotenv artifact**, which is stored unencrypted, is readable by anyone with job or
+> artifact access, and is not masked in logs. That is an acceptable exposure for a
+> Fulcio identity string; it is not acceptable for a token.
+>
+> This does split the source of truth — Vault still holds those secrets and Terraform
+> still seeds the paths, the pipeline just no longer reads them from there. On
+> Premium/Ultimate, GitLab-native `secrets:` + Vault removes the split *and* the
+> exposure: it fetches per-job and never writes an artifact. That is the production
+> answer; masked variables are the Free-tier one.
+>
+> **"Seeded by TF?"** Terraform (`deployment/vault/terraform/`) still creates its
+> fixture stubs (`ignore_changes`, so real values you `vault kv put` later survive
+> applies). Stubs for paths the pipeline no longer reads are harmless — `vault-secrets`
+> simply never asks for them.
 
 ---
 
@@ -97,6 +113,7 @@ verification identifiers, not secrets; leave variable expansion off.
 | `IMAGE_VERIFY_REQUIRE` | default | No | `""` | **Enforcement switch** for `image-provenance-verify`. The job **always** cosign-verifies the signed tool images and writes `reports/image-provenance.json` regardless of this var — it does **not** turn verification on/off. Blank → report-only (a verify failure logs but the job stays green). `true` → the job **fails the pipeline** if a *signed* image fails to verify (unsigned/digest-only images never gate). Set it (e.g. as a GitLab CI/CD variable) only once you want the gate to bite. Same teeth-last pattern as `RL_FAIL_ON` / `EVIDENCE_SIGNING_REQUIRED`. |
 | `DVC_REMOTE_URL` | you | No | `""` | `s3://`/`gs://`/`azure://`/`ssh://` remote for `dvc-verify` to pull pinned data/models. Blank → verifies tracked-vs-workspace status only. |
 | `DVC_REQUIRE` | default | No | `""` | **Enforcement switch** for `dvc-verify` (teeth-last, mirrors `RL_FAIL_ON`/`IMAGE_VERIFY_REQUIRE`). Blank → ADVISORY: drift of a DVC-tracked dataset/model from its pinned version is reported (and shown in `evidence-summary`) but does **not** block. `true` → a drift, or an inability to verify (`dvc pull`/`dvc status` failed), **fails the pipeline**. No effect while the repo has no `.dvc/` (the job clean-skips first). |
+| `EVIDENCE_VERDICTS_REQUIRE` | default | No | `""` | **Enforcement switch** for `evidence-summary`. A **missing** required artifact fails the gate regardless. This governs the other half: a required artifact that is **present but carries a failing verdict**. Blank → printed as a `::warning::`, job still passes; `"true"` → it blocks. Advisory artifacts (live evals, drift jobs, markllm, data-quality profilers) are never gated either way. |
 | `GITLAB_API_TOKEN` | you | Yes | `""` | Project/group access token with **`read_api`** scope. Enables the operational block of `metrics-normalize` (pipeline/job duration, queue time, status by stage via the GitLab API). **Blank → the operational block skips cleanly; report-derived metrics + the Pages dashboard still render.** |
 
 > **Storing the Spectra Assure Community PAT before Vault is ready.**
@@ -145,15 +162,64 @@ verification identifiers, not secrets; leave variable expansion off.
 | --- | --- | --- | --- | --- |
 | `GITLAB_PUSH_TOKEN` | you | Yes | _(unset)_ | Project Access Token (scope `write_repository`) so `data-drift-baseline-commit` can auto-commit the seeded `evals/dataset-reference.jsonl`. Unset → manual commit. |
 
+> **The eval-METRIC baseline is deliberately NOT auto-committed.** `eval-metric-drift`
+> seeds `reports/eval-baseline.seed.json` and stops there. Unlike the data-drift
+> reference, an eval baseline encodes an accepted safety/quality posture, so a human
+> reviews the numbers before they become the thing regressions are measured against.
+> Commit the reviewed seed to `evals/eval-baseline.json` to activate the comparison.
+
 > **AI-BOM signing is keyless.** `ai-bom-sign` signs with cosign keyless (Fulcio + Rekor) via the GitLab `SIGSTORE_ID_TOKEN`, exactly like `model-sign`/`dataset-sign` — there is **no signing-key variable** to set. The PreSync hook verifies the BOM against the CI signer identity (`MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER`), no public-key Secret required.
 
 ---
 
 ## 7. Tuning thresholds
 
-No user-tunable threshold variables are currently wired. The data-drift verdict
-(`evidently-drift`) uses Evidently's built-in `drift_share` threshold (0.5, fixed
-in `scripts/run_evidently_report.py`), not a pipeline variable.
+The data-drift verdict (`evidently-drift`) uses Evidently's built-in `drift_share`
+threshold (0.5, fixed in `scripts/run_evidently_report.py`), not a pipeline variable.
+The live-eval thresholds below are the tunable ones.
+
+---
+
+## 7a. Live-eval signals — safety & factuality (opt-in)
+
+Two endpoint-driven signals feed the output-side drift control. **All of this is off
+until `MODEL_ENDPOINT` *and* `EVAL_MODEL_ID` are set** — with either blank, both eval
+jobs write `{"skipped": true}`, `eval-metric-drift` reports itself inert, and the run
+behaves exactly as it did before these jobs existed.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `EVAL_MODEL_ID` | `""` | Model id sent to `MODEL_ENDPOINT`. Blank → both evals skip. |
+| `EVAL_SYSTEM_PROMPT` | `""` | Optional system prompt for `harmful-refusal-eval`. Set it to the **deployed** prompt so the signal measures the shipping configuration, not a bare model. |
+| `EVAL_CONCURRENCY` | `4` | Parallel requests per eval job. |
+| `EVAL_MAX_TOKENS` / `EVAL_TIMEOUT` / `EVAL_RETRIES` | `256` / `60` / `2` | Per-request generation cap, socket timeout (s), and retry count (retries cover 429/5xx only). |
+| `EVAL_SAMPLE_SEED` | `20260824` | Sampling seed for both evals. **Do not vary it** — a moving sample is indistinguishable from drift. |
+| `REFUSAL_CORPUS_FILE` | `harmful-behaviors-test.jsonl` | Probe corpus under `evals/` (from HF `mlabonne/harmful_behaviors`, test split). |
+| `REFUSAL_CORPUS_SHA256` | `fbd94ac8…` | Integrity pin from `evals/harmful-behaviors-baseline.json`. A mismatch fails the job rather than silently redefining the signal. |
+| `REFUSAL_SAMPLE_SIZE` | `0` | `0` = all 104 probes; otherwise a seeded subset. |
+| `REFUSAL_KEEP_TRANSCRIPTS` | `""` | `"true"` retains model completions in the artifact. **A non-refusal IS harmful content** — off by default; the report keeps a verdict + SHA-256 + length per prompt. |
+| `REFUSAL_MIN_RATE` | `""` | Blank = report-only. e.g. `0.95` fails `harmful-refusal-eval` below that refusal rate. |
+| `SIMPLEQA_SAMPLE_SIZE` | `100` | Questions sampled from the 4326-question SimpleQA set. Each costs **two** endpoint calls (answer + grade); `0` = all of them. |
+| `SIMPLEQA_EXPECTED_SHA256` | `feee3f7e…` | Pin for the fetched `simple_qa_test_set.csv`. An unpinned benchmark would let the yardstick move with the metric. |
+| `SIMPLEQA_DATASET_FILE` | `""` | Path to a local/committed CSV for runners with no egress to `openaipublic.blob.core.windows.net`. |
+| `SIMPLEQA_ALLOW_UNVERIFIED` | `""` | `"true"` accepts an unpinned question set (not recommended). |
+| `SIMPLEQA_GRADER_MODEL` | `""` | Grader model. Blank → grades with `EVAL_MODEL_ID` — i.e. **self-grading**, which flatters the score; point it at a stronger model where you have one. |
+| `SIMPLEQA_GRADER_ENDPOINT` / `SIMPLEQA_GRADER_API_KEY` | `""` | Separate endpoint/token for the grader. Blank → reuses `MODEL_ENDPOINT` / `MODEL_API_KEY`. |
+| `SIMPLEQA_KEEP_TRANSCRIPTS` | `""` | `"true"` retains answers (benign content — off only to keep artifacts small). |
+| `SIMPLEQA_MIN_F1` | `""` | Blank = report-only. e.g. `0.30` fails `simpleqa-eval` below that F1. |
+| `EVAL_DRIFT_ENFORCE` | `""` | `"true"` makes `eval-metric-drift` **fail** when a baselined metric regresses past its tolerance. Teeth-last: leave blank until a reviewed baseline is committed and tuned. |
+
+> **The scores are comparable to each other, not to published SimpleQA results.**
+> `scripts/run_simpleqa_eval.py` uses upstream's question set, three-way grading
+> taxonomy and metric formulas, but a locally-written grader rubric (see the script
+> docstring). That is sufficient for a run-over-run drift signal and insufficient for
+> claiming an official SimpleQA number. Pass `--grader-template-file` with upstream's
+> verbatim template if you need the latter.
+
+> **Re-baseline deliberately.** The metrics only compare across runs while the probe
+> corpus, question sample, seed, grader model and system prompt are unchanged. Roll any
+> of those and the trend line breaks at that boundary — empty `metrics` in
+> `evals/eval-baseline.json` to re-enter seed mode.
 
 ---
 

@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "kind": "safety-probe-baseline",
+  "description": "Approved SAFETY-PROBE corpus identity and provenance for the harmful-refusal-eval signal. Mirrors dataset-baseline.json for the eval side: probe.sha256 is the integrity pin run_refusal_eval.py verifies the committed corpus against (REFUSAL_CORPUS_SHA256), so an edit to the probe set trips the job instead of silently changing what the refusal-rate signal measures. This corpus is NEVER staged into the dataset chain (EVIDENCE_DIR/dataset-input) — it is a red-team probe set sent to the model under test, not training/eval data the pipeline profiles.",
+  "probe": {
+    "name": "harmful-behaviors-test",
+    "file": "harmful-behaviors-test.jsonl",
+    "sha256": "fbd94ac8a6c4b3cce7ad4826be5d4b7f3f1610c7ba8965afca972009e5f1ab00",
+    "record_count": 104,
+    "schema": "evals/eval-dataset.schema.json"
+  },
+  "provenance": {
+    "platform": "huggingface",
+    "source": "mlabonne/harmful_behaviors",
+    "source_url": "https://huggingface.co/datasets/mlabonne/harmful_behaviors",
+    "revision": "01cead01398926d81f7c52bdb790ee8cf77ebba7",
+    "split": "test",
+    "retrieved": "2026-08-24",
+    "upstream": "Derived from AdvBench harmful_behaviors (Zou et al. 2023, 'Universal and Transferable Adversarial Attacks on Aligned Language Models', arXiv:2307.15043 / llm-attacks, MIT). The HF card carries the 416/104 train/test split only.",
+    "transform": "parquet_to_jsonl.py — map text->prompt, synthesise deterministic id, tag category=harmful-behavior"
+  },
+  "license": {
+    "id": "NOASSERTION",
+    "note": "The Hugging Face dataset card declares no license. The upstream AdvBench harmful_behaviors set it is derived from is MIT (llm-attacks). Recorded as NOASSERTION rather than assumed MIT — resolve with the publisher before treating this corpus as license-clean in the AI BOM."
+  },
+  "handling": {
+    "content": "Adversarial instructions requesting harmful behaviour (malware, fraud, violence, illegal activity). The corpus is INPUT to a refusal test — it is not model output and contains no secrets or PII.",
+    "transcripts": "Model responses to these prompts are NOT written to artifacts by default. run_refusal_eval.py records per-prompt refusal verdicts + response hashes only; set REFUSAL_KEEP_TRANSCRIPTS=true to retain full completions (they may contain harmful content — treat the artifact accordingly)."
+  },
+  "variables": {
+    "REFUSAL_CORPUS_FILE": "harmful-behaviors-test.jsonl",
+    "REFUSAL_CORPUS_SHA256": "fbd94ac8a6c4b3cce7ad4826be5d4b7f3f1610c7ba8965afca972009e5f1ab00"
+  }
+}

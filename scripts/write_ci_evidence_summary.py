@@ -6,8 +6,10 @@ from pathlib import Path
 
 EXPECTED = [
     "semgrep.json",
-    # The endpoint-dependent live evals are not part of this pipeline, so they are
-    # not gated as required artifacts here.
+    # The endpoint-dependent live evals (refusal-eval, simpleqa-eval) ARE part of the
+    # pipeline now, but they are opt-in: with no MODEL_ENDPOINT they skip. A required
+    # artifact that is legitimately absent would fail this gate, so they are listed as
+    # ADVISORY below rather than required here.
     #
     # markllm-results.json was DEMOTED to ADVISORY (below): markllm-watermark-eval is
     # itself allow_failure:true (it pulls a multi-GB transformers model on a runner and
@@ -27,6 +29,13 @@ ADVISORY = [
     "ydata-profile.json",
     "evidently-drift.json",
     "dvc-status.json",
+    # Endpoint-driven live-eval signals — advisory for the same reason markllm is:
+    # they skip cleanly with no MODEL_ENDPOINT, and a model-serving outage must not
+    # block the SECURITY evidence gate. Their teeth live in the jobs themselves
+    # (REFUSAL_MIN_RATE / SIMPLEQA_MIN_F1) and in eval-metric-drift's EVAL_DRIFT_ENFORCE.
+    "refusal-eval.json",
+    "simpleqa-eval.json",
+    "eval-metric-drift.json",
 ]
 
 
@@ -64,6 +73,37 @@ def verdict(name: str, path: Path) -> tuple[str, str]:
         return ("fail", f"{crit} critical") if crit else ("pass", "0 critical")
     if name == "great-expectations.json":
         return ("pass", "all expectations met") if doc.get("success") else ("fail", "expectation(s) failed")
+    if name == "refusal-eval.json":
+        # polarity: NOT refusing a harmful-behaviors probe is the bad state.
+        metrics = doc.get("metrics") or {}
+        rate, complied = metrics.get("refusal_rate"), metrics.get("compliances")
+        if doc.get("status") == "failed":
+            return "fail", doc.get("failure_reason", "eval failed")
+        if rate is None:
+            return "inert", "no refusal rate computed"
+        detail = f"refusal_rate={rate} ({complied} non-refusal(s) of {metrics.get('scored')})"
+        return ("fail", detail) if complied else ("pass", detail)
+    if name == "simpleqa-eval.json":
+        # Factuality is a TREND signal, not a threshold: eval-metric-drift owns the
+        # verdict. Here it is reported without one, so a low-scoring model does not
+        # read as a failed security control.
+        metrics = doc.get("metrics") or {}
+        if doc.get("status") == "failed":
+            return "fail", doc.get("failure_reason", "eval failed")
+        if metrics.get("graded"):
+            return "inert", (f"f1={metrics.get('f1')}, "
+                             f"accuracy_given_attempted={metrics.get('accuracy_given_attempted')} "
+                             f"over {metrics.get('graded')} question(s)")
+        return "inert", "no questions graded"
+    if name == "eval-metric-drift.json":
+        if doc.get("seeded"):
+            return "inert", "eval baseline seeded (no comparison yet)"
+        if not doc.get("comparisons"):
+            return "inert", doc.get("reason", "no eval metrics to compare")
+        # polarity-aware, mirroring evidently-drift: drift detected is the BAD state.
+        drifted = doc.get("drifted_metrics") or []
+        return ("fail", "eval-metric drift: " + ", ".join(drifted)) if drifted \
+            else ("pass", f"{len(doc['comparisons'])} metric(s) within tolerance")
     if name == "evidently-drift.json":
         if doc.get("seeded"):
             return "inert", "reference seeded (no comparison yet)"

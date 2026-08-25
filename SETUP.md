@@ -297,7 +297,11 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
       `secret/` mount in your namespace.
 - [ ] `vault kv get -mount=secret gaips/ci/model-endpoint` returns your real value
       (with `VAULT_NAMESPACE` exported).
-- [ ] Pipeline is green; `vault-secrets` log shows `N/6 secret(s) written`.
+- [ ] Pipeline is green; `vault-secrets` log shows `N/3 secret(s) written`
+      (three paths: model-endpoint, model-signing-identity, sigstore-oidc-issuer.
+      Credentials are no longer brokered here — set `MODEL_API_KEY`, `HF_TOKEN`,
+      `RL_TOKEN` as masked project variables. A WARN on a path you have not
+      populated is expected, not a failure).
 - [ ] `artifact-signing-gate` passed.
 - [ ] (If signing) `signature-verification` passed against your real
       `MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER`.
@@ -305,6 +309,128 @@ Apply `deployment/argocd/verify-signatures-presync-hook.yaml`.
       Kyverno admits the signed image; Argo CD PreSync verifies and syncs.
 
 > **Hardening after first green run:** pin `gitleaks/gitleaks` and `clamav/clamav`
+
+
+
+---
+
+# Part G — Enabling every capability
+
+Parts A–F bring the pipeline up and switch integrations on one at a time. This part
+is the other question: *what does a run with **everything** turned on look like, and
+in what order do you get there?*
+
+The short answer is that it is **not a single run**. Three controls — signer identity,
+the input-drift reference, and the eval-metric baseline — cannot arm themselves on a
+first pipeline, because each needs a value that only a previous run can produce. Plan
+for three pushes plus one review step.
+
+### G1. Set every variable
+
+| Group | Variables |
+| --- | --- |
+| **Secrets backend** (optional) | `VAULT_ADDR`, `VAULT_NAMESPACE` — unset → the jobs read plain CI/CD variables instead |
+| **Signer identity** | `MODEL_SIGNING_IDENTITY`, `SIGSTORE_OIDC_ISSUER` — `[protected]`, `[plain]`, expansion **off**. Produced by G2, not hand-written |
+| **Live-eval signals** | `MODEL_ENDPOINT`, `MODEL_API_KEY` (masked), `EVAL_MODEL_ID`, `EVAL_SYSTEM_PROMPT`, `SIMPLEQA_GRADER_MODEL` (+ `SIMPLEQA_GRADER_ENDPOINT` / `SIMPLEQA_GRADER_API_KEY` if the grader lives elsewhere) |
+| **Provenance / supply chain** | `HF_MODEL_IDS` (+ `HF_TOKEN`, `HF_AUTHOR_ALLOWLIST`, `HF_PINNED_SHAS`), `RL_TOKEN`, `DVC_REMOTE_URL` |
+| **Dataset chain** | `DATASET_PACKAGE_NAME`, `DATASET_FILENAME`, `DATASET_EXPECTED_SHA256` — or leave blank to stay in committed-fixture mode |
+| **Deploy-prep** | `IMAGE_REF` (prefer `repo@sha256:…`), `IMAGE_REGISTRY_HOST` / `_USER` / `_PASSWORD`, `EVIDENCE_PACKAGE_NAME`, `EVIDENCE_PACKAGE_VERSION` |
+| **Automation tokens** | `GITLAB_PUSH_TOKEN` (`write_repository` — auto-commits the drift reference), `GITLAB_API_TOKEN` (`read_api` — enables the operational block of `metrics-normalize`) |
+
+Leave every **enforcement switch** blank for now (G6 flips them). Full reference:
+`ci/CI-VARIABLES.md`; a copy-paste skeleton lives in `ci/pipeline-variables.env.example`.
+
+**Runner egress.** The live evals need network reach to `MODEL_ENDPOINT`, and
+`simpleqa-eval` additionally fetches the question set from
+`openaipublic.blob.core.windows.net`. On a runner without that egress, commit or cache
+the CSV and point `SIMPLEQA_DATASET_FILE` at it — the SHA-256 pin is verified either way.
+
+### G2. Run 1 — signer-identity discovery (nothing else runs)
+
+```bash
+git commit --allow-empty -m "ci: discover signer identity [sigstore-discovery]" && git push
+```
+
+Then trigger the **manual** `sigstore-identity-discover` job on `main`, and paste its
+"COPY THESE" values verbatim into `MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER`.
+
+Every other job carries an `if: $CI_COMMIT_MESSAGE =~ /\[sigstore-discovery\]/ → never`
+rule, so this run deliberately does nothing else. That is the design, not a misfire.
+
+### G3. Run 2 — the seeding run (both baselines are still empty)
+
+A normal push to the default branch. Everything executes, and two controls seed
+themselves rather than judging anything:
+
+- `evidently-drift` writes `reports/dataset-reference.seed.jsonl`, and
+  `data-drift-baseline-commit` sanitizes and commits it to
+  `evals/dataset-reference.jsonl` with `[skip ci]`.
+- `harmful-refusal-eval` and `simpleqa-eval` measure your endpoint for the first time;
+  `eval-metric-drift` finds an empty `metrics` object, enters **seed mode**, and writes
+  `reports/eval-baseline.seed.json` (also bundled at `evidence/eval-baseline.seed.json`).
+
+Neither drift control renders a verdict on this run. Expect `seeded: true` in both
+reports — that is correct behaviour, not a fault.
+
+### G4. Review and commit the eval baseline
+
+Download `eval-baseline.seed.json`, read the numbers before you bless them, then commit
+it to `evals/eval-baseline.json`:
+
+```bash
+cp ~/Downloads/eval-baseline.seed.json evals/eval-baseline.json
+```
+
+Adjust `max_delta` per metric while you are there, and add a hard `min` where a floor
+matters more than a delta — `refusal_eval.refusal_rate` is the usual candidate.
+
+> **Why this one is manual.** The *data* reference auto-commits because it only records
+> what the input data looked like. An eval baseline records an **accepted safety and
+> quality posture** — the thing every future regression is measured against — so a human
+> signs off. A baseline captured from a bad run silently defines "bad" as normal.
+
+### G5. Run 3 — first fully-armed run
+
+Both drift controls now compare against fixed baselines. `eval-metric-drift.json`
+carries `seeded: false` and a `comparisons` array; `evidently-drift` reports a real PSI
+verdict. This is the first run whose output is worth trending.
+
+### G6. Flip the teeth, one at a time
+
+Teeth-last is the house rule: enforce only once the run is otherwise green, and change
+one switch per run so a new red job has one obvious cause.
+
+| Switch | Blocks when set |
+| --- | --- |
+| `PIP_AUDIT_REQUIRE` | a CVE in the core root deps |
+| `LOCK_DRIFT_REQUIRE` | a committed lock that has drifted from its `.in` |
+| `MARKLLM_AUDIT_REQUIRE` | an un-triaged CVE in the torch/transformers/markllm stack |
+| `RL_FAIL_ON` (already enforcing) / `RL_WARN_AS_FAIL` / `RL_REQUIRE_TOKEN` | Spectra Assure malware/tampering verdicts; a missing token |
+| `IMAGE_VERIFY_REQUIRE` | a **signed** tool image that fails cosign verification |
+| `DVC_REQUIRE` | data/model drift from the pinned DVC versions |
+| `REFUSAL_MIN_RATE` | the refusal rate falling below your floor |
+| `SIMPLEQA_MIN_F1` | SimpleQA F1 falling below your floor |
+| `EVAL_DRIFT_ENFORCE` | a baselined eval metric regressing past tolerance |
+| `EVIDENCE_VERDICTS_REQUIRE` | a **required** artifact that is present but carries a failing verdict (a *missing* one always blocks) |
+| `EVIDENCE_SIGNING_REQUIRED` | the terminal evidence seal being unsigned (no `SIGSTORE_ID_TOKEN`) |
+
+**Two capabilities are YAML edits, not variables.** `evidently-drift` and
+`eval-metric-drift` are `allow_failure: true`, so their enforcement switches change the
+script's exit code while the job still cannot fail the pipeline. Flip those keys to
+`false` in `.gitlab-ci.yml` when you want the drift controls to genuinely block —
+after G5 has shown you what a normal comparison looks like.
+
+### G7. What "everything on" looks like
+
+- `vault-secrets`: `7/7 secret(s) written`.
+- `signature-verification`: verified against your real Fulcio identity, on a protected ref.
+- `evidently-drift`: `seeded: false`, a real PSI verdict.
+- `harmful-refusal-eval` / `simpleqa-eval`: `skipped: false`, with metrics.
+- `eval-metric-drift`: `seeded: false`, one `comparisons` entry per baselined metric.
+- `evidence-summary`: every required artifact present and passing.
+- `sign-evidence`: a cosign-signed hash manifest covering the whole run.
+- `image-sign` + `publish-signed-artifacts`: signed image and evidence bundle published;
+  Kyverno admits the image and the Argo CD PreSync hook verifies it.
 
 
 
@@ -990,6 +1116,43 @@ This is the pipeline's live AI-watermarking self-test: it proves the model can b
 
 **Output file(s):** `reports/markllm-results.json` — the watermark generate-then-detect self-test result, including per-prompt outputs, detection results, and an overall pass/fail `status` that `evidence-summary` reads as an **advisory** verdict (this job is `allow_failure` and evaluates a model that is not the signed integrity-path artifact, so its result is displayed and a failure is logged but does not block the gate).
 
+#### `harmful-refusal-eval` — stage: `ai-eval` · advisory (allow_failure) · output: `reports/refusal-eval.json`
+
+**What this job is for**
+This is the pipeline's **safety** signal against a *deployed* model. Every record in `evals/harmful-behaviors-test.jsonl` (the 104-row test split of HF `mlabonne/harmful_behaviors`, AdvBench-derived) is an instruction the model should refuse, so the share it actually refuses — `refusal_rate` — is a direct reading of the endpoint's safety posture, and a fall in that rate run-over-run is a safety regression. It runs after `artifact-signing-gate` and `model-manifest`, like every other eval: nothing is evaluated until model integrity has passed.
+
+It is **opt-in**. With `MODEL_ENDPOINT` or `EVAL_MODEL_ID` unset it writes `{"skipped": true}` and exits 0, so a project that has configured no endpoint sees exactly the behaviour it saw before this job existed.
+
+**Step by step, in plain English**
+1. Skips on `[sigstore-discovery]` commits; otherwise runs on success. `vault-secrets` is in its `needs` so the Vault-sourced `MODEL_ENDPOINT` / `MODEL_API_KEY` dotenv values reach it.
+2. `run_refusal_eval.py` (stdlib-only — no pip install, no venv bootstrap) exits early with a `skipped` report if no endpoint or model id is configured.
+3. Hashes the probe corpus and compares it to `REFUSAL_CORPUS_SHA256` (from `evals/harmful-behaviors-baseline.json`). A mismatch **fails the job**: the rate is only comparable across runs while the probe set is fixed, so an edited corpus must not silently redefine the signal.
+4. Sends each prompt to the endpoint at `temperature: 0` with `EVAL_CONCURRENCY` workers, retrying only 429/5xx. `EVAL_SYSTEM_PROMPT`, if set, is sent as a system message — set it to the deployed prompt so the signal measures the shipping configuration rather than a bare model.
+5. Classifies each response with a deterministic refusal-marker lexicon over the first 400 characters — not an LLM judge, so the classifier itself cannot drift. An empty completion, or a provider-side content-filter rejection, counts as a refusal.
+6. Transport/API errors are recorded as **errors, not refusals**, and excluded from the rate — an outage cannot masquerade as perfect safety.
+7. Writes the report: per prompt a verdict, the matched marker, a SHA-256 of the response and its length. Full completions are written **only** when `REFUSAL_KEEP_TRANSCRIPTS=true`, because a non-refusal is harmful content by construction.
+8. Exits non-zero only if every probe errored, or if `REFUSAL_MIN_RATE` is set and the measured rate is below it.
+
+**Output file(s):** `reports/refusal-eval.json` — `metrics.refusal_rate` / `compliances` / `errors`, the pinned corpus identity, and the per-prompt verdict list. `evidence-summary` reads it as an advisory verdict (any non-refusal shows as a failing advisory row); `eval-metric-drift` consumes `refusal_rate` and `error_rate`.
+
+#### `simpleqa-eval` — stage: `ai-eval` · advisory (allow_failure) · output: `reports/simpleqa-eval.json`
+
+**What this job is for**
+This is the **factuality / hallucination** signal, adapted from OpenAI's SimpleQA (`openai/simple-evals`). Short fact-seeking questions with unambiguous gold answers are put to the model under test; a grader model labels each answer CORRECT, INCORRECT, or NOT_ATTEMPTED; the job reports `accuracy_given_attempted` and `f1`. A fall in those is the hallucination-drift signal.
+
+Two honest limits, both stated in `scripts/run_simpleqa_eval.py`: the harness is local (the upstream package is not on PyPI and its dependencies are not in this pipeline's hash-pinned locks), and the grader rubric is a local restatement of upstream's. The numbers are therefore **comparable across runs of this pipeline but not claimable as official SimpleQA scores** — pass `--grader-template-file` with upstream's verbatim template if you need that.
+
+**Step by step, in plain English**
+1. Same rules and `needs` as the refusal job; skips cleanly with no endpoint, no model id, or no grader model.
+2. Downloads `simple_qa_test_set.csv` and verifies it against `SIMPLEQA_EXPECTED_SHA256`. An unpinned benchmark would let the yardstick move together with the metric, so a mismatch fails the job. `SIMPLEQA_DATASET_FILE` supplies a local copy on runners without egress.
+3. Draws `SIMPLEQA_SAMPLE_SIZE` questions (default 100 of 4326) with the fixed `EVAL_SAMPLE_SEED`, so every run asks the *same* questions.
+4. For each question: one call to answer it, then one call to the grader (which may be a different model/endpoint via `SIMPLEQA_GRADER_MODEL` / `SIMPLEQA_GRADER_ENDPOINT`). Budget two endpoint calls per question.
+5. A grader reply carrying no A/B/C verdict is an **error**, not a silent NOT_ATTEMPTED — grader failures cannot flatter the score.
+6. Computes upstream's metrics: `is_correct`, `is_incorrect`, `is_not_attempted`, `accuracy_given_attempted`, and their harmonic mean `f1`.
+7. Exits non-zero only if nothing could be graded, or below `SIMPLEQA_MIN_F1` when that is set.
+
+**Output file(s):** `reports/simpleqa-eval.json` — the metric block above, the pinned question-set identity and sample seed, and per-question grades (answers retained only with `SIMPLEQA_KEEP_TRANSCRIPTS=true`). Read by `eval-metric-drift` and rendered on the Pages dashboard; `evidence-summary` displays it without a pass/fail verdict, so a low-scoring model does not read as a failed *security* control.
+
 ### Stage 7 — Guardrail / Drift
 
 #### `data-drift-baseline-commit` — stage: `guardrail` · advisory (allow_failure) · output: none
@@ -1030,6 +1193,26 @@ This is the input-side data/feature drift check. It uses Evidently's `DataDriftP
 8. If a reference was seeded, prints a hint to commit `dataset-reference.seed.jsonl`.
 
 **Output file(s):** `reports/evidently-drift.json` — drift summary (skipped/seeded/pass/fail + drifted-column stats); `reports/dataset-reference.seed.jsonl` — first-run seeded reference (consumed by `data-drift-baseline-commit`); `evidence/evidently/` — directory with the human-readable `drift-report.html`.
+
+#### `eval-metric-drift` — stage: `guardrail` · advisory (allow_failure) · output: `reports/eval-metric-drift.json`
+
+**What this job is for**
+`evidently-drift` watches the **input** side; this is its **output**-side counterpart. It takes the metrics the two live evals measured against the deployed model and compares them to the reviewed baseline in `evals/eval-baseline.json`, so a model or prompt change that quietly degrades safety or factuality surfaces as a drift verdict instead of going unnoticed.
+
+Each signal carries a polarity and a tolerance: `refusal_rate`, `accuracy_given_attempted` and `f1` are *higher is better* (a fall past tolerance is drift), `is_not_attempted` moves in either direction (it rises with over-refusal and with a tightened system prompt), and the endpoint `error_rate` is tracked as **informational** — it reports movement but never produces a drift verdict, because it measures serving health, not the model.
+
+**Step by step, in plain English**
+1. `needs` both eval jobs with `optional: true`, so a run in which they did not execute still resolves.
+2. Reads `reports/refusal-eval.json` and `reports/simpleqa-eval.json`. Every eval skipped (the no-endpoint default) → writes an inert report and exits 0; a run that deliberately does no inference must not turn red.
+3. Empty `metrics` in `evals/eval-baseline.json` → **seed mode**: captures this run's numbers with their default polarity and tolerance into `reports/eval-baseline.seed.json`, reports no verdict, and prints the review-and-commit instruction.
+4. With a populated baseline it compares each metric: delta against the approved value versus the tolerance, plus any hard `min`/`max` bound, and records a per-metric `within-tolerance` / `drift` / `unbaselined` verdict.
+5. Prints every comparison to the job log and writes the report. Exits non-zero **only** when `EVAL_DRIFT_ENFORCE=true` and a non-informational metric drifted.
+
+> **The baseline is never auto-committed.** `data-drift-baseline-commit` does that for the *data* reference; there is deliberately no equivalent here. An eval baseline encodes an accepted safety and quality posture, so a human reviews the seed before it becomes the thing regressions are measured against. Copy `reports/eval-baseline.seed.json` (also bundled by `evidence-summary` at `evidence/eval-baseline.seed.json`) into `evals/eval-baseline.json`, adjust tolerances, and commit.
+
+> **Re-baseline deliberately.** The metrics only compare while the probe corpus, question sample, `EVAL_SAMPLE_SEED`, grader model and system prompt are unchanged. Roll any of those and the trend line breaks at that boundary — empty the `metrics` object to re-enter seed mode rather than letting a stale baseline produce meaningless deltas.
+
+**Output file(s):** `reports/eval-metric-drift.json` — per-metric current/baseline/delta/verdict, the drifted-metric list, and notes for every signal that produced no measurement; `reports/eval-baseline.seed.json` — first-run seed for review.
 
 ### Stage 8 — Evidence
 

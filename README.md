@@ -144,9 +144,9 @@ The repo-root `.gitlab-ci.yml` is a GitLab AI/ML security pipeline. It is intend
 > **Full setup runbook:** [`SETUP.md`](SETUP.md) walks the entire path end to end — GitLab CI/CD variables and the first pipeline run, optional HashiCorp Vault provisioning with Terraform (production), other optional integrations (HF/dataset scanning, DVC), and deploy-time Kyverno + Argo CD verification.
 > **CI/CD variable catalog:** [`ci/CI-VARIABLES.md`](ci/CI-VARIABLES.md) lists every variable the pipeline reads, its source (you / Vault / GitLab), masking, default, and what it gates. Terraform inputs: [`deployment/vault/terraform/terraform.tfvars.example`](deployment/vault/terraform/terraform.tfvars.example).
 
-The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, `deploy-prep`, and `attest` (the terminal seal stage that runs dead-last so `sign-evidence` can hash + sign the entire run's evidence set). It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, OSS dependency reputation/malware screening (ReversingLabs Spectra Assure Community), ModelScan, ModelAudit, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, MarkLLM live watermark evaluation, evidence, a consolidated CycloneDX 1.6 AI BOM artifact, a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification. It needs **no model endpoint / deployed inference service** — but note `markllm-watermark-eval` does run real in-process `transformers` generation on CPU, so the pipeline is not literally inference-free.
+The pipeline stages are `setup`, `sast`, `sbom`, `vuln-scan`, `model-integrity`, `ai-eval`, `guardrail`, `evidence`, `ai-bom`, `deploy-prep`, and `attest` (the terminal seal stage that runs dead-last so `sign-evidence` can hash + sign the entire run's evidence set). It produces Git version provenance, Semgrep, `pip-audit`, package-integrity, conda verification, Syft CycloneDX/SPDX, Grype, Trivy, OSS dependency reputation/malware screening (ReversingLabs Spectra Assure Community), ModelScan, ModelAudit, Hugging Face artifact scan, model digest/signature/tamper, dataset redaction (secrets + PII), eval-dataset schema validation, MarkLLM live watermark evaluation, evidence, a consolidated CycloneDX 1.6 AI BOM artifact, a Cosign-signed workload image, and a published signed-artifact bundle for deploy-time verification. It needs **no model endpoint / deployed inference service** to run green — but two caveats: `markllm-watermark-eval` runs real in-process `transformers` generation on CPU, so the pipeline is not literally inference-free; and `harmful-refusal-eval` / `simpleqa-eval` *do* call an endpoint **when you configure one** (`MODEL_ENDPOINT` + `EVAL_MODEL_ID`), adding a safety refusal-rate signal, a SimpleQA factuality signal, and the output-side `eval-metric-drift` control. Leave those variables blank and all three skip cleanly, exactly as before.
 
-Before copying this CI file into a project repository, add or adapt `requirements.txt`, `models/`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, the data-quality collectors (`scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/secure_software_scan.py`), and `evals/eval-dataset.schema.json`. Configure signing and Hugging Face variables in GitLab CI/CD settings (no model endpoint is needed — the only inference is `markllm-watermark-eval`'s local in-process `transformers` generation, which runs in-pipeline on CPU rather than against any deployed service).
+Before copying this CI file into a project repository, add or adapt `requirements.txt`, `models/`, `scripts/write_ci_evidence_summary.py`, `scripts/build_ai_bom.py`, `scripts/write_version_info.py`, `scripts/validate_eval_dataset.py`, `scripts/redact_dataset.py`, the data-quality collectors (`scripts/run_great_expectations.py`, `scripts/run_evidently_report.py`, `scripts/run_ydata_profile.py`, `scripts/run_markllm_watermark_eval.py`, `scripts/secure_software_scan.py`), the live-eval collectors (`scripts/run_refusal_eval.py`, `scripts/run_simpleqa_eval.py`, `scripts/check_eval_metric_drift.py`) with `evals/harmful-behaviors-test.jsonl` + `evals/harmful-behaviors-baseline.json` + `evals/eval-baseline.json`, and `evals/eval-dataset.schema.json`. Configure signing and Hugging Face variables in GitLab CI/CD settings (no model endpoint is *required* — without one the only inference is `markllm-watermark-eval`'s local in-process `transformers` generation; set `MODEL_ENDPOINT` + `EVAL_MODEL_ID` to additionally turn on the refusal-rate and SimpleQA signals against a deployed service).
 
 ## Validation Status & Known Gaps
 
@@ -169,11 +169,18 @@ sign-evidence, and `image-provenance-verify` (cosign-verifies trivy; CI-confirme
 - `evidently-drift` — mechanism is green, but on the single-class gandalf set it
   self-compares → "no drift" forever. Statistically meaningless until a realistically
   sized *normal* reference corpus exists.
+- `harmful-refusal-eval` / `simpleqa-eval` / `eval-metric-drift` — real signals, but
+  **inert until an endpoint is configured**. With `MODEL_ENDPOINT` blank they skip and
+  the drift job has nothing to compare, so they prove nothing on a default run. They are
+  also the only controls here that measure the *deployed model's behaviour* rather than
+  the artifact's integrity — worth wiring to a staging endpoint before treating the
+  pipeline's AI-eval coverage as complete.
 - `modelscan` — excludes `.gguf`, so it scans 0 files on the only shipped model; GGUF
   malware coverage rests on `modelaudit` + `clamav`, not modelscan.
-- **29 of the 46 jobs that declare `allow_failure` are `true`** (advisory; the other 17 are
-  `false`), out of 53 top-level jobs total — most "gates" report rather than block, by the
-  teeth-last design, until their enforcement switch is flipped.
+- **28 of the 47 jobs that declare `allow_failure` are `true`** (advisory; the other 19 are
+  `false`), out of 55 top-level jobs total — most "gates" report rather than block, by the
+  teeth-last design, until their enforcement switch is flipped. (Counts re-derived from the
+  current CI file; the three live-eval jobs added since are all advisory.)
 
 **❌ Never executed — wired with placeholders, cannot be claimed to work:**
 - **Deploy-time verification (the whole "verify at deploy" half):**
@@ -229,10 +236,10 @@ flowchart TD
       mi_jobs --> gate
     end
     subgraph EVAL [ai-eval]
-      eval_jobs[markllm-deps-audit · markllm-watermark-eval]
+      eval_jobs[markllm-deps-audit · markllm-watermark-eval<br/>harmful-refusal-eval · simpleqa-eval <i>(opt-in)</i>]
     end
     subgraph GUARD [guardrail]
-      guard_jobs[evidently-drift<br/>data-drift-baseline-commit]
+      guard_jobs[evidently-drift<br/>data-drift-baseline-commit<br/>eval-metric-drift]
     end
     subgraph EVID [evidence]
       evid_jobs[evidence-summary]
@@ -349,6 +356,8 @@ After the gate passes, this stage runs the **MarkLLM** jobs — a static depende
 | Job | What it does |
 | --- | --- |
 | `markllm-deps-audit` | Runs `pip-audit` against `torch`, `transformers`, and `markllm` (the heavy watermark stack) on `python:3.10-slim` before `markllm-watermark-eval`. Advisory (`allow_failure: true`). |
+| `harmful-refusal-eval` | **Safety signal (opt-in).** Sends all 104 prompts of the committed harmful-behaviors probe corpus (`evals/harmful-behaviors-test.jsonl`, from HF `mlabonne/harmful_behaviors`) to `MODEL_ENDPOINT` and records whether each was refused, via a deterministic refusal-marker lexicon (no judge model, so the classifier can't drift on its own). `refusal_rate` is the monitoring signal; a drop is a safety regression. The corpus is SHA-256 pinned from `evals/harmful-behaviors-baseline.json`. Model **completions are not retained** by default — a non-refusal is harmful content by construction, so the report carries a verdict + response hash per prompt (`REFUSAL_KEEP_TRANSCRIPTS=true` opts in). Skips cleanly (`{"skipped": true}`) with no `MODEL_ENDPOINT`/`EVAL_MODEL_ID`. Advisory (`allow_failure: true`); `REFUSAL_MIN_RATE` adds teeth. |
+| `simpleqa-eval` | **Factuality signal (opt-in).** Adapts OpenAI's SimpleQA (`openai/simple-evals`) to a stdlib-only CI job: a fixed-seed sample (`SIMPLEQA_SAMPLE_SIZE`, default 100 of 4326) is answered by the model under test and graded CORRECT/INCORRECT/NOT_ATTEMPTED by `SIMPLEQA_GRADER_MODEL`, yielding `accuracy_given_attempted` and `f1` — hallucination-drift signals. The question set is fetched at job time and verified against `SIMPLEQA_EXPECTED_SHA256`. **Scores are comparable across runs of this pipeline, not to published SimpleQA numbers** (local grader rubric — see the script docstring). Skips cleanly with no endpoint/model/grader. Advisory; `SIMPLEQA_MIN_F1` adds teeth. |
 | `markllm-watermark-eval` | Runs a live MarkLLM generation/detection eval. Resolves the model id from `MARKLLM_MODEL_ID` — now set explicitly (`Qwen/Qwen2.5-1.5B-Instruct`) by the `model-manifest` dotenv from `evals/model-baseline.json` — or, when that is empty (manifest unavailable), derives it dynamically from `MODEL_FIXTURE_URL` (the HF GGUF repo is mapped to its transformers repo, since `AutoModelForCausalLM` can't load GGUF). Advisory (`allow_failure: true`): a missing model id, an unloadable model, or a generation/detection error records the failure in `markllm-results.json` without blocking the pipeline. Artifacts always include `markllm-results.json` when the helper starts. |
 
 #### What the MarkLLM watermark eval actually does
@@ -377,6 +386,7 @@ This stage carries the input-side data-drift jobs.
 | Job | What it does |
 | --- | --- |
 | `data-drift-baseline-commit` | **Automates data-drift activation (Fix #24b).** On the default branch, when `evidently-drift` just seeded a reference and none exists in the repo, **sanitizes** the seed (drops null/non-finite values — never a raw `cp`) and commits it `dataset-reference.seed.jsonl` → `evals/dataset-reference.jsonl`, pushing with `[skip ci]` + `-o ci.skip` (no pipeline loop). Requires `GITLAB_PUSH_TOKEN` (PAT, scope `write_repository`); if unset, falls back to the manual artifact. Never overwrites an existing reference **unless the commit message carries `[refresh-drift-reference]`** (a deliberate refresh — replaces the baseline and commits `ci: refresh data-drift reference [skip ci]`). `allow_failure: true`. |
+| `eval-metric-drift` | **Output-side drift.** Compares this run's live-eval metrics (`refusal_rate`, `accuracy_given_attempted`, `f1`, `is_not_attempted`, plus endpoint `error_rate` as an informational signal) against the reviewed baseline in `evals/eval-baseline.json`, applying a per-metric polarity and tolerance. Empty baseline → **seed mode**: it writes `reports/eval-baseline.seed.json` for review and returns no verdict. Unlike the data-drift reference there is **no auto-commit** — an eval baseline encodes an accepted safety/quality posture, so a human approves it. No metrics this run (the no-endpoint default) → reports itself inert. Soft gate (`allow_failure: true`); `EVAL_DRIFT_ENFORCE=true` adds teeth. |
 | `evidently-drift` | Data/feature drift on the **input** side. Evidently's `DataDriftPreset` (PSI) compares a committed reference snapshot (`evals/dataset-reference.jsonl`) to the current dataset; TextEvals adds LLM-relevant text descriptors over prompt columns. Seeds the reference on first run; `data-drift-baseline-commit` then bootstraps it on the default branch (Fix #24b), so drift detection activates without a manual commit. Soft gate (`allow_failure: true`); skips cleanly when no dataset is present. |
 
 ### Stage 8 — Evidence
@@ -504,12 +514,15 @@ The authoritative map of **what each job emits** — every GitLab `artifacts:` p
 | Job | Artifacts (file — type) | Retention |
 | --- | --- | --- |
 | `markllm-watermark-eval` | `reports/markllm-results.json` (.json — generate→detect result + metrics) | 7 days |
+| `harmful-refusal-eval` | `reports/refusal-eval.json` (.json — per-probe refusal verdicts + `refusal_rate`; completions withheld unless `REFUSAL_KEEP_TRANSCRIPTS=true`) | 30 days |
+| `simpleqa-eval` | `reports/simpleqa-eval.json` (.json — per-question grades + `accuracy_given_attempted` / `f1`) | 30 days |
 
 ### Stage 7 — Guardrail / Drift
 
 | Job | Artifacts (file — type) | Retention |
 | --- | --- | --- |
 | `evidently-drift` | `reports/evidently-drift.json` (.json), `reports/dataset-reference.seed.jsonl` (.jsonl — first-run seed), `evidence/evidently/` (dir — HTML/JSON report) | 30 days |
+| `eval-metric-drift` | `reports/eval-metric-drift.json` (.json — per-metric current/baseline/delta verdicts), `reports/eval-baseline.seed.json` (.json — first-run seed for review) | 30 days |
 
 ### Stage 8 — Evidence
 

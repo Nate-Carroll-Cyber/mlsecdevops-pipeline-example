@@ -1,4 +1,6 @@
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
+  "kind": "eval-metric-baseline",
+  "description": "Approved eval-METRIC baseline for the live-eval signals: the harmful-behaviors refusal rate (scripts/run_refusal_eval.py) and the SimpleQA factuality scores (scripts/run_simpleqa_eval.py). check_eval_metric_drift.py compares each run's measurements against this file. An EMPTY metrics object means seed mode — the drift job records this run's numbers to reports/eval-baseline.seed.json for review and reports no verdict. Commit a reviewed seed here to activate the gate; do NOT auto-refresh it, since a baseline that tracks the current run can never detect a regression. Per-metric keys: value (approved measurement), direction (higher_is_better | lower_is_better | any), max_delta (tolerated movement), and optional min/max hard bounds. Metrics are only comparable while the probe corpus, question sample, sampling seed, grader model, and system prompt are unchanged — re-baseline deliberately when any of those roll.",
   "metrics": {}
 }

@@ -2,6 +2,7 @@
 
 **BOM Version:** 1.0
 **Assessment Date:** 2026-07-06
+**Revised:** 2026-09-19, corrected against commit `9dcf595` (see Revision Note at the end)
 **Author:** AI-BOM Architect (automated)
 **System Description:** An 11-stage GitLab CI/CD pipeline for ML model and dataset supply-chain assurance, producing signed CycloneDX 1.6 AI-BOMs, integrity-verified artifacts, and deploy-time verification materials.
 
@@ -13,13 +14,13 @@
 | --- | --- | --- |
 | **Model Name** | Qwen 2.5-1.5B-Instruct-GGUF | ✅ Documented in `model-baseline.json` |
 | **Model Provider** | Qwen (Alibaba Cloud), via Hugging Face Hub | Third-party open-weight model |
-| **Model Version** | `qwen2.5-1.5b-instruct-q4_k_m.gguf` | Pinned to specific quantization variant |
-| **Model Architecture** | Transformer (Qwen 2.5 family, 1.5B parameters, Q4_K_M GGUF quantization) | Documented |
+| **Model Version** | `qwen2.5-1.5b-instruct-q2_k.gguf` | Pinned to specific quantization variant in `evals/model-baseline.json` |
+| **Model Architecture** | Transformer (Qwen 2.5 family, 1.5B parameters, Q2_K GGUF quantization) | Documented |
 | **Model Weights** | Downloaded from Hugging Face, SHA-256 pinned | ✅ VERIFIED — `sha256sum --check --strict` against `MODEL_FIXTURE_SHA256` |
 | **Weight Checksum (SHA-256)** | ✅ VERIFIED — pinned in `model-baseline.json` and verified every pipeline run | Pass |
 | **Inference Parameters** | Used only for MarkLLM watermark evaluation (local CPU inference); not production inference | Documented as eval-only |
 | **Model Signing** | ✅ Cosign keyless (Fulcio + Rekor) with GitLab OIDC identity | Signature generation proven; verification pending protected-main run |
-| **Licensing** | Documented in `model-baseline.json` (provenance, license field) | ✅ Tracked |
+| **Licensing** | Not recorded. `evals/model-baseline.json` has no `license` or `producer` field, so the AI-BOM model component carries `gaips:license.disclosure=UNKNOWN` | ❌ UNVERIFIED. Add both keys to the baseline |
 | **Model Security Scanning** | ModelScan (excludes GGUF — 0 files scanned), ModelAudit (covers GGUF), ClamAV (malware) | ⚠️ ModelScan gap on GGUF explicitly documented |
 
 **Finding:** Model provenance is strong. SHA-256 integrity pin, baseline manifest, and Cosign signing create a verifiable chain from download through publication. The one gap — ModelScan's GGUF exclusion — is compensated by ModelAudit + ClamAV and honestly documented. Signature verification has not yet executed on a protected-main ref (`model.verified: false`).
@@ -103,12 +104,12 @@
 
 | Field | Value | Status |
 | --- | --- | --- |
-| **CI/CD Platform** | GitLab CI (`.gitlab-ci.yml`, 11 stages, 53 jobs) | ✅ Documented |
-| **Deployment Target** | Kubernetes (manifests in `deploy/k8s/`) | Evidenced but unvalidated |
+| **CI/CD Platform** | GitLab CI (`.gitlab-ci.yml`, 11 stages, 52 jobs in the committed CI file at `9dcf595`; the README counts 55, including three live-eval jobs that are documented but not present in that file) | ✅ Documented |
+| **Deployment Target** | Kubernetes (manifests in `deployment/kubernetes/`) | Evidenced but unvalidated |
 | **Admission Control** | Kyverno ClusterPolicy (signature verification) | ❌ Never executed |
 | **GitOps** | ArgoCD PreSync hook (attestation verification) | ❌ Never executed |
 | **Secrets Management** | HashiCorp Vault (OIDC JWT auth) + GitLab CI Variables fallback | ⚠️ Vault path unvalidated |
-| **IaC** | Terraform (Vault configuration) | Evidenced in `deploy/vault/` |
+| **IaC** | Terraform (Vault configuration) | Evidenced in `deployment/vault/terraform/` |
 | **Container Image Build** | Not present — pipeline produces no container image | N/A (the `image-sign` job is wired but inert) |
 | **Hardware Requirements** | CPU-only (MarkLLM eval runs on CPU) | ✅ Documented |
 
@@ -131,18 +132,25 @@
 
 ### 6. AI-BOM Self-Referentiality
 
-This pipeline **generates its own AI-BOM** (`ai-bom-assemble` + `ai-bom-content-gate` + `sign-ai-bom`). The pipeline's CycloneDX 1.6 output includes:
+This pipeline **generates its own AI-BOM** (`ai-bom-assemble` → `ai-bom-validate` + `ai-bom-content-gate` → `ai-bom-sign`). The pipeline's CycloneDX 1.6 output includes:
 
-| AI-BOM Field | Pipeline Job | Source |
+| AI-BOM Field | Producing job(s) | Source |
 | --- | --- | --- |
-| Model component | `model-manifest` | `model-baseline.json` |
-| Dataset component | `dataset-integrity` | `dataset-baseline.json` |
-| SBOM dependencies | `sbom-generate` (Syft) | `requirements.hashed.txt` |
-| Vulnerabilities array | `vuln-scan-sbom` (Grype) | CycloneDX SBOM |
-| Cosign signatures | `sign-ai-bom` | Sigstore keyless |
-| Content gate | `ai-bom-content-gate` | Asserts non-empty components, vulnerabilities, and properties |
+| Header (graph type, included and excluded scope, completeness claim, generation method) | `ai-bom-assemble` | `scripts/build_ai_bom.py` |
+| Input ledger (`gaips:input.*` = present, skipped, absent, not-configured) | `ai-bom-assemble` | Presence of each producer report |
+| `compositions[]` completeness claim | `ai-bom-assemble` | Derived from the input ledger |
+| Model component | `model-digest`, `model-sign`, `hf-artifact-scan`, `modelscan`, `modelaudit-scan`, `clamav-scan` | `evidence/model-digests.txt`, scan reports, `evals/model-baseline.json` |
+| Dataset component | `dataset-download`, `dataset-scan`, `dataset-redact`, `dataset-sign` | Reports plus `evals/dataset-baseline.json` |
+| Software components and `dependencies[]` | `syft-cyclonedx` | `sbom/sbom.cyclonedx.json` |
+| `vulnerabilities[]` with accepted-risk analysis, owner, and review date | `pip-audit`, `lockfile-audit`, `markllm-deps-audit`, `grype-scan`, `trivy-scan` | Audit reports |
+| `services[]` with directed data flows and trust zones | `ai-bom-assemble` | Only services a report proves the run used (Hugging Face Hub, Sigstore, ReversingLabs, the live-eval endpoint) |
+| Embedded model and dataset signatures | `model-sign`, `dataset-sign` | Sigstore keyless |
+| The BOM's own signature | `ai-bom-sign` | Detached cosign keyless signature over the XML rendering |
+| Content gate | `ai-bom-content-gate` | Asserts vulnerability coverage, model signing, declared scope and completeness, no absence rendered as a clean result, model identity fields, a rooted dependency graph, commit currency, and owned, unexpired accepted risks |
 
-**Finding:** The pipeline is a BOM-generating system. This external AI-BOM assessment validates the *pipeline's own supply chain* — the inputs, tools, and infrastructure that produce the BOM. The pipeline's self-generated AI-BOM covers the model and dataset; this assessment covers the pipeline itself.
+**Finding:** The pipeline is a BOM-generating system. This external AI-BOM assessment validates the *pipeline's own supply chain*, meaning the inputs, tools, and infrastructure that produce the BOM. The pipeline's self-generated AI-BOM covers one pipeline run. It excludes the deployed RAG application and Weaviate under `deployment/`, the CI tool images, and the runner, and it says so in `gaips:aibom.scope.excluded`. The self-generated BOM records fact. It does not assert that the system is compliant, safe, or acceptable.
+
+**Known wiring gap:** `markllm-watermark-eval` and `signature-verification` are not in `ai-bom-assemble`'s `needs`, so their reports never reach the assembler. `gaips:model.verified` therefore reads `unknown` and the MarkLLM `modelCard` fold does not fire, regardless of what those jobs produce. The input ledger now reports both as `absent`.
 
 ---
 
@@ -163,7 +171,7 @@ This pipeline **generates its own AI-BOM** (`ai-bom-assemble` + `ai-bom-content-
 
 | AI-BOM Section | Items Assessed | Verified | Partially Verified | Unverified | Failures |
 | --- | --- | --- | --- | --- | --- |
-| Model Provenance | 10 fields | 7 | 2 (signing proven, verification pending; ModelScan GGUF gap) | 0 | 0 |
+| Model Provenance | 10 fields | 6 | 2 (signing proven, verification pending; ModelScan GGUF gap) | 1 (model licence and producer not recorded) | 0 |
 | Data Lineage | 12 fields | 8 | 3 (PII redaction caveats, drift vacuous, retention short) | 0 | 0 |
 | Python Dependencies | 4 mechanisms | 3 | 1 (lock drift advisory) | 0 | 0 |
 | CI Tool Images | 8 images | 2 (Trivy, Cosign) | 6 (digest-pinned, no signature) | 0 | 0 |
@@ -171,9 +179,9 @@ This pipeline **generates its own AI-BOM** (`ai-bom-assemble` + `ai-bom-content-
 | EOL/Vuln Tracking | 4 mechanisms | 3 | 0 | 0 | 1 (no continuous re-analysis) |
 | Governance | 7 requirements | 4 | 2 | 0 | 0 |
 | Regulatory | 6 regulations | 2 | 3 | 0 | 1 (10-year retention) |
-| **Totals** | **56** | **32** | **17** | **2** | **2** |
+| **Totals** | **56** | **31** | **17** | **3** | **2** |
 
-**32 verified. 17 partially verified. 2 unverified. 2 failures.**
+**31 verified. 17 partially verified. 3 unverified. 2 failures.**
 
 ---
 
@@ -187,6 +195,26 @@ This pipeline **generates its own AI-BOM** (`ai-bom-assemble` + `ai-bom-content-
 6. **Enable enforcement switches** incrementally: `IMAGE_VERIFY_REQUIRE`, `LOCK_DRIFT_REQUIRE`, `rl-fail-on`, `ai-bom-content-gate --enforce`
 7. **Implement continuous SBOM re-analysis** — even a scheduled Grype scan against published BOMs closes the point-in-time gap
 8. **Document initial model SHA-256 provenance** — how was the first pin established and verified?
+9. **Record the model licence and producer** in `evals/model-baseline.json` (`license: {id}` and `producer`). The AI-BOM builder reads both
+10. **Add `markllm-watermark-eval` and `signature-verification` to `ai-bom-assemble`'s `needs`** where the DAG allows, or the BOM can never report a verified model
 
 ---
-This repo has 32 verified items and 2 failures. The difference is architectural: this pipeline was designed with supply-chain integrity as its primary purpose. The remaining gaps are almost entirely about execution evidence (first protected-main run) rather than design absences.
+This repo has 31 verified items and 2 failures. The difference is architectural: this pipeline was designed with supply-chain integrity as its primary purpose. The remaining gaps are almost entirely about execution evidence (first protected-main run) rather than design absences.
+
+---
+
+### Revision Note (2026-09-19)
+
+Corrected against commit `9dcf595`. The original assessment date is retained because the findings that were not re-examined still date from it.
+
+| Item | Was | Now | Basis |
+| --- | --- | --- | --- |
+| Model quantization | `q4_k_m` / Q4_K_M | `q2_k` / Q2_K | `evals/model-baseline.json` |
+| Model licensing | Verified, "documented in `model-baseline.json`" | Unverified | That file has no licence or producer field |
+| Deployment paths | `deploy/k8s/`, `deploy/vault/` | `deployment/kubernetes/`, `deployment/vault/terraform/` | Repository tree |
+| Job count | 53 | 52 in the committed CI file | Parsed `.gitlab-ci.yml` |
+| Section 6 job names | `sign-ai-bom`, `dataset-integrity`, `sbom-generate`, `vuln-scan-sbom` | `ai-bom-sign`, `dataset-download` and peers, `syft-cyclonedx`, `grype-scan` and peers | Parsed `.gitlab-ci.yml` |
+| Section 6 content-gate description | "Asserts non-empty components, vulnerabilities, and properties" | Actual assertions listed | `scripts/assert_ai_bom_content.py` |
+| Verification totals | 32 / 17 / 2 / 2 | 31 / 17 / 3 / 2 | Licensing row moved from verified to unverified |
+
+Not re-verified in this revision: sections 2, 3, 5, and 7, and the image-signature findings in 3.2.

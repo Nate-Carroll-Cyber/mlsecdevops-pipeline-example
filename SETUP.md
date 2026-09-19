@@ -1248,7 +1248,8 @@ This is the keystone assembly step: it merges every prior pipeline element — t
 5. It builds machine-learning-model components from `model-digests.txt`, embeds the cosign `model.sig`/`dataset.sig` signatures as base64 `data:` URIs, and folds in scan verdicts, the populated `modelCard` (Fix #30b), and `gaips:model.verified` (Fix #32b).
 6. It adds data components from the dataset digest and download/scan reports — stamping the reviewed `dataset-baseline.json` license (CycloneDX `licenses`) and `gaips:dataset.*` provenance onto each — and attaches AI-eval and data-quality evidence to the root component.
 7. It parses the audit reports (pip-audit, lockfile-audit, markllm-deps-audit, grype, trivy) into a CycloneDX `vulnerabilities[]` array with `affects[].ref` per component (Fix #29), and records count properties.
-8. Writes the assembled document to `sbom/aibom.cyclonedx.json`. Any missing input is skipped, never fatal, so the BOM degrades gracefully.
+8. It records every producer report in an input ledger (`present`, `skipped`, `absent`, `not-configured`), derives the `compositions[]` completeness claim from it, emits `services[]` with directed data flows for the external services the run provably used, and keeps Syft's `dependencies[]` graph rooted at the application.
+9. Writes the assembled document to `sbom/aibom.cyclonedx.json`. Any missing input is skipped, never fatal, but it is never rendered as a clean result: the affected fields read `not-scanned` or `unknown`.
 
 **Output file(s):** `sbom/aibom.cyclonedx.json` — the consolidated, canonical CycloneDX 1.6 AI BOM that every downstream ai-bom job operates on.
 
@@ -1277,10 +1278,11 @@ Where `ai-bom-validate` proves the BOM is well-formed, this job asserts it is su
 3. Counts vulnerabilities the audit reports found using `build_ai_bom._vulnerabilities()` — the exact parser that populates the BOM — and flags an empty BOM `vulnerabilities[]` when audits found vulns.
 4. For every `machine-learning-model` component, checks `gaips:signed=true` (error if not signed).
 5. Checks `gaips:model.verified=true`, but only WARNS when unverified (signature-verification legitimately defers on unprotected refs).
+5a. Checks the header properties and `compositions[]` exist, that every scanner field has a `*.state`, that model identity fields are populated or declared UNKNOWN, that `dependencies[]` is rooted, that the BOM's commit equals `--expect-commit`, and that accepted risks have an owner and an unexpired review date.
 6. Prints `::warning::`/`::error::` annotations and a pass/fail summary.
 7. Without `--enforce` (the configured default), it always exits 0 even on substance gaps.
 
-**Output file(s):** None — a pure gate. It gates (advisory) on vulnerability coverage and on every model component being signed (and ideally verified) in the BOM.
+**Output file(s):** None. A pure gate. It gates (advisory) on vulnerability coverage, model signing, declared scope and completeness, absence not rendered as clean, model identity, the dependency graph, commit currency, and accepted-risk ownership.
 
 #### `ai-bom-sign` — stage: `ai-bom` · hard gate · output: `sbom/aibom.cyclonedx.xml`, `.sig`, `.pem`
 

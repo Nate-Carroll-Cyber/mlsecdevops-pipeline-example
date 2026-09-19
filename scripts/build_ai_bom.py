@@ -16,15 +16,25 @@ Two modes:
     is self-describing — those signatures cover the model/dataset bytes, not the
     BOM, so embedding them changes nothing they attest.
 
-The BOM's OWN signature is applied separately, downstream, as a native CycloneDX
-enveloped signature (`cyclonedx sign bom` over the XML rendering) — it verifies
-as-is with `cyclonedx verify all`, no canonical reconstruction. Only the model
-and dataset signatures (which attest their own bytes, not the BOM) are embedded
-here.
+The BOM's OWN signature is applied separately, downstream, by ai-bom-sign as a
+DETACHED cosign keyless signature (`cosign sign-blob` over the XML rendering,
+emitting aibom.cyclonedx.sig + .pem), verified with `cosign verify-blob`. Only the
+model and dataset signatures (which attest their own bytes, not the BOM) are
+embedded here.
 
-Everything is optional: a missing input is skipped, never fatal, so the BOM
-degrades gracefully as the pipeline's stages light up. Output is canonical
-CycloneDX 1.6 JSON — the established "AI BOM" interchange format.
+Everything is optional: a missing input is skipped, never fatal. But a missing
+input is never rendered as a clean result. Every producer report is recorded in an
+input ledger (`gaips:input.<name>` = present | skipped | absent | not-configured), any verdict whose
+report did not run is emitted as `not-scanned` / `unknown` rather than 0 / true, and
+the completeness claim (`compositions[].aggregate`) is derived from the ledger. A
+reader can therefore tell "scanned, nothing found" from "never scanned".
+
+Structure follows the OWASP AIBOM Foundations Guide v1.0: declared scope and
+completeness, components AND services, directed data flows with trust zones, and
+evidence attached per claim. The BOM records fact; it asserts nothing about
+whether the system is compliant, safe, or acceptable.
+
+Output is canonical CycloneDX 1.6 JSON — the established "AI BOM" interchange format.
 
 Hand-built against the CycloneDX 1.6 JSON schema rather than via a library so
 the ML-BOM surface (modelCard, componentData) stays fully under our control and
@@ -35,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -65,6 +76,48 @@ def _sha256_hash(content: str) -> dict[str, str]:
     return {"alg": "SHA-256", "content": content}
 
 
+def _input_state(path: Path) -> str:
+    """present | skipped | absent for one producer report.
+
+    `skipped` = the producer ran and wrote a `{"skipped": true}` marker (several jobs
+    do, WITH zeroed counters). `absent` = no file, or unparseable. Only `present`
+    licenses a clean verdict; the other two must surface as not-scanned / unknown."""
+    if not path.exists():
+        return "absent"
+    if path.suffix == ".json":
+        doc = _load_json(path)
+        if doc is None:
+            return "absent"
+        if isinstance(doc, dict) and doc.get("skipped"):
+            return "skipped"
+    return "present"
+
+
+def _file_sha256(path: Path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception:
+        return None
+
+
+def _evidence_ref(reports_dir: Path, filename: str, comment: str) -> dict:
+    """An `evidence` external reference that a consumer can actually check: the
+    report's SHA-256 rides along, so the claim it supports is not a bare assertion."""
+    ref: dict[str, Any] = {
+        "type": "evidence",
+        "url": f"file://reports/{filename}",
+        "comment": comment,
+    }
+    sha = _file_sha256(reports_dir / filename)
+    if sha:
+        ref["hashes"] = [_sha256_hash(sha)]
+    return ref
+
+
 def _data_uri(path: Path, mime: str) -> str | None:
     """base64 `data:` URI for a (small) signature/cert file, or None if absent."""
     try:
@@ -77,15 +130,16 @@ def _data_uri(path: Path, mime: str) -> str | None:
 def _signature_refs(sig: Path, cert: Path, subject: str) -> list[dict]:
     """External references embedding a cosign signature + Fulcio cert inline.
 
-    `type: "other"` is used (guaranteed valid across CycloneDX versions) with the
-    semantics carried in `comment`. Safe to embed: these sign `subject`, not the
-    BOM that carries them.
+    The signature uses `type: "digital-signature"` (in the CycloneDX 1.6 enum, which
+    SPEC_VERSION pins). The certificate has no dedicated type and stays `other`, with
+    the semantics in `comment`. Safe to embed: these sign `subject`, not the BOM that
+    carries them.
     """
     refs: list[dict] = []
     sig_uri = _data_uri(sig, "application/octet-stream")
     if sig_uri:
         refs.append({
-            "type": "other",
+            "type": "digital-signature",
             "url": sig_uri,
             "comment": f"cosign keyless signature (Sigstore) over {subject}",
         })
@@ -112,6 +166,21 @@ def _parse_digest_file(path: Path) -> list[tuple[str, str]]:
 
 
 # ── component builders ───────────────────────────────────────────────────────
+
+def _software_dependencies(sbom_dir: Path, reports_dir: Path) -> list[dict]:
+    """The `dependencies[]` graph from the same source document `_software_components`
+    lifted components from. Previously dropped, leaving a flat inventory (fails the
+    CISA Dependency Relationship element)."""
+    for candidate in (
+        sbom_dir / "sbom.cyclonedx.json",
+        reports_dir / "pip-audit-cyclonedx.json",
+    ):
+        doc = _load_json(candidate)
+        if doc and isinstance(doc.get("components"), list):
+            deps = doc.get("dependencies")
+            return deps if isinstance(deps, list) else []
+    return []
+
 
 def _software_components(sbom_dir: Path, reports_dir: Path) -> list[dict]:
     """Lift `components` straight out of the syft software SBOM (and pip-audit).
@@ -225,6 +294,21 @@ def _markllm_card(reports_dir: Path) -> dict[str, dict]:
     return {res["model_id"]: res}
 
 
+def _load_model_baseline() -> dict:
+    """evals/model-baseline.json, resolved like the dataset baseline. Optional
+    `producer` and `license: {id|name}` keys fill the model component's supplier and
+    licence; without them those stay explicitly UNKNOWN rather than silently absent."""
+    env = os.environ.get("MODEL_BASELINE_FILE")
+    path = Path(env) if env else _first_existing(None, "evals/model-baseline.json")
+    data = _load_json(path)
+    return data if isinstance(data, dict) else {}
+
+
+def _scan_value(state: str, value: Any) -> str:
+    """A scanner count is only a count when its report is `present`."""
+    return str(value) if state == "present" else "not-scanned"
+
+
 def _model_components(
     evidence_dir: Path, reports_dir: Path, model_dir: Path
 ) -> list[dict]:
@@ -235,7 +319,22 @@ def _model_components(
         if isinstance(modelscan, dict)
         else {}
     )
+    modelscan_state = _input_state(reports_dir / "modelscan.json")
+    modelscan_files = (
+        (modelscan.get("summary", {}).get("scanned", {}) or {}).get("total_scanned")
+        if isinstance(modelscan, dict) else None
+    )
+    # ModelScan does not parse GGUF: a run that scanned zero files found nothing
+    # because it looked at nothing. That is not-scanned, not zero criticals.
+    if modelscan_state == "present" and modelscan_files == 0:
+        modelscan_state = "skipped"
     modelaudit = _load_json(reports_dir / "modelaudit-summary.json") or {}
+    modelaudit_state = _input_state(reports_dir / "modelaudit-summary.json")
+    baseline = _load_model_baseline()
+    evals_ran = any(
+        _input_state(reports_dir / f) == "present"
+        for f in ("refusal-eval.json", "simpleqa-eval.json", "markllm-results.json")
+    )
     clamav = _load_json(reports_dir / "clamav-model.json") or {}
     hf = _load_json(reports_dir / "hf-scan" / "summary.json") or {}
     # hf-artifact-scan writes its per-repo records under "gated" (both the skip and
@@ -267,10 +366,14 @@ def _model_components(
 
         props = [
             _prop("artifact.path", path),
-            _prop("modelscan.critical", scan_summary.get("CRITICAL", 0)),
-            _prop("modelscan.high", scan_summary.get("HIGH", 0)),
-            _prop("modelaudit.critical", modelaudit.get("critical", 0)),
-            _prop("modelaudit.findings", modelaudit.get("findings", 0)),
+            _prop("modelscan.state", modelscan_state),
+            _prop("modelscan.files_scanned",
+                  modelscan_files if modelscan_files is not None else "unknown"),
+            _prop("modelscan.critical", _scan_value(modelscan_state, scan_summary.get("CRITICAL", 0))),
+            _prop("modelscan.high", _scan_value(modelscan_state, scan_summary.get("HIGH", 0))),
+            _prop("modelaudit.state", modelaudit_state),
+            _prop("modelaudit.critical", _scan_value(modelaudit_state, modelaudit.get("critical", 0))),
+            _prop("modelaudit.findings", _scan_value(modelaudit_state, modelaudit.get("findings", 0))),
             _prop("clamav.infected", clamav.get("infected", "unknown")),
             _prop("signed", "true" if signed else "false"),
             # Fix #32b — distinguish "a signature exists" (signed) from "we checked it"
@@ -281,21 +384,33 @@ def _model_components(
         if verdict.get("reason"):
             props.append(_prop("model.verified.reason", verdict["reason"]))
 
-        model_card: dict[str, Any] = {
-            "modelParameters": {},
-            "quantitativeAnalysis": {},
-            "considerations": {
-                "technicalLimitations": [
-                    "Integrity attested via SHA-256 digest and Sigstore signature; "
-                    "behavioural safety covered by the ai-eval stage."
-                ],
-            },
-        }
+        # technicalLimitations states what this run did NOT establish. It was a fixed
+        # sentence asserting integrity and behavioural-safety coverage regardless of
+        # whether the model was signed or any eval ran.
+        limitations: list[str] = []
+        if not signed:
+            limitations.append("No signature is attached to this artifact in this run.")
+        elif verdict["state"] != "true":
+            limitations.append(
+                "A signature is attached but was not verified in this run ("
+                + verdict.get("reason", "no reason recorded") + ").")
+        if modelscan_state != "present":
+            limitations.append(
+                "ModelScan did not scan this artifact (state=" + modelscan_state
+                + "; ModelScan does not parse GGUF).")
+        if modelaudit_state != "present":
+            limitations.append("ModelAudit did not scan this artifact (state=" + modelaudit_state + ").")
+        if not evals_ran:
+            limitations.append("No behavioural evaluation ran in this pipeline run.")
+        model_card: dict[str, Any] = {"modelParameters": {}, "quantitativeAnalysis": {}}
+        if limitations:
+            model_card["considerations"] = {"technicalLimitations": limitations}
 
         # HF repo ids carry mixed case (e.g. "Qwen/Qwen2.5-1.5B-Instruct") while the
         # signed model path/name are lowercase GGUF, so all id-to-artifact matching
         # below is case-insensitive against both the path and the component name.
         path_l, name_l = path.lower(), name.lower()
+        hf_match: tuple[str, dict] | None = None
 
         # Fold HuggingFace provenance metadata in when this artifact maps to an HF
         # repo. hf-artifact-scan records flat provenance fields per repo (author,
@@ -304,6 +419,7 @@ def _model_components(
         for hf_id, rec in hf_by_id.items():
             hf_base = hf_id.split("/")[-1].lower() if hf_id else ""
             if hf_base and (hf_base in path_l or hf_base in name_l):
+                hf_match = (hf_id, rec)
                 props.append(_prop("huggingface.repo", hf_id))
                 props.append(_prop("huggingface.gated", rec.get("gated", "unknown")))
                 if rec.get("author"):
@@ -339,15 +455,43 @@ def _model_components(
                 if metrics.get("detections_completed") is not None:
                     props.append(_prop("markllm.detections_completed", metrics["detections_completed"]))
 
-        components.append({
+        # CISA minimum elements for the model itself: version, identifier, producer,
+        # licence. Each is either populated from evidence or explicitly UNKNOWN.
+        comp: dict[str, Any] = {
             "type": "machine-learning-model",
             "bom-ref": f"model:{path}",
             "name": name,
+            "version": "unknown",
             "hashes": [_sha256_hash(sha)],
             "modelCard": model_card,
             "externalReferences": ext_refs,
             "properties": props,
-        })
+        }
+        if hf_match:
+            hf_id, rec = hf_match
+            if rec.get("sha"):
+                comp["version"] = rec["sha"]
+                comp["purl"] = f"pkg:huggingface/{hf_id}@{rec['sha']}"
+            else:
+                comp["purl"] = f"pkg:huggingface/{hf_id}"
+            if rec.get("author"):
+                comp["supplier"] = {"name": rec["author"]}
+        if baseline.get("producer") and "supplier" not in comp:
+            comp["supplier"] = {"name": str(baseline["producer"])}
+        lic = baseline.get("license") if isinstance(baseline.get("license"), dict) else {}
+        if lic.get("id") and lic["id"].upper() not in ("NOASSERTION", "NONE"):
+            comp["licenses"] = [{"license": {"id": lic["id"]}}]
+        elif lic.get("name") or lic.get("id"):
+            comp["licenses"] = [{"license": {"name": lic.get("name") or lic["id"]}}]
+        if comp["version"] == "unknown":
+            props.append(_prop("version.disclosure", "UNKNOWN - no upstream revision recorded by hf-artifact-scan"))
+        if "purl" not in comp:
+            props.append(_prop("identifier.disclosure", "UNKNOWN - artifact not mapped to an upstream repository"))
+        if "supplier" not in comp:
+            props.append(_prop("supplier.disclosure", "UNKNOWN - add `producer` to evals/model-baseline.json"))
+        if "licenses" not in comp:
+            props.append(_prop("license.disclosure", "UNKNOWN - add `license` to evals/model-baseline.json"))
+        components.append(comp)
     return components
 
 
@@ -424,10 +568,14 @@ def _data_components(
     ext_refs = _signature_refs(sig, cert, subject=f"dataset {name}")
     signed = bool(ext_refs)
 
+    scan_state = _input_state(reports_dir / "dataset-scan.json")
     props = [
         _prop("dataset.size_bytes", download.get("size_bytes", "unknown")),
-        _prop("dataset.scan.findings", len(findings)),
-        _prop("dataset.scan.passed", "false" if findings else "true"),
+        _prop("dataset.scan.state", scan_state),
+        _prop("dataset.scan.findings", _scan_value(scan_state, len(findings))),
+        # `passed=true` requires a scan that RAN. No report is unknown, not a pass.
+        _prop("dataset.scan.passed",
+              ("false" if findings else "true") if scan_state == "present" else "unknown"),
         _prop("dataset.signed", "true" if signed else "false"),
     ]
 
@@ -634,11 +782,7 @@ def _data_quality_evidence(reports_dir: Path) -> tuple[list[dict], list[dict]]:
                            "true" if ge.get("success") else "false"))
         props.append(_prop("data_quality.great_expectations.expectations",
                            ge.get("expectations_evaluated", 0)))
-        refs.append({
-            "type": "other",
-            "url": "file://reports/great-expectations.json",
-            "comment": "Great Expectations content-quality validation",
-        })
+        refs.append(_evidence_ref(reports_dir, "great-expectations.json", "Great Expectations content-quality validation"))
 
     ev = _load_json(reports_dir / "evidently-drift.json")
     if isinstance(ev, dict) and not ev.get("skipped"):
@@ -649,29 +793,17 @@ def _data_quality_evidence(reports_dir: Path) -> tuple[list[dict], list[dict]]:
                                "true" if ev.get("drift_detected") else "false"))
             if ev.get("drifted_columns") is not None:
                 props.append(_prop("data_drift.columns", ev.get("drifted_columns")))
-        refs.append({
-            "type": "other",
-            "url": "file://reports/evidently-drift.json",
-            "comment": "Evidently data/feature drift report (dataset vs reference)",
-        })
+        refs.append(_evidence_ref(reports_dir, "evidently-drift.json", "Evidently data/feature drift report (dataset vs reference)"))
 
     yd = _load_json(reports_dir / "ydata-profile.json")
     if isinstance(yd, dict) and not yd.get("skipped"):
         props.append(_prop("data_quality.ydata_profile.present", "true"))
-        refs.append({
-            "type": "other",
-            "url": "file://reports/ydata-profile.json",
-            "comment": "YData dataset profile",
-        })
+        refs.append(_evidence_ref(reports_dir, "ydata-profile.json", "YData dataset profile"))
 
     dvc = _load_json(reports_dir / "dvc-status.json")
     if isinstance(dvc, dict) and not dvc.get("skipped"):
         props.append(_prop("data_lineage.dvc.present", "true"))
-        refs.append({
-            "type": "other",
-            "url": "file://reports/dvc-status.json",
-            "comment": "DVC tracked-vs-pinned data/model status",
-        })
+        refs.append(_evidence_ref(reports_dir, "dvc-status.json", "DVC tracked-vs-pinned data/model status"))
 
     return props, refs
 
@@ -744,6 +876,20 @@ _ACCEPTED_ANALYSIS: dict[str, dict] = {
     "cve-2026-42308": _ANALYSIS_MARKLLM_WONTFIX, "cve-2026-42310": _ANALYSIS_MARKLLM_WONTFIX,
     "cve-2025-69872": _ANALYSIS_DISKCACHE,                                      # diskcache — no fix
 }
+
+
+# An accepted risk is a time-bounded exception with a named owner, not a permanent
+# property of the source tree. CycloneDX `analysis` has no owner/expiry field, so both
+# ride as vulnerability properties. The content gate warns when the owner is
+# unassigned or the review date has passed.
+_ACCEPTED_REVIEW_BY = "2026-12-31"
+
+
+def _accepted_risk_props() -> list[dict]:
+    return [
+        _prop("accepted_risk.owner", os.environ.get("AIBOM_RISK_OWNER") or "UNASSIGNED"),
+        _prop("accepted_risk.review_by", os.environ.get("AIBOM_RISK_REVIEW_BY") or _ACCEPTED_REVIEW_BY),
+    ]
 
 
 # Advisory aliases: security databases assign different IDs to the SAME flaw
@@ -868,6 +1014,7 @@ def _vulnerabilities(reports_dir: Path, components: list[dict]) -> list[dict]:
         analysis = _ACCEPTED_ANALYSIS.get(cid.lower())
         if analysis:
             entry["analysis"] = analysis
+            entry.setdefault("properties", []).extend(_accepted_risk_props())
         group = group_by_ref.get(ref)
         if group:
             entry.setdefault("properties", []).append(_prop("group", group))
@@ -920,6 +1067,201 @@ def _vulnerabilities(reports_dir: Path, components: list[dict]) -> list[dict]:
     return vulns
 
 
+# ── services + directed data flows ───────────────────────────────────────────
+
+def _flow(fid: str, name: str, direction: str, classification: str,
+          source: str, destination: str, description: str = "") -> dict:
+    """One material data movement. CycloneDX 1.6 `serviceData` has no bom-ref, so the
+    stable flow identifier is carried as the prefix of `name`."""
+    f = {"name": f"{fid} {name}", "flow": direction, "classification": classification,
+         "source": [source], "destination": [destination]}
+    if description:
+        f["description"] = description
+    return f
+
+
+def _services(reports_dir: Path, evidence_dir: Path, root_ref: str,
+              models: list[dict], data: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """External services this RUN actually touched, with the flows that crossed out of
+    the CI job. Evidence-driven like everything else: a service appears only when a
+    report proves the run used it. Returns (services, extra_model_components,
+    dependency_edges)."""
+    services: list[dict] = []
+    extra_models: list[dict] = []
+    edges: list[dict] = []
+
+    def svc(ref: str, name: str, zone: str, provider: str | None, flows: list[dict],
+            description: str, endpoints: list[str] | None = None,
+            authenticated: bool | None = None, props: list[dict] | None = None) -> None:
+        s: dict[str, Any] = {"bom-ref": ref, "name": name, "trustZone": zone,
+                             "x-trust-boundary": True, "description": description,
+                             "data": flows}
+        if provider:
+            s["provider"] = {"name": provider}
+        if endpoints:
+            s["endpoints"] = endpoints
+        if authenticated is not None:
+            s["authenticated"] = authenticated
+        if props:
+            s["properties"] = props
+        services.append(s)
+
+    # Hugging Face Hub — model and/or dataset pulled in this run.
+    hf_used = _input_state(reports_dir / "hf-scan" / "summary.json") == "present" or any(
+        p.get("name") == f"{PROP_NS}:dataset.platform" and "hugging" in str(p.get("value", "")).lower()
+        for c in data for p in c.get("properties", []))
+    if hf_used:
+        svc("svc:huggingface-hub", "Hugging Face Hub", "third-party", "Hugging Face",
+            [_flow("F-01", "artifact download", "inbound",
+                   "model weights and dataset files (public, digest-verified after download)",
+                   "svc:huggingface-hub", root_ref)],
+            "Upstream distribution point for the model and dataset fixtures. Distribution "
+            "point, not producer.", endpoints=["https://huggingface.co"],
+            props=[_prop("boundary.F-01", "auth=optional HF token; encryption=TLS; "
+                                          "integrity=SHA-256 pin checked by the download jobs")])
+
+    # Sigstore — any embedded model/dataset signature proves Fulcio + Rekor were used.
+    sigstore_used = any(
+        r.get("type") == "digital-signature"
+        for c in models + data for r in c.get("externalReferences", []))
+    if sigstore_used:
+        svc("svc:sigstore", "Sigstore public good instance (Fulcio + Rekor)", "third-party",
+            "Sigstore",
+            [_flow("F-02", "keyless signing", "outbound",
+                   "GitLab OIDC identity token, artifact digests. Rekor entries are PUBLIC "
+                   "and permanent: signer identity and digests are disclosed.",
+                   root_ref, "svc:sigstore")],
+            "Issues short-lived signing certificates and records signatures in a public "
+            "transparency log.", authenticated=True,
+            props=[_prop("boundary.F-02", "auth=GitLab OIDC (SIGSTORE_ID_TOKEN); encryption=TLS")])
+
+    # ReversingLabs cloud — package identifiers leave the environment.
+    if _input_state(reports_dir / "secure-software.json") == "present":
+        svc("svc:reversinglabs", "ReversingLabs Spectra Assure Community API", "third-party",
+            "ReversingLabs",
+            [_flow("F-03", "package reputation lookup", "outbound",
+                   "PURLs of every pinned dependency (discloses the dependency set)",
+                   root_ref, "svc:reversinglabs"),
+             _flow("F-04", "package reputation result", "inbound",
+                   "per-package assurance verdicts", "svc:reversinglabs", root_ref)],
+            "Third-party software-assurance lookup.", authenticated=True,
+            props=[_prop("credential", "handle=RL_TOKEN; method=bearer token; scope=community API"),
+                   _prop("boundary.F-03,F-04", "auth=bearer token; encryption=TLS; egress-logging=UNKNOWN")])
+
+    # Live-eval endpoint — the hosted model under evaluation. Bounded at the endpoint:
+    # nothing is asserted about how the provider serves it.
+    refusal = _load_json(reports_dir / "refusal-eval.json") or {}
+    simpleqa = _load_json(reports_dir / "simpleqa-eval.json") or {}
+    ran = [r for r in (refusal, simpleqa) if isinstance(r, dict) and r and not r.get("skipped", True)]
+    if ran:
+        host = next((r.get("endpoint_host") for r in ran if r.get("endpoint_host")), None)
+        model_id = next((r.get("model") for r in ran if r.get("model")), None) or "unknown"
+        flows = []
+        if refusal in ran:
+            flows += [_flow("F-05", "refusal-eval prompts", "outbound",
+                            "harmful-behaviors probe prompts"
+                            + (" with the deployed system prompt" if refusal.get("system_prompt_applied") else ""),
+                            root_ref, "svc:model-endpoint"),
+                      _flow("F-06", "refusal-eval completions", "inbound",
+                            "model completions (may contain harmful content when the model complies)",
+                            "svc:model-endpoint", root_ref)]
+        if simpleqa in ran:
+            flows += [_flow("F-07", "SimpleQA questions and grading requests", "outbound",
+                            "benchmark questions; answers re-sent for grading",
+                            root_ref, "svc:model-endpoint"),
+                      _flow("F-08", "SimpleQA answers and grades", "inbound",
+                            "model answers and grader verdicts", "svc:model-endpoint", root_ref)]
+        svc("svc:model-endpoint", "model endpoint under evaluation (OpenAI-compatible)",
+            "model-provider", None, flows,
+            "Hosted model reached through MODEL_ENDPOINT. Provider-side serving internals are "
+            "out of scope and unknown.", endpoints=[f"https://{host}"] if host else None,
+            authenticated=True,
+            props=[_prop("credential", "handle=MODEL_API_KEY; method=bearer token; scope=MODEL_ENDPOINT"),
+                   _prop("boundary.F-05..F-08", "auth=bearer token; encryption=TLS assumed from endpoint "
+                                                "scheme, not verified; egress-logging=eval report only")])
+        eval_ref = f"model:endpoint:{model_id}"
+        eval_props = [
+            _prop("role", "model under evaluation (hosted; weights not held by this pipeline)"),
+            _prop("requested_id", model_id),
+            # The reports record the id this pipeline SENT, not the snapshot the provider
+            # resolved it to. Until the eval scripts capture the response `model` field,
+            # a provider alias repoint is invisible here.
+            _prop("resolved_id.disclosure", "UNKNOWN - eval reports record the requested id only"),
+            _prop("hash.disclosure", "UNKNOWN - provider-hosted, artifact inaccessible"),
+            _prop("supplier.disclosure", "UNKNOWN - not derivable from the endpoint host"),
+            _prop("license.disclosure", "UNKNOWN - provider terms not captured"),
+        ]
+        grader = simpleqa.get("grader_model") if simpleqa in ran else None
+        if grader:
+            eval_props.append(_prop("simpleqa.grader_model", grader))
+            if grader == model_id:
+                eval_props.append(_prop("simpleqa.self_graded", "true"))
+        extra_models.append({"type": "machine-learning-model", "bom-ref": eval_ref,
+                             "name": model_id, "version": "unknown", "properties": eval_props})
+        edges.append({"ref": "svc:model-endpoint", "dependsOn": [eval_ref]})
+
+    return services, extra_models, edges
+
+
+# Every producer report the BOM reads, by ledger name. The completeness claim is
+# derived from this, so adding a producer means adding it here.
+_LEDGER: dict[str, str] = {
+    "syft-sbom": "SBOM:sbom.cyclonedx.json",
+    "pip-audit": "pip-audit.json",
+    "lockfile-audit": "lockfile-audit.json",
+    "grype": "grype.json",
+    "trivy-fs": "trivy-fs.json",
+    "markllm-deps-audit": "markllm-deps-audit.json",
+    "secure-software": "secure-software.json",
+    "modelscan": "modelscan.json",
+    "modelaudit": "modelaudit-summary.json",
+    "clamav-model": "clamav-model.json",
+    "hf-scan": "hf-scan/summary.json",
+    "dataset-download": "dataset-download.json",
+    "dataset-scan": "dataset-scan.json",
+    "dataset-redact": "dataset-redact.json",
+    "great-expectations": "great-expectations.json",
+    "evidently-drift": "evidently-drift.json",
+    "ydata-profile": "ydata-profile.json",
+    "dvc-status": "dvc-status.json",
+    "markllm-results": "markllm-results.json",
+    "refusal-eval": "refusal-eval.json",
+    "simpleqa-eval": "simpleqa-eval.json",
+    "model-digests": "EVIDENCE:model-digests.txt",
+    "signature-verification": "EVIDENCE:signature-verification.jsonl",
+}
+
+
+# Inputs that decide WHAT IS LISTED (inventory). The rest decide what a listed item's
+# verdict fields say, and already surface as not-scanned / unknown when missing.
+# `skipped` is a producer that ran and truthfully had nothing to do (no dataset
+# configured, evals switched off), so the inventory is still complete. `absent` is a
+# producer that never reported, so whether its items exist is unknown.
+_INVENTORY_INPUTS = ("syft-sbom", "model-digests", "dataset-download",
+                     "markllm-deps-audit", "refusal-eval", "simpleqa-eval")
+
+
+def _input_ledger(sbom_dir: Path, reports_dir: Path, evidence_dir: Path) -> dict[str, str]:
+    ledger: dict[str, str] = {}
+    for name, loc in _LEDGER.items():
+        if loc.startswith("SBOM:"):
+            path = sbom_dir / loc[5:]
+        elif loc.startswith("EVIDENCE:"):
+            path = evidence_dir / loc[9:]
+        else:
+            path = reports_dir / loc
+        ledger[name] = _input_state(path)
+    # The live-eval signals are off until MODEL_ENDPOINT *and* EVAL_MODEL_ID are set.
+    # With the switch off, a missing eval report is not a producer that failed to
+    # report; the evals were never configured, so no corpus or endpoint was used and
+    # the inventory is not made partial by it.
+    if not (os.environ.get("MODEL_ENDPOINT") and os.environ.get("EVAL_MODEL_ID")):
+        for name in ("refusal-eval", "simpleqa-eval"):
+            if ledger.get(name) == "absent":
+                ledger[name] = "not-configured"
+    return ledger
+
+
 # ── assembly ─────────────────────────────────────────────────────────────────
 
 def build_bom(
@@ -941,6 +1283,14 @@ def build_bom(
     dq_props, dq_refs = _data_quality_evidence(reports_dir)
 
     root_ref = "root:" + os.environ.get("CI_PROJECT_PATH_SLUG", "gaips-application")
+    services, eval_models, svc_edges = _services(reports_dir, evidence_dir, root_ref, models, data)
+    models = models + eval_models
+    ledger = _input_ledger(sbom_dir, reports_dir, evidence_dir)
+    missing = sorted(k for k in _INVENTORY_INPUTS if ledger.get(k) == "absent")
+    unverified = sorted(k for k, v in ledger.items()
+                        if v != "present" and k not in _INVENTORY_INPUTS)
+    author = os.environ.get("AIBOM_AUTHOR") or os.environ.get("GITLAB_USER_NAME")
+    supplier = os.environ.get("AIBOM_SUPPLIER") or os.environ.get("CI_PROJECT_NAMESPACE")
     root = {
         "type": "application",
         "bom-ref": root_ref,
@@ -949,6 +1299,8 @@ def build_bom(
         "properties": dq_props,
         "externalReferences": dq_refs,
     }
+    if supplier:
+        root["supplier"] = {"name": supplier}
 
     components = models + data + software
     vulnerabilities = _vulnerabilities(reports_dir, components)   # Fix #29
@@ -980,10 +1332,83 @@ def build_bom(
                 _prop("bom.counts.software.pipeline", len(syft_sw)),
                 _prop("bom.counts.software.markllm", len(markllm_sw)),
                 _prop("bom.counts.vulnerabilities", len(vulnerabilities)),
-            ] + _version_properties(evidence_dir),
+                _prop("bom.counts.services", len(services)),
+                # ── AIBOM header (OWASP AIBOM Foundations Guide v1.0) ──
+                _prop("aibom.graphType", "training and assurance pipeline"),
+                _prop("aibom.scope.included",
+                      "One pipeline run at the recorded commit: the model and dataset "
+                      "artifacts it verified and signed, the eval corpora it actually used, "
+                      "the software closure of the CI jobs, and the external services the "
+                      "run touched."),
+                _prop("aibom.scope.excluded",
+                      "The deployed RAG application and Weaviate under deployment/ (they need "
+                      "their own runtime-system AIBOM). CI tool container images. The GitLab "
+                      "runner and its host. The package registry that publish-signed-artifacts "
+                      "writes to after this BOM is assembled. Provider-side internals of every "
+                      "listed service."),
+                _prop("aibom.generationMethod", "build telemetry (assembled in CI from job reports)"),
+                _prop("aibom.completenessClaim",
+                      ("complete for the included scope" if not missing else
+                       "PARTIAL - inventory inputs absent: " + ", ".join(missing))
+                      + (". Verdict inputs not present (fields read not-scanned or unknown): "
+                         + ", ".join(unverified) if unverified else "")),
+                _prop("aibom.regeneration",
+                      "Every pipeline run. Each run is a new document (new serialNumber) for a "
+                      "new root version (commit). A BOM whose commit.sha differs from the "
+                      "revision being deployed is stale."),
+                _prop("aibom.verdictBoundary",
+                      "Records what the run contained and did. Asserts nothing about whether "
+                      "the system is compliant, safe, or acceptable."),
+            ] + [_prop(f"input.{k}", v) for k, v in sorted(ledger.items())]
+              + _version_properties(evidence_dir),
         },
         "components": components,
     }
+    if author:
+        bom["metadata"]["authors"] = [{"name": author}]
+    else:
+        bom["metadata"]["properties"].append(
+            _prop("author.disclosure", "UNKNOWN - set AIBOM_AUTHOR"))
+    if services:
+        bom["services"] = services
+
+    # dependencies[]: syft's software graph (kept to refs this BOM actually contains),
+    # plus root -> models, datasets, services, and every software component nothing
+    # else depends on; plus service -> served-model edges.
+    known = {c["bom-ref"] for c in components if c.get("bom-ref")} | {s["bom-ref"] for s in services}
+    sw_deps = []
+    depended: set[str] = set()
+    for d in _software_dependencies(sbom_dir, reports_dir):
+        if d.get("ref") in known:
+            on = [r for r in (d.get("dependsOn") or []) if r in known]
+            depended.update(on)
+            sw_deps.append({"ref": d["ref"], "dependsOn": on})
+    have = {d["ref"] for d in sw_deps}
+    eval_refs = {m["bom-ref"] for m in eval_models}
+    root_on = ([m["bom-ref"] for m in models if m["bom-ref"] not in eval_refs]
+               + [d["bom-ref"] for d in data] + [s["bom-ref"] for s in services]
+               + [c["bom-ref"] for c in software if c.get("bom-ref") and c["bom-ref"] not in depended])
+    bom["dependencies"] = ([{"ref": root_ref, "dependsOn": root_on}] + svc_edges + sw_deps
+                           + [{"ref": c["bom-ref"], "dependsOn": []} for c in software
+                              if c.get("bom-ref") and c["bom-ref"] not in have])
+    bom["metadata"]["properties"].append(
+        _prop("dependencies.software_graph", "from-syft" if sw_deps else
+              "UNKNOWN - source SBOM carried no dependencies[]; software edges are root-only"))
+
+    # Completeness claim, derived from the ledger. `complete` only when no inventory
+    # input is absent; provider internals are always `unknown`.
+    bom["compositions"] = [{
+        "bom-ref": "comp:pipeline-run",
+        "aggregate": "complete" if not missing else "incomplete",
+        "assemblies": [root_ref],
+        "dependencies": [root_ref],
+    }]
+    if services:
+        bom["compositions"].append({
+            "bom-ref": "comp:external-services",
+            "aggregate": "unknown",
+            "assemblies": [s["bom-ref"] for s in services],
+        })
     if vulnerabilities:
         bom["vulnerabilities"] = vulnerabilities
     return bom

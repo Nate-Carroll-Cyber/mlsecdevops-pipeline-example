@@ -170,6 +170,18 @@ verification identifiers, not secrets; leave variable expansion off.
 
 > **AI-BOM signing is keyless.** `ai-bom-sign` signs with cosign keyless (Fulcio + Rekor) via the GitLab `SIGSTORE_ID_TOKEN`, exactly like `model-sign`/`dataset-sign` — there is **no signing-key variable** to set. The PreSync hook verifies the BOM against the CI signer identity (`MODEL_SIGNING_IDENTITY` / `SIGSTORE_OIDC_ISSUER`), no public-key Secret required.
 
+### 6a. AI-BOM authorship and accepted-risk ownership
+
+All optional. `build_ai_bom.py` reads them at assemble time. When one is unset the BOM says so explicitly rather than omitting the field.
+
+| Variable | Source | Masked | Default | Purpose |
+| --- | --- | --- | --- | --- |
+| `AIBOM_AUTHOR` | you | No | `GITLAB_USER_NAME`, else unset | Recorded as `metadata.authors`. Unset with no `GITLAB_USER_NAME` emits `gaips:author.disclosure=UNKNOWN` and the content gate warns. |
+| `AIBOM_SUPPLIER` | you | No | `CI_PROJECT_NAMESPACE` | Recorded as the root component's `supplier`. |
+| `AIBOM_RISK_OWNER` | you | No | `UNASSIGNED` | Named owner for every accepted-risk `analysis` in `vulnerabilities[]`. The content gate warns while it is `UNASSIGNED`. |
+| `AIBOM_RISK_REVIEW_BY` | you | No | `_ACCEPTED_REVIEW_BY` in `build_ai_bom.py` | ISO date by which accepted risks must be re-reviewed. The content gate errors once it has passed. |
+| `MODEL_BASELINE_FILE` | you | No | `evals/model-baseline.json` | Where the builder looks for the optional `producer` and `license` keys that populate the model component's supplier and licence. |
+
 ---
 
 ## 7. Tuning thresholds
